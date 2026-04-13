@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+backend/logs/
+
+# Database
+*.db
+*.sqlite
+
+# Environment
+.env
+.env.local
+
+# Config (含敏感信息，使用 .example.json 代替)
+backend/config.json
+backend/db_config.json
+backend/encryption_key.json
+encryption_key.json
+
+# Data
+backend/data/
+
+# Scripts 目录（与 backend 同级）
+scripts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary
+*.tmp
+*.bak

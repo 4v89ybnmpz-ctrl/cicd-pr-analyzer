@@ -1,0 +1,71 @@
+{
+  "_comment": "可配置模式解析器规则文件，新增项目只需添加规则，无需写代码",
+  "rules": [
+    {
+      "name": "flutter-luci",
+      "description": "Flutter LUCI/Chromium CI 解析规则",
+      "priority": 9,
+      "match_projects": ["flutter/*"],
+      "match_users": ["auto-submit[bot]", "flutter-dashboard[bot]"],
+      "match_patterns": [
+        "cr-buildbucket\\.appspot\\.com",
+        "autosubmit label was removed",
+        "It looks like this pull request may not have tests"
+      ],
+      "status_rules": {
+        "success": ["has passed", "all checks.*passed"],
+        "failed": ["has failed", "was removed.*has failed"],
+        "running": ["is in progress", "is pending"],
+        "queued": ["waiting for", "queued"]
+      },
+      "extract_rules": {
+        "url": "https?://[^\\s]+",
+        "failed_check": "\\[([^\\]]+)\\]\\(https://cr-buildbucket\\.appspot\\.com/[^)]+\\)",
+        "commit": "[0-9a-f]{7,40}"
+      }
+    },
+    {
+      "name": "jenkins-ci",
+      "description": "Jenkins CI 通用解析规则",
+      "priority": 15,
+      "match_users": ["jenkins-bot", "jenkinsci"],
+      "match_patterns": [
+        "build\\s+(passed|failed|unstable)",
+        "Jenkins.*build",
+        "\\[build\\]"
+      ],
+      "status_rules": {
+        "success": ["build passed", "build succeeded", "BUILD SUCCESS"],
+        "failed": ["build failed", "BUILD FAILURE", "build unstable"],
+        "running": ["build in progress", "building"],
+        "queued": ["queued", "waiting"]
+      },
+      "extract_rules": {
+        "url": "https?://[^\\s]+",
+        "duration": "(\\d+h\\s*\\d*m\\s*\\d*s|\\d+\\s*(?:ms|seconds?|minutes?|hours?))",
+        "job_name": "job\\s+[`'\"]?([^`'\"\\s]+)"
+      }
+    },
+    {
+      "name": "zuul-ci",
+      "description": "OpenStack Zuul CI 解析规则",
+      "priority": 15,
+      "match_users": ["zuul", "zuul[bot]"],
+      "match_patterns": [
+        "pipeline\\s+(passed|failed)",
+        "gate.*passed",
+        "check.*failed"
+      ],
+      "status_rules": {
+        "success": ["pipeline passed", "gate.*passed", "check.*passed"],
+        "failed": ["pipeline failed", "gate.*failed", "check.*failed"],
+        "running": ["pipeline running", "in progress"],
+        "queued": ["queued", "waiting"]
+      },
+      "extract_rules": {
+        "url": "https?://[^\\s]+",
+        "pipeline": "(gate|check|post) pipeline"
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "database": {
+    "host": "127.0.0.1",
+    "port": 27017,
+    "username": "admin",
+    "password": "使用python backend/password_manager.py encrypt 你的密码 生成加密密码填入此处",
+    "database": "github_pr_db",
+    "encrypted": true
+  }
+}

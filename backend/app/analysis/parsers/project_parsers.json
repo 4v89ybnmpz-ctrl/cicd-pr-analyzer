@@ -1,0 +1,8 @@
+{
+  "project_parsers": {
+    "NVIDIA/cccl": "nvidia-cccl",
+    "NVIDIA/*": "nvidia-cccl",
+    "rust-lang/rust": "rust-bors",
+    "rust-lang/*": "rust-bors"
+  }
+}

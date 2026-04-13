@@ -1,0 +1,68 @@
+version: '3.8'
+
+secrets:
+  mongodb_root_password:
+    file: ./secrets/mongodb_root_password.txt
+
+services:
+  # MongoDB 数据库 - 用于存储 JSON 数据
+  mongodb:
+    image: mongo:7.0
+    container_name: github_pr_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    secrets:
+      - mongodb_root_password
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_DATABASE: github_pr_db
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    networks:
+      - github_pr_network
+    # 使用entrypoint来设置密码
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export MONGO_INITDB_ROOT_PASSWORD=$$(cat /run/secrets/mongodb_root_password)
+        exec docker-entrypoint.sh mongod
+
+  # Mongo Express - MongoDB Web 管理界面
+  mongo-express:
+    image: mongo-express:1.0.0
+    container_name: github_pr_mongo_express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    secrets:
+      - mongodb_root_password
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      # 从secret文件读取密码
+      ME_CONFIG_MONGODB_ADMINPASSWORD_FILE: /run/secrets/mongodb_root_password
+      ME_CONFIG_BASICAUTH: false
+    depends_on:
+      - mongodb
+    networks:
+      - github_pr_network
+    # 使用entrypoint来设置密码
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export ME_CONFIG_MONGODB_ADMINPASSWORD=$$(cat /run/secrets/mongodb_root_password)
+        export ME_CONFIG_MONGODB_URL=mongodb://admin:$$ME_CONFIG_MONGODB_ADMINPASSWORD@mongodb:27017/
+        exec /sbin/tini -- /docker-entrypoint.sh
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+
+networks:
+  github_pr_network:
+    driver: bridge

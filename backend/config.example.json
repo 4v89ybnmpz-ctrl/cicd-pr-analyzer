@@ -1,0 +1,50 @@
+{
+  "app_name": "GitHub PR API",
+  "version": "1.0.0",
+  "host": "0.0.0.0",
+  "port": 1234,
+  "debug": true,
+  "tokens": [
+    "ghp_你的GitHubToken1",
+    "ghp_你的GitHubToken2"
+  ],
+  "gitcode_tokens": [
+    "你的AtomGitToken"
+  ],
+  "gitcode_settings": {
+    "base_url": "https://gitcode.net/api/v4",
+    "per_page": 100,
+    "state": "all",
+    "request_delay": 0.5,
+    "max_workers": 3
+  },
+  "cache": {
+    "ttl": 300
+  },
+  "api_settings": {
+    "per_page": 100,
+    "state": "all",
+    "request_delay": 0.5,
+    "max_workers": 3
+  },
+  "database": {
+    "host": "127.0.0.1",
+    "port": 27017,
+    "username": "admin",
+    "password": "使用python backend/password_manager.py encrypt 你的密码 生成加密密码填入此处",
+    "database": "github_pr_db",
+    "encrypted": true
+  },
+  "logging": {
+    "log_dir": "logs",
+    "log_file": "server.log",
+    "log_level": "INFO",
+    "max_size": 10485760,
+    "backup_count": 5
+  },
+  "cors": {
+    "Gallow_origins": ["*"],
+    "allow_methods": ["*"],
+    "allow_headers": ["*"]
+  }
+}
