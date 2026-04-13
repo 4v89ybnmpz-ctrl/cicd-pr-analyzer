@@ -31,7 +31,7 @@ class DatabaseService:
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 27017,
-                 username: str = "admin", password: str = "admin123",
+                 username: str = "admin", password: str = "",
                  database: str = "github_pr_db"):
         """
         初始化数据库服务

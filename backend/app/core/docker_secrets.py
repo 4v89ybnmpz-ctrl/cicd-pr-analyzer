@@ -56,13 +56,13 @@ def get_password_from_env_or_secret(env_var: str = "MONGODB_ROOT_PASSWORD",
     return None
 
 
-def get_database_password(default_password: str = "admin123") -> str:
+def get_database_password(default_password: str = "") -> str:
     """
     获取数据库密码
     按优先级从多个来源获取密码：
     1. Docker Secrets
-    2. 环境变量
-    3. 默认值
+    2. 环境变量 MONGODB_ROOT_PASSWORD
+    3. 默认值（空字符串，需通过环境变量或Docker Secrets配置）
     :param default_password: 默认密码
     :return: 密码
     """
@@ -71,5 +71,9 @@ def get_database_password(default_password: str = "admin123") -> str:
     if password:
         return password
     
-    logger.info(f"使用默认密码")
+    if default_password:
+        logger.warning("使用传入的默认密码，建议通过环境变量 MONGODB_ROOT_PASSWORD 或 Docker Secrets 配置密码")
+        return default_password
+    
+    logger.warning("未配置数据库密码！请设置环境变量 MONGODB_ROOT_PASSWORD 或使用 Docker Secrets")
     return default_password

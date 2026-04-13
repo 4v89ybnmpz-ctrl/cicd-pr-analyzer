@@ -114,7 +114,7 @@ def main():
                             host=db_config_data.get('host', '127.0.0.1'),
                             port=db_config_data.get('port', 27017),
                             username=db_config_data.get('username', 'admin'),
-                            password=db_config_data.get('password', 'admin123'),
+                            password=db_config_data.get('password', os.environ.get('MONGODB_ROOT_PASSWORD', '')),
                             database=db_config_data.get('database', 'github_pr_db')
                         )
                         

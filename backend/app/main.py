@@ -23,6 +23,7 @@ from app.config.config_manager import config_manager
 from app.services.github_service import GitHubPRService, TokenPool
 from app.services.gitcode_service import GitCodePRService, GitCodeTokenPool
 from app.services.database_service import DatabaseService
+from app.core.docker_secrets import get_database_password
 
 # 导入 API 路由
 from app.api.routes import create_router
@@ -104,7 +105,7 @@ try:
             host=db_config.get('host', '127.0.0.1'),
             port=db_config.get('port', 27017),
             username=db_config.get('username', 'admin'),
-            password=db_config.get('password', 'admin123'),
+            password=db_config.get('password') or get_database_password(),
             database=db_config.get('database', 'github_pr_db')
         )
         logger.info(f"从配置文件加载数据库配置（密码加密: {db_config.get('encrypted', False)}）")
