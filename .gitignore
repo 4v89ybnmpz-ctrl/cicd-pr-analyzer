@@ -50,6 +50,11 @@ backend/db_config.json
 backend/encryption_key.json
 encryption_key.json
 
+# Secrets
+backend/secrets/*.txt
+backend/secrets/*.key
+backend/secrets/*.pem
+
 # Data
 backend/data/
 
