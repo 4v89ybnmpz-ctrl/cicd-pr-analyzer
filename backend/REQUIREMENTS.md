@@ -145,10 +145,10 @@
 
 
 ## 20. 版本控制
-- [ ] 初始化 Git 仓库（如果尚未初始化）
-- [ ] 配置 .gitignore 文件（排除 config.json、encryption_key.json、secrets/、logs/、__pycache__/、*.pyc、.env 等）
-- [ ] 创建初始提交，包含所有现有代码
-- [ ] 确保敏感信息（Token、密码、密钥）不会被提交到仓库
+- [x] 初始化 Git 仓库（如果尚未初始化）
+- [x] 配置 .gitignore 文件（排除 config.json、encryption_key.json、secrets/、logs/、__pycache__/、*.pyc、.env 等）
+- [x] 创建初始提交，包含所有现有代码
+- [x] 确保敏感信息（Token、密码、密钥）不会被提交到仓库
 
 ## 待开发功能
 - [x] 建立脚本获取 openlibing.com 流水线数据（已通过浏览器自动化模块 + AtomGit 评论提取实现）
