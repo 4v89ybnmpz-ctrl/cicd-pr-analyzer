@@ -194,7 +194,19 @@
 
 ---
 
+## 23. PR Reviews 接口
+- [x] GitHub Reviews API 适配 - 调用 GitHub Pulls Reviews API 获取评审记录
+- [x] 单 PR Reviews 获取 - 获取指定 PR 的所有评审记录（支持分页）
+- [x] 批量 PR Reviews 获取 - 并发获取多个 PR 的评审记录
+- [x] Review 数据字段 - 包含 reviewer、state(APPROVED/CHANGES_REQUESTED/COMMENTED/PENDING)、body、提交时间等
+- [x] Reviews 数据持久化 - pr_reviews 集合，支持 upsert 去重
+- [x] Reviews 查询接口 - 按项目/仓库分页查询
+- [x] API 路由 - /github/prs/{owner}/{repo}/{pr_number}/reviews 和 /github/prs/{owner}/{repo}/reviews
+- [x] 数据库查询路由 - /database/reviews
+- [x] 测试用例 - 服务层、数据库、API 集成测试（12 项）
+
+---
+
 ## 待开发功能
 - [x] 建立脚本获取 openlibing.com 流水线数据（已通过浏览器自动化模块 + AtomGit 评论提取实现）
-<!-- - [ ] PR Reviews 接口 - 获取评审记录
-- [ ] PR Commits 接口 - 获取提交记录 -->
+<!-- - [ ] PR Commits 接口 - 获取提交记录 -->

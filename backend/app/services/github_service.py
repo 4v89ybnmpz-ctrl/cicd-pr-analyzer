@@ -779,6 +779,138 @@ class GitHubPRService:
             "failed_count": failed_count
         }
 
+    def fetch_pr_reviews(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
+        """
+        获取指定 PR 的所有 Reviews
+        :param owner: 仓库所有者
+        :param repo: 仓库名称
+        :param pr_number: PR 编号
+        :return: Reviews 数据字典
+        """
+        logger.info(f"开始获取 {owner}/{repo} PR#{pr_number} 的 Reviews")
+
+        all_reviews = []
+        page = 1
+        error = None
+
+        try:
+            while True:
+                token = self.token_pool.get_token()
+                headers = {
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "GitHub-PR-Fetcher"
+                }
+
+                if token:
+                    headers["Authorization"] = f"token {token}"
+
+                url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+                params = {
+                    "per_page": self.per_page,
+                    "page": page
+                }
+
+                response = self._make_request(url, headers, params, 30)
+
+                if response.status_code == 404:
+                    error = "PR不存在"
+                    logger.warning(f"{owner}/{repo} PR#{pr_number} 不存在")
+                    break
+
+                if response.status_code != 200:
+                    error = f"API请求失败: {response.status_code}"
+                    logger.error(f"获取 {owner}/{repo} PR#{pr_number} Reviews 失败: {response.status_code}")
+                    break
+
+                reviews = response.json()
+
+                if not reviews:
+                    break
+
+                for review in reviews:
+                    user = review.get("user", {})
+                    all_reviews.append({
+                        "id": review.get("id"),
+                        "review_id": review.get("id"),
+                        "pr_number": pr_number,
+                        "user": user.get("login", ""),
+                        "user_id": user.get("id"),
+                        "user_type": user.get("type", "User"),
+                        "avatar_url": user.get("avatar_url"),
+                        "state": review.get("state"),
+                        "body": review.get("body"),
+                        "submitted_at": review.get("submitted_at"),
+                        "commit_id": review.get("commit_id"),
+                        "author_association": review.get("author_association"),
+                        "url": review.get("html_url"),
+                    })
+
+                page += 1
+                time.sleep(self.request_delay)
+
+            logger.info(f"获取 {owner}/{repo} PR#{pr_number} Reviews 完成，共 {len(all_reviews)} 条")
+
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取 {owner}/{repo} PR#{pr_number} Reviews 异常: {e}")
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": pr_number,
+            "reviews": all_reviews,
+            "total": len(all_reviews),
+            "error": error
+        }
+
+    def fetch_all_pr_reviews(self, owner: str, repo: str, pr_numbers: List[int]) -> Dict[str, Any]:
+        """
+        并发获取多个 PR 的 Reviews
+        :param owner: 仓库所有者
+        :param repo: 仓库名称
+        :param pr_numbers: PR 编号列表
+        :return: 批量获取结果
+        """
+        logger.info(f"开始并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 的 Reviews")
+
+        results = []
+        success_count = 0
+        failed_count = 0
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self.fetch_pr_reviews, owner, repo, pr_num): pr_num
+                for pr_num in pr_numbers
+            }
+
+            for future in as_completed(futures):
+                pr_num = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    if result["error"] is None:
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    results.append({
+                        "owner": owner, "repo": repo, "pr_number": pr_num,
+                        "reviews": [], "total": 0, "error": str(e)
+                    })
+                    logger.error(f"获取 {owner}/{repo} PR#{pr_num} Reviews 异常: {e}")
+
+        logger.info(f"并发获取 Reviews 完成，成功: {success_count}, 失败: {failed_count}")
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "results": results,
+            "total_prs": len(pr_numbers),
+            "success_count": success_count,
+            "failed_count": failed_count
+        }
+
     def fetch_all_pr_details_batch(self, owner: str, repo: str, pr_numbers: List[int]) -> Dict[str, Any]:
         """
         并发获取多个PR的评论和时间线

@@ -169,6 +169,29 @@ def register_github_routes(router, cache, github_service, db):
             "failed_count": result["failed_count"], "timestamp": datetime.now().isoformat()
         }
 
+    @router.get("/github/prs/{owner}/{repo}/{pr_number}/reviews")
+    async def get_pr_reviews(owner: str, repo: str, pr_number: int):
+        """获取单个 PR 的 Reviews"""
+        result = github_service.fetch_pr_reviews(owner, repo, pr_number)
+        if db is not None and result["error"] is None:
+            db.save_pr_reviews(owner, repo, pr_number, result)
+        return {"data": result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/github/prs/{owner}/{repo}/reviews")
+    async def get_all_pr_reviews(owner: str, repo: str, limit: int = 10):
+        """并发获取所有 PR 的 Reviews"""
+        pr_numbers = _get_pr_numbers(owner, repo, limit, db, github_service)
+        result = github_service.fetch_all_pr_reviews(owner, repo, pr_numbers)
+        if db is not None:
+            for item in result["results"]:
+                if item["error"] is None:
+                    db.save_pr_reviews(owner, repo, item["pr_number"], item)
+        return {
+            "owner": owner, "repo": repo, "results": result["results"],
+            "total_prs": len(pr_numbers), "success_count": result["success_count"],
+            "failed_count": result["failed_count"], "timestamp": datetime.now().isoformat()
+        }
+
     @router.get("/github/token-pool")
     async def get_token_pool():
         """获取 Token 池信息"""

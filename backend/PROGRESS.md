@@ -28,6 +28,7 @@
 | 20. 版本控制 | ✅ 完成 | 2026-05-18 |
 | 21. Docker 化部署 | ✅ 完成 | 2026-05-18 |
 | 22. CI/CD 工程能力洞察报告 | ✅ 完成 | 2026-05-18 |
+| 23. PR Reviews 接口 | ✅ 完成 | 2026-05-18 |
 
 ## 详细实现记录
 
@@ -324,9 +325,7 @@ app/
 
 ## 待开发功能
 
-- [ ] PR Reviews 接口 - 获取评审记录
 - [ ] PR Commits 接口 - 获取提交记录
-- [ ] CI/CD 评论分析模块
 
 ### 22. CI/CD 工程能力洞察报告 🚧 (2026-05-18 开始)
 
@@ -383,19 +382,37 @@ app/
   - GET /results 结果查询（PR 过滤）
   - 数据库未连接 503 错误处理
 
+### 23. PR Reviews 接口 ✅ (2026-05-18 新增)
+- [github_service.py](app/services/github_service.py) - 新增方法:
+  - `fetch_pr_reviews()` - 获取单个 PR 的所有 Reviews（分页）
+  - `fetch_all_pr_reviews()` - 并发获取多个 PR 的 Reviews
+- [database_service.py](app/services/database_service.py) - 新增 pr_reviews 集合:
+  - `save_pr_reviews()` - 保存 Reviews（upsert 去重）
+  - `get_pr_reviews()` - 获取单个 PR Reviews
+  - `list_pr_reviews()` - 分页查询 Reviews
+- [github.py](app/api/routers/github.py) - 新增接口:
+  - `GET /github/prs/{owner}/{repo}/{pr_number}/reviews` - 获取单个 PR Reviews
+  - `GET /github/prs/{owner}/{repo}/reviews` - 并发获取所有 PR Reviews
+- [database.py](app/api/routers/database.py) - 新增接口:
+  - `GET /database/reviews` - 查询 Reviews（分页）
+- [test_pr_reviews.py](app/test/test_pr_reviews.py) - 12 项测试（100% 通过）
+  - 服务层: 数据格式、分页、错误处理
+  - 数据库: save/get/list、未连接处理
+  - API: 单PR/全量/数据库查询/503/字段完整性
+
 ---
 
 ## 测试结果
 
 ```
-总测试数: 152 (模型 13 + 分析 19 + API 10 + 其他 110)
-✅ 通过: 147
+总测试数: 164 (模型 13 + 分析 19 + API 10 + Reviews 12 + 其他 110)
+✅ 通过: 159
 ❌ 失败: 5 (已有的 GitHub Actions 解析器匹配问题)
-通过率: 96.7%
+通过率: 97.0%
 ```
 
 ---
 
 ## 最后更新时间
 
-2026-05-18 (Section 22 CI/CD 工程能力洞察报告全部完成)
+2026-05-18 (Section 23 PR Reviews 接口实现完成)

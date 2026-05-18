@@ -592,6 +592,91 @@ class DatabaseService:
             return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
 
     # ====================
+    # PR Reviews 持久化
+    # ====================
+
+    def save_pr_reviews(self, owner: str, repo: str, pr_number: int, reviews_data: Dict[str, Any]) -> bool:
+        """
+        保存 PR Reviews 数据
+        """
+        if self.db is None:
+            return False
+
+        try:
+            collection = self.db['pr_reviews']
+            document = {
+                "owner": owner,
+                "repo": repo,
+                "pr_number": pr_number,
+                "data": reviews_data,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }
+
+            collection.update_one(
+                {"owner": owner, "repo": repo, "pr_number": pr_number},
+                {"$set": document},
+                upsert=True
+            )
+
+            logger.info(f"PR Reviews 数据已保存: {owner}/{repo} PR#{pr_number}")
+            return True
+        except Exception as e:
+            logger.error(f"保存 PR Reviews 数据失败: {e}")
+            return False
+
+    def get_pr_reviews(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+        """
+        获取 PR Reviews 数据
+        """
+        if self.db is None:
+            return None
+
+        try:
+            collection = self.db['pr_reviews']
+            document = collection.find_one(
+                {"owner": owner, "repo": repo, "pr_number": pr_number},
+                {"_id": 0}
+            )
+            return document
+        except Exception as e:
+            logger.error(f"获取 PR Reviews 数据失败: {e}")
+            return None
+
+    def list_pr_reviews(self, owner: str = None, repo: str = None,
+                        page: int = 1, size: int = 20,
+                        sort_by: str = "updated_at", sort_order: int = -1) -> Dict[str, Any]:
+        """
+        查询 PR Reviews 列表（分页）
+        """
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+
+        try:
+            collection = self.db['pr_reviews']
+            query = {}
+            if owner:
+                query["owner"] = owner
+            if owner and repo:
+                query["repo"] = repo
+
+            total = collection.count_documents(query)
+            skip = (page - 1) * size
+            cursor = collection.find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = list(cursor)
+
+            return {
+                "data": data,
+                "total": total,
+                "page": page,
+                "size": size,
+                "total_pages": (total + size - 1) // size if size > 0 else 0
+            }
+        except Exception as e:
+            logger.error(f"查询 PR Reviews 列表失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
+    # ====================
     # CI/CD 结果持久化
     # ====================
 
