@@ -219,11 +219,11 @@
 > 由 Orchestrator Agent 统一调度，实现自主规划 + 工具调用 + Agent 间通信。
 
 ### 24.1 Agent 基础架构
-- [ ] Agent 基类 — 封装 LangGraph `create_react_agent`，统一 Agent 创建模式
-- [ ] Agent 状态定义 — AgentState (TypedDict)，包含 messages/工具调用结果/错误信息
-- [ ] Agent 工具注册机制 — `@tool` 装饰器 + `bind_tools()` 绑定到 LLM
-- [ ] Agent 消息历史 — 每轮对话保留 messages，支持多轮推理
-- [ ] Agent 错误处理 — 工具调用失败时 Agent 自主决定重试或换策略
+- [x] Agent 基类 — 封装 LangGraph `create_react_agent`，统一 Agent 创建模式
+- [x] Agent 状态定义 — AgentState (TypedDict)，包含 messages/工具调用结果/错误信息
+- [x] Agent 工具注册机制 — `@tool` 装饰器 + `bind_tools()` 绑定到 LLM
+- [x] Agent 消息历史 — 每轮对话保留 messages，支持多轮推理
+- [x] Agent 错误处理 — 工具调用失败时 Agent 自主决定重试或换策略
 
 ### 24.2 Orchestrator Agent (调度 Agent)
 - [ ] Orchestrator system prompt — 总调度角色，理解用户意图，决定调用哪个 Agent
@@ -233,16 +233,16 @@
 - [ ] 决策逻辑 — 根据数据量、平台类型等条件动态调整策略
 
 ### 24.3 Collector Agent (数据采集 Agent)
-- [ ] Collector system prompt — 数据采集专家角色，理解"需要什么数据"
-- [ ] 采集工具集:
-  - [ ] `fetch_pr_list(owner, repo, max_count)` — 获取 PR 列表
-  - [ ] `fetch_pr_comments(owner, repo, pr_numbers)` — 获取 PR 评论
-  - [ ] `fetch_pr_details(owner, repo, pr_numbers)` — 获取 PR 详情
-  - [ ] `fetch_pr_reviews(owner, repo, pr_numbers)` — 获取 PR Reviews
-  - [ ] `check_db_cache(owner, repo)` — 检查数据库中已有数据（避免重复拉取）
-  - [ ] `query_cicd_results(owner, repo)` — 查询已有 CI/CD 分析结果
-- [ ] 自主决策 — Agent 根据项目大小决定拉取范围（小项目全量，大项目抽样）
-- [ ] 增量采集 — Agent 对比 DB 已有数据，只拉取增量部分
+- [x] Collector system prompt — 数据采集专家角色，理解"需要什么数据"
+- [x] 采集工具集:
+  - [x] `fetch_pr_list(owner, repo, max_count)` — 获取 PR 列表
+  - [x] `fetch_pr_comments(owner, repo, pr_numbers)` — 获取 PR 评论
+  - [x] `fetch_pr_details(owner, repo, pr_numbers)` — 获取 PR 详情
+  - [x] `fetch_pr_reviews(owner, repo, pr_numbers)` — 获取 PR Reviews
+  - [x] `check_db_cache(owner, repo)` — 检查数据库中已有数据（避免重复拉取）
+  - [x] `query_cicd_results(owner, repo)` — 查询已有 CI/CD 分析结果
+- [x] 自主决策 — Agent 根据项目大小决定拉取范围（小项目全量，大项目抽样）
+- [x] 增量采集 — Agent 对比 DB 已有数据，只拉取增量部分
 
 ### 24.4 Analyst Agent (分析 Agent)
 - [ ] Analyst system prompt — CI/CD 工程效能分析专家角色

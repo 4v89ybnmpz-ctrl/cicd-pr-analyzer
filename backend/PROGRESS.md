@@ -362,10 +362,28 @@ app/
 | 可扩展性 | 加步骤需改图 | 加 tool 即可 |
 
 #### 实施计划
-- Phase 1: Agent 基类 + Collector Agent (最小可用)
+- Phase 1: Agent 基类 + Collector Agent (最小可用) ✅
 - Phase 2: Analyst Agent + Reporter Agent (核心能力)
 - Phase 3: Orchestrator + 图编排 (多 Agent 协作)
 - Phase 4: 通信协议 + API + 测试
+
+#### Phase 1 完成 (2026-05-18)
+- [base_agent.py](../workflow/agents/base_agent.py) - Agent 基类
+  - `BaseAgent` 封装 `create_react_agent`，统一创建模式
+  - `run(message)` / `run_with_context(message, context)` 执行方法
+  - 工具注册 `_register_tools()` 子类重写
+  - LLM 不可用时优雅降级
+- [collector_agent.py](../workflow/agents/collector_agent.py) - Collector Agent
+  - `CollectorAgent` 继承 `BaseAgent`
+  - system prompt: 数据采集专家，含 3 级策略（小/中/大项目）
+  - 6 个 LangChain Tool:
+    - `fetch_pr_list` — 获取 PR 列表
+    - `fetch_pr_comments` — 获取 PR 评论
+    - `fetch_pr_details` — 获取 PR 详情
+    - `fetch_pr_reviews` — 获取 PR Reviews
+    - `check_db_cache` — 检查数据库缓存
+    - `query_cicd_results` — 查询已有分析结果
+- [test_agent_base.py](../workflow/tests/test_agent_base.py) - 14 项测试 (100% 通过)
 
 ### 22. CI/CD 工程能力洞察报告 🚧 (2026-05-18 开始)
 
