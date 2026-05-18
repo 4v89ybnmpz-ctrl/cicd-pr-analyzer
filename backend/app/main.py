@@ -98,20 +98,23 @@ except Exception as e:
 # 初始化数据库
 db = None
 try:
-    # 从配置读取数据库设置
+    # 优先从环境变量读取数据库配置（Docker 环境），其次从配置文件读取
     db_config = config.get("database", {})
-    if db_config:
-        db = DatabaseService(
-            host=db_config.get('host', '127.0.0.1'),
-            port=db_config.get('port', 27017),
-            username=db_config.get('username', 'admin'),
-            password=db_config.get('password') or get_database_password(),
-            database=db_config.get('database', 'github_pr_db')
-        )
-        logger.info(f"从配置文件加载数据库配置（密码加密: {db_config.get('encrypted', False)}）")
-    else:
-        db = DatabaseService()
-        logger.info("使用默认数据库配置")
+    db_host = os.environ.get("MONGODB_HOST", db_config.get('host', '127.0.0.1'))
+    db_port = int(os.environ.get("MONGODB_PORT", db_config.get('port', 27017)))
+    db_username = os.environ.get("MONGODB_USERNAME", db_config.get('username', 'admin'))
+    db_database = os.environ.get("MONGODB_DATABASE", db_config.get('database', 'github_pr_db'))
+    db_password_env = os.environ.get("MONGODB_PASSWORD")
+    db_password = db_password_env or db_config.get('password') or get_database_password()
+
+    db = DatabaseService(
+        host=db_host,
+        port=db_port,
+        username=db_username,
+        password=db_password,
+        database=db_database
+    )
+    logger.info(f"数据库配置: {db_host}:{db_port}/{db_database} (环境变量: {'是' if db_password_env else '否'})")
 
     if db.connect():
         logger.info("数据库连接成功")
@@ -193,10 +196,12 @@ def main():
         logger.info("服务监控已启动，异常将记录到日志文件")
 
         # 配置uvicorn，添加详细的日志输出
+        server_host = os.environ.get("HOST", config.get("host", "0.0.0.0"))
+        server_port = int(os.environ.get("PORT", config.get("port", 1234)))
         uvicorn.run(
             app,
-            host="0.0.0.0",
-            port=1234,
+            host=server_host,
+            port=server_port,
             log_level="info",
             access_log=True,
             use_colors=False

@@ -292,6 +292,31 @@ app/
   - `skip_no_comments=true` - 跳过无评论 PR
 - **验证数据**: cann/ge 项目 1838 个 PR, 30491 条评论, 17154 条 Bot 评论, 全部存库
 
+### 20. 版本控制 ✅ (2026-05-18 新增)
+- 补充 `.gitignore` 规则，添加 `backend/secrets/` 排除
+- 从 Git 追踪中移除 `mongodb_root_password.txt` 敏感文件
+- 标记版本控制需求全部完成
+
+### 21. Docker 化部署 ✅ (2026-05-18 新增)
+- **Dockerfile** [Dockerfile](Dockerfile)
+  - 基于 `python:3.11-slim` 镜像
+  - 安装 Playwright 所需系统依赖
+  - 复制应用代码和示例配置
+- **docker-compose.yml** 更新
+  - 新增 `backend` 服务，依赖 `mongodb`
+  - 通过 Docker Secrets 注入数据库密码
+  - 通过环境变量传入数据库连接信息（`MONGODB_HOST`、`MONGODB_PASSWORD` 等）
+  - 挂载 `config.json` 和 `encryption_key.json` 为只读卷
+  - 日志和数据使用 Docker Volume 持久化
+- **main.py** 修改
+  - 数据库连接支持从环境变量读取（兼容 Docker 和本地运行）
+  - 服务 host/port 支持从环境变量读取
+- **使用方式**:
+  ```bash
+  docker-compose up -d       # 一键启动全套服务
+  docker-compose logs -f backend  # 查看后端日志
+  ```
+
 ---
 
 ## 待开发功能
@@ -315,4 +340,4 @@ app/
 
 ## 最后更新时间
 
-2026-04-12 23:30
+2026-05-18

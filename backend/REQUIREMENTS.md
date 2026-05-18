@@ -150,6 +150,14 @@
 - [x] 创建初始提交，包含所有现有代码
 - [x] 确保敏感信息（Token、密码、密钥）不会被提交到仓库
 
+## 21. Docker 化部署
+- [x] 编写后端服务 Dockerfile（基于 Python 镜像，安装依赖，复制代码）
+- [x] 修改 docker-compose.yml 添加 backend 服务，依赖 mongodb
+- [x] backend 服务通过 Docker 内部网络连接 mongodb（不再暴露 27017 到宿主机）
+- [x] 支持通过环境变量或 Docker Secrets 传入敏感配置（Token、密码）
+- [x] docker-compose up 一键启动全套服务（mongodb + backend）
+- [x] 验证服务正常启动并可访问
+
 ## 待开发功能
 - [x] 建立脚本获取 openlibing.com 流水线数据（已通过浏览器自动化模块 + AtomGit 评论提取实现）
 <!-- - [ ] PR Reviews 接口 - 获取评审记录
