@@ -29,6 +29,7 @@
 | 21. Docker 化部署 | ✅ 完成 | 2026-05-18 |
 | 22. CI/CD 工程能力洞察报告 | ✅ 完成 | 2026-05-18 |
 | 23. PR Reviews 接口 | ✅ 完成 | 2026-05-18 |
+| 24. 多 Agent 协作系统 | 🚧 规划中 | 2026-05-18 |
 
 ## 详细实现记录
 
@@ -327,6 +328,45 @@ app/
 
 - [ ] PR Commits 接口 - 获取提交记录
 
+### 24. 多 Agent 协作系统 🚧 (2026-05-18 规划中)
+
+#### 架构设计
+```
+                        ┌─────────────────┐
+                        │  Orchestrator   │  调度 Agent (Claude)
+                        │    Agent        │  理解意图 → 分解任务 → 调度 Agent → 汇总结果
+                        └────────┬────────┘
+                                 │
+                 ┌───────────────┼───────────────┐
+                 │               │               │
+        ┌────────▼──┐   ┌───────▼──────┐  ┌──────▼───────┐
+        │ Collector │   │   Analyst    │  │   Reporter   │
+        │  Agent    │   │   Agent      │  │   Agent      │
+        │           │   │              │  │              │
+        │ Tools:    │   │ Tools:       │  │ Tools:       │
+        │ fetch_prs │   │ analyze_cicd │  │ gen_stats    │
+        │ fetch_cm  │   │ get_stats    │  │ ai_analyze   │
+        │ fetch_det │   │ get_trends   │  │ ai_suggest   │
+        │ fetch_rev │   │ get_failure  │  │ format_rpt   │
+        │ check_db  │   │ query_detail │  │              │
+        └───────────┘   └──────────────┘  └──────────────┘
+```
+
+#### 与当前架构对比
+| 维度 | 当前 (Pipeline) | 目标 (Multi-Agent) |
+|------|----------------|-------------------|
+| 执行方式 | 固定 9 步线性 | Agent 自主决策 |
+| AI 参与 | 最后 2 步 | 每步都有 AI 决策 |
+| 工具调用 | 节点直接调服务 | Agent 通过 tool 自主选择 |
+| 适应性 | 所有项目同流程 | 根据项目特征动态调整 |
+| 可扩展性 | 加步骤需改图 | 加 tool 即可 |
+
+#### 实施计划
+- Phase 1: Agent 基类 + Collector Agent (最小可用)
+- Phase 2: Analyst Agent + Reporter Agent (核心能力)
+- Phase 3: Orchestrator + 图编排 (多 Agent 协作)
+- Phase 4: 通信协议 + API + 测试
+
 ### 22. CI/CD 工程能力洞察报告 🚧 (2026-05-18 开始)
 
 #### 22.1 CI/CD 结构化数据模型 ✅ (2026-05-18)
@@ -415,4 +455,4 @@ app/
 
 ## 最后更新时间
 
-2026-05-18 (Section 23 PR Reviews 接口实现完成)
+2026-05-18 (Section 24 多 Agent 协作系统需求规划)

@@ -210,3 +210,113 @@
 ## 待开发功能
 - [x] 建立脚本获取 openlibing.com 流水线数据（已通过浏览器自动化模块 + AtomGit 评论提取实现）
 <!-- - [ ] PR Commits 接口 - 获取提交记录 -->
+
+---
+
+## 24. 多 Agent 协作系统 (Multi-Agent Collaboration)
+> 将当前 LangGraph 固定流水线重构为多 Agent 自主协作架构。
+> 每个 Agent 拥有独立的 system prompt、工具集和决策能力，
+> 由 Orchestrator Agent 统一调度，实现自主规划 + 工具调用 + Agent 间通信。
+
+### 24.1 Agent 基础架构
+- [ ] Agent 基类 — 封装 LangGraph `create_react_agent`，统一 Agent 创建模式
+- [ ] Agent 状态定义 — AgentState (TypedDict)，包含 messages/工具调用结果/错误信息
+- [ ] Agent 工具注册机制 — `@tool` 装饰器 + `bind_tools()` 绑定到 LLM
+- [ ] Agent 消息历史 — 每轮对话保留 messages，支持多轮推理
+- [ ] Agent 错误处理 — 工具调用失败时 Agent 自主决定重试或换策略
+
+### 24.2 Orchestrator Agent (调度 Agent)
+- [ ] Orchestrator system prompt — 总调度角色，理解用户意图，决定调用哪个 Agent
+- [ ] Agent 路由工具 — `delegate_to_collector()`、`delegate_to_analyst()`、`delegate_to_reporter()`
+- [ ] 任务分解 — 将"分析 rust-lang/rust 的 CI/CD 能力"分解为多 Agent 子任务
+- [ ] 结果汇总 — 收集各 Agent 返回结果，组装最终响应
+- [ ] 决策逻辑 — 根据数据量、平台类型等条件动态调整策略
+
+### 24.3 Collector Agent (数据采集 Agent)
+- [ ] Collector system prompt — 数据采集专家角色，理解"需要什么数据"
+- [ ] 采集工具集:
+  - [ ] `fetch_pr_list(owner, repo, max_count)` — 获取 PR 列表
+  - [ ] `fetch_pr_comments(owner, repo, pr_numbers)` — 获取 PR 评论
+  - [ ] `fetch_pr_details(owner, repo, pr_numbers)` — 获取 PR 详情
+  - [ ] `fetch_pr_reviews(owner, repo, pr_numbers)` — 获取 PR Reviews
+  - [ ] `check_db_cache(owner, repo)` — 检查数据库中已有数据（避免重复拉取）
+  - [ ] `query_cicd_results(owner, repo)` — 查询已有 CI/CD 分析结果
+- [ ] 自主决策 — Agent 根据项目大小决定拉取范围（小项目全量，大项目抽样）
+- [ ] 增量采集 — Agent 对比 DB 已有数据，只拉取增量部分
+
+### 24.4 Analyst Agent (分析 Agent)
+- [ ] Analyst system prompt — CI/CD 工程效能分析专家角色
+- [ ] 分析工具集:
+  - [ ] `analyze_cicd_comments(comments)` — CI/CD 评论识别 + 结构化提取
+  - [ ] `get_cicd_stats(owner, repo)` — 获取 CI/CD 统计数据
+  - [ ] `get_cicd_trends(owner, repo, granularity)` — 获取趋势数据
+  - [ ] `get_failure_analysis(owner, repo)` — 获取失败分析
+  - [ ] `query_pr_details(owner, repo)` — 查询 PR 详情（辅助分析协作模式）
+  - [ ] `query_pr_reviews(owner, repo)` — 查询 PR Reviews（辅助分析 review 质量）
+- [ ] 自主分析 — Agent 根据数据特征选择分析维度
+  - 数据量大时: 聚合统计 + 趋势分析
+  - 数据量小时: 逐条深入分析
+  - 失败率高时: 重点做根因分析
+- [ ] AI 深度洞察 — Claude 对统计数据做 6 维度深度分析（复用现有 prompt）
+
+### 24.5 Reporter Agent (报告 Agent)
+- [ ] Reporter system prompt — 报告撰写专家角色，面向不同受众调整报告风格
+- [ ] 报告工具集:
+  - [ ] `generate_stats_report(stats, trends, failure)` — 生成规则引擎统计报告
+  - [ ] `ai_generate_suggestions(analysis, stats)` — AI 生成改进建议
+  - [ ] `ai_risk_assessment(analysis, failure)` — AI 风险评估
+  - [ ] `format_report_md(report)` — Markdown 格式化报告
+  - [ ] `format_report_json(report)` — JSON 结构化报告
+- [ ] 报告分级 — 根据受众生成不同详细程度的报告
+  - 执行摘要版: 面向管理层，1页纸
+  - 技术详情版: 面向工程师，含数据和代码
+  - 行动计划版: 面向 PM，含优先级排序的建议列表
+
+### 24.6 Agent 间通信协议
+- [ ] 消息格式定义 — AgentMessage (sender/receiver/content/metadata)
+- [ ] 数据传递 — 通过 LangGraph State 在 Agent 间传递结构化数据
+- [ ] 结果确认 — 下游 Agent 可以向上游 Agent 请求数据补充
+  - 例: Reporter 发现分析维度不够 → 请求 Analyst 补充特定维度
+  - 例: Analyst 发现缺少评论数据 → 请求 Collector 补充拉取
+
+### 24.7 LangGraph 多 Agent 图编排
+- [ ] Orchestrator 主图 — `create_react_agent` + 子图调用
+- [ ] Collector 子图 — 采集 Agent 的内部决策图
+- [ ] Analyst 子图 — 分析 Agent 的内部决策图
+- [ ] Reporter 子图 — 报告 Agent 的内部决策图
+- [ ] 图拓扑:
+  ```
+  用户请求 → Orchestrator → [判断需要什么]
+      ├── delegate_to_collector() → Collector Agent → 返回数据
+      ├── delegate_to_analyst()   → Analyst Agent   → 返回分析
+      └── delegate_to_reporter()  → Reporter Agent  → 返回报告
+  Orchestrator 汇总 → 返回用户
+  ```
+- [ ] 保留现有图 — `build_full_analysis_graph()` 保留为快速通道（不需要 Agent 决策时使用）
+
+### 24.8 API 接口
+- [ ] `POST /agent/analyze` — 多 Agent 分析（输入 owner/repo，Orchestrator 自主规划）
+- [ ] `POST /agent/analyze/async` — 异步多 Agent 分析
+- [ ] `GET /agent/status/{task_id}` — 查询 Agent 执行状态（含每个 Agent 的进度）
+- [ ] `GET /agent/tasks` — 列出所有 Agent 任务
+- [ ] `POST /agent/chat` — 对话式接口（支持追问"深入分析失败原因"等）
+
+### 24.9 测试用例
+- [ ] Agent 基类测试 — 工具绑定、消息处理、错误恢复
+- [ ] Collector Agent 测试 — 工具调用 Mock、增量决策验证
+- [ ] Analyst Agent 测试 — 分析维度选择 Mock、AI 分析 Mock
+- [ ] Reporter Agent 测试 — 报告分级验证、格式化验证
+- [ ] Orchestrator 测试 — Agent 路由决策、任务分解、结果汇总
+- [ ] 端到端集成测试 — 完整多 Agent 协作流程验证
+
+### 24.10 实施优先级
+1. **Phase 1** (基础): 24.1 Agent 基类 + 24.3 Collector Agent（最小可用）
+2. **Phase 2** (核心): 24.4 Analyst Agent + 24.5 Reporter Agent（核心能力）
+3. **Phase 3** (编排): 24.2 Orchestrator + 24.7 图编排（多 Agent 协作）
+4. **Phase 4** (增强): 24.6 通信协议 + 24.8 API + 24.9 测试
+
+### 24.11 技术依赖
+- [x] langgraph >= 0.2.0 (已安装)
+- [x] langchain-core >= 0.3.0 (已安装)
+- [x] langchain-anthropic >= 0.3.0 (已安装)
+- [ ] 现有服务层包装为 LangChain Tool（github_service / database_service / CICDExtractor）
