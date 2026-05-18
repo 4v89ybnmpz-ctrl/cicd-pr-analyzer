@@ -160,34 +160,34 @@
 
 ## 22. CI/CD 工程能力洞察报告
 ### 22.1 CI/CD 结构化数据模型
-- [ ] CICDResult 模型 - CI/CD 单条解析结果标准模型（统一各解析器返回格式）
-- [ ] CICDSummary 模型 - CI/CD 汇总统计模型（成功率/失败率/耗时/覆盖率）
-- [ ] CICDReport 模型 - 项目级 CI/CD 洞察报告模型（多维度聚合）
-- [ ] CICDInsight 模型 - 工程能力洞察项模型（趋势/评级/建议）
+- [x] CICDResult 模型 - CI/CD 单条解析结果标准模型（统一各解析器返回格式）
+- [x] CICDSummary 模型 - CI/CD 汇总统计模型（成功率/失败率/耗时/覆盖率）
+- [x] CICDReport 模型 - 项目级 CI/CD 洞察报告模型（多维度聚合）
+- [x] CICDInsight 模型 - 工程能力洞察项模型（趋势/评级/建议）
 
 ### 22.2 CI/CD 数据持久化
-- [ ] cicd_results 集合 - 存储结构化 CI/CD 解析结果
-- [ ] 数据关联 - CI/CD 结果关联 PR 信息（owner/repo/pr_number/timestamp）
-- [ ] 批量入库接口 - 支持批量将评论解析后存入 cicd_results 集合
-- [ ] 查询接口 - 支持按项目/PR/时间范围/状态查询 CI/CD 结果
+- [x] cicd_results 集合 - 存储结构化 CI/CD 解析结果
+- [x] 数据关联 - CI/CD 结果关联 PR 信息（owner/repo/pr_number/timestamp）
+- [x] 批量入库接口 - 支持批量将评论解析后存入 cicd_results 集合
+- [x] 查询接口 - 支持按项目/PR/时间范围/状态查询 CI/CD 结果
 
 ### 22.3 CI/CD 统计分析服务
-- [ ] 成功率统计 - 按时间窗口统计构建成功率趋势
-- [ ] 耗时分析 - 统计平均构建耗时、P50/P90/P95 耗时分布
-- [ ] 失败模式分析 - 统计高频失败原因和失败 job
-- [ ] 覆盖率趋势 - 统计测试覆盖率变化趋势
+- [x] 成功率统计 - 按时间窗口统计构建成功率趋势
+- [x] 耗时分析 - 统计平均构建耗时、P50/P90/P95 耗时分布
+- [x] 失败模式分析 - 统计高频失败原因和失败 job
+- [x] 覆盖率趋势 - 统计测试覆盖率变化趋势
 - [ ] MTTR 统计 - 平均修复时间（从失败到下一次成功）
-- [ ] 按维度聚合 - 按时间（日/周/月）、按 PR、按解析器类型聚合
+- [x] 按维度聚合 - 按时间（日/周/月）、按 PR、按解析器类型聚合
 
 ### 22.4 CI/CD 洞察报告 API
-- [ ] GET /analysis/cicd/report/{owner}/{repo} - 获取项目级 CI/CD 洞察报告
-- [ ] GET /analysis/cicd/stats/{owner}/{repo} - 获取 CI/CD 统计数据
-- [ ] GET /analysis/cicd/trends/{owner}/{repo} - 获取 CI/CD 趋势数据
-- [ ] POST /analysis/cicd/analyze/{owner}/{repo} - 触发全量分析（从评论库解析并入库）
-- [ ] 报告参数 - 支持时间范围（start_date/end_date）、时间粒度（day/week/month）
+- [x] GET /analysis/cicd/report/{owner}/{repo} - 获取项目级 CI/CD 洞察报告
+- [x] GET /analysis/cicd/stats/{owner}/{repo} - 获取 CI/CD 统计数据
+- [x] GET /analysis/cicd/trends/{owner}/{repo} - 获取 CI/CD 趋势数据
+- [x] POST /analysis/cicd/analyze/{owner}/{repo} - 触发全量分析（从评论库解析并入库）
+- [x] 报告参数 - 支持时间范围（start_date/end_date）、时间粒度（day/week/month）
 
 ### 22.5 测试用例
-- [ ] 模型测试 - CICDResult/CICDSummary/CICDReport 模型验证
+- [x] 模型测试 - CICDResult/CICDSummary/CICDReport 模型验证
 - [ ] 持久化测试 - cicd_results 集合 CRUD 测试
 - [ ] 统计服务测试 - 各维度统计计算正确性验证
 - [ ] API 集成测试 - 报告接口端到端测试

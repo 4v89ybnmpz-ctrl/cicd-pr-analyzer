@@ -9,6 +9,9 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from .parsers import ParserRegistry, BaseCICDParser
+from app.models.cicd_models import (
+    CICDResult, BuildStatus, TestResult, CoverageInfo, CheckResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -311,3 +314,97 @@ class CICDExtractor:
     def save_project_map(self):
         """保存项目映射到配置文件"""
         self.registry.save_project_map()
+
+    def extract_structured(self, comment: Dict[str, Any],
+                           owner: str = "", repo: str = "",
+                           pr_number: int = None) -> Optional[CICDResult]:
+        """
+        从评论中提取 CI/CD 结果，返回结构化 CICDResult 模型
+        :param comment: 评论数据
+        :param owner: 仓库所有者
+        :param repo: 仓库名
+        :param pr_number: PR 编号
+        :return: CICDResult 模型实例
+        """
+        if not self.is_cicd_comment(comment):
+            return None
+
+        body = comment.get('body', '')
+        user = comment.get('user', '')
+        if isinstance(user, dict):
+            user = user.get('login', '')
+
+        # 使用解析器注册表解析
+        parsed = self.registry.parse(body, user, owner=owner, repo=repo)
+
+        # 构建结构化模型
+        kwargs = {
+            "owner": owner or "",
+            "repo": repo or "",
+            "parser_name": parsed.get('parser', 'unknown'),
+            "build_status": parsed.get('build_status', 'unknown'),
+            "url": parsed.get('url'),
+            "comment_id": str(comment.get('id')) if comment.get('id') else None,
+            "user": user,
+            "pr_number": pr_number,
+            "comment_created_at": comment.get('created_at'),
+            "analyzed_at": datetime.now(),
+            "raw_parsed": parsed,
+        }
+
+        # 耗时
+        if parsed.get('duration_seconds') is not None:
+            kwargs["duration_seconds"] = parsed['duration_seconds']
+
+        # 覆盖率
+        coverage_data = parsed.get('coverage')
+        if coverage_data and isinstance(coverage_data, dict):
+            kwargs["coverage"] = CoverageInfo(**coverage_data)
+
+        # 检查结果 (GitHub Actions)
+        checks_data = parsed.get('checks')
+        if checks_data and isinstance(checks_data, dict):
+            kwargs["checks"] = CheckResult(**checks_data)
+
+        # 测试结果 (Generic)
+        test_data = parsed.get('test_results')
+        if test_data and isinstance(test_data, dict):
+            kwargs["test_results"] = TestResult(**test_data)
+
+        # NVIDIA CCCL 特有
+        for field in ('pass_rate', 'pass_count', 'hits_rate', 'hits_count'):
+            if parsed.get(field) is not None:
+                kwargs[field] = parsed[field]
+
+        # Rust Bors 特有
+        for field in ('commit', 'merge_commit', 'approver', 'build_type'):
+            if parsed.get(field) is not None:
+                kwargs[field] = parsed[field]
+        if parsed.get('failed_jobs') is not None:
+            kwargs["failed_jobs"] = parsed['failed_jobs']
+
+        # 详细信息
+        kwargs["details"] = self._extract_details(body)
+
+        try:
+            return CICDResult(**kwargs)
+        except Exception as e:
+            logger.warning(f"构建 CICDResult 失败: {e}, 原始数据: {parsed}")
+            return None
+
+    def extract_batch_structured(self, comments: List[Dict[str, Any]],
+                                 owner: str = "", repo: str = "",
+                                 pr_number: int = None) -> List[CICDResult]:
+        """
+        批量提取 CI/CD 结果，返回 CICDResult 列表
+        """
+        results = []
+        for comment in comments:
+            try:
+                result = self.extract_structured(comment, owner=owner, repo=repo, pr_number=pr_number)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                logger.warning(f"提取 CI/CD 结果失败: {e}")
+        logger.info(f"批量结构化提取完成，共 {len(results)} 条 CI/CD 评论")
+        return results

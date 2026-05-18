@@ -14,7 +14,8 @@ from app.api.routers import (
     register_gitcode_routes,
     register_task_routes,
     register_browser_routes,
-    register_atomgit_routes
+    register_atomgit_routes,
+    register_analysis_routes,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
     register_task_routes(router, cache, github_service, db)
     register_browser_routes(router)
     register_atomgit_routes(router, db)
+    register_analysis_routes(router, db, cache)
 
     if gitcode_service:
         register_gitcode_routes(router, gitcode_service, db)

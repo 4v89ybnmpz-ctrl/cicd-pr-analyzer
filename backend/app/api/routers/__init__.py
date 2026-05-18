@@ -9,6 +9,7 @@ from .gitcode import register_gitcode_routes
 from .task import register_task_routes
 from .browser import register_browser_routes
 from .atomgit import register_atomgit_routes
+from .analysis import register_analysis_routes
 
 __all__ = [
     'register_base_routes',
@@ -20,4 +21,5 @@ __all__ = [
     'register_task_routes',
     'register_browser_routes',
     'register_atomgit_routes',
+    'register_analysis_routes',
 ]
