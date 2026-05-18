@@ -374,16 +374,24 @@ app/
   - 统计服务 Mock（summary/failure_analysis/trends）
   - 洞察评级（成功率/耗时/覆盖率 A-F + 高频失败 Job）
   - 统计模型（比率计算/零值处理）
+- [test_cicd_api.py](app/test/test_cicd_api.py) - 10 项 API 集成测试（100% 通过）
+  - TestClient + Mock 数据库端到端测试
+  - POST /analyze 触发分析
+  - GET /report 洞察报告（含日期范围、评级验证）
+  - GET /stats 统计数据
+  - GET /trends 趋势数据（day/week/month）
+  - GET /results 结果查询（PR 过滤）
+  - 数据库未连接 503 错误处理
 
 ---
 
 ## 测试结果
 
 ```
-总测试数: 142 (模型 13 + 分析 19 + 其他 110)
-✅ 通过: 137
+总测试数: 152 (模型 13 + 分析 19 + API 10 + 其他 110)
+✅ 通过: 147
 ❌ 失败: 5 (已有的 GitHub Actions 解析器匹配问题)
-通过率: 96.5%
+通过率: 96.7%
 ```
 
 ---

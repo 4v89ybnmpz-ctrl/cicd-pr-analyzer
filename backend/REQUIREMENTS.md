@@ -118,9 +118,9 @@
 - [x] Flutter LUCI 解析器 - JSON 规则解析 Flutter/Chromium CI 评论格式
 - [x] Jenkins/Zuul 解析器 - JSON 规则解析 Jenkins 和 Zuul CI 评论格式
 - [x] PR 列表获取优化 - fetch_prs_for_project 增加 max_count 参数，避免全量分页
-<!-- - [ ] CI/CD 数据结构化 - 将 CI/CD 评论转换为结构化数据
-- [ ] CI/CD 结果统计接口 - 提供构建成功率、平均耗时等统计
-- [ ] 数据分析结果存储 - 将分析结果存入数据库 -->
+- [x] CI/CD 数据结构化 - 将 CI/CD 评论转换为结构化数据（Section 22.1 CICDResult 模型）
+- [x] CI/CD 结果统计接口 - 提供构建成功率、平均耗时等统计（Section 22.4 API 端点）
+- [x] 数据分析结果存储 - 将分析结果存入数据库（Section 22.2 cicd_results 集合）
 
 ## 18. 浏览器自动化模块
 - [x] Playwright 集成 - 安装并配置 Playwright 浏览器自动化框架
@@ -190,7 +190,7 @@
 - [x] 模型测试 - CICDResult/CICDSummary/CICDReport 模型验证
 - [x] 持久化测试 - cicd_results 集合 CRUD 测试
 - [x] 统计服务测试 - 各维度统计计算正确性验证
-- [ ] API 集成测试 - 报告接口端到端测试（需数据库环境）
+- [x] API 集成测试 - 报告接口端到端测试
 
 ---
 
