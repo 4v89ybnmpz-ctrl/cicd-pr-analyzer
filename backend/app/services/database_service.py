@@ -890,10 +890,60 @@ class DatabaseService:
                 "total_failures": total_failures,
                 "top_failed_jobs": top_failed_jobs,
                 "top_failed_parsers": top_failed_parsers,
+                "avg_recovery_time_seconds": self._compute_mttr(collection, owner, repo, start_date, end_date),
             }
         except Exception as e:
             logger.error(f"获取 CI/CD 失败分析失败: {e}")
             return {"error": str(e)}
+
+    def _compute_mttr(self, collection, owner: str, repo: str,
+                      start_date: str = None, end_date: str = None) -> Optional[float]:
+        """
+        计算平均修复时间 MTTR (Mean Time To Recovery)
+        逻辑：按 PR 分组，找到 failed -> 下一条 success 的时间差，取平均值
+        """
+        try:
+            match = {"owner": owner, "repo": repo, "analyzed_at": {"$ne": None}}
+            if start_date or end_date:
+                time_query = {}
+                if start_date:
+                    time_query["$gte"] = start_date
+                if end_date:
+                    time_query["$lte"] = end_date
+                match["analyzed_at"] = time_query
+
+            # 按 PR + 时间排序获取所有结果
+            pipeline = [
+                {"$match": match},
+                {"$sort": {"pr_number": 1, "analyzed_at": 1}},
+                {"$group": {
+                    "_id": "$pr_number",
+                    "results": {"$push": {"status": "$build_status", "time": "$analyzed_at"}},
+                }},
+            ]
+            pr_groups = list(collection.aggregate(pipeline))
+
+            recovery_times = []
+            for group in pr_groups:
+                results = group["results"]
+                # 遍历同一 PR 的结果序列，找 failed -> success 的时间差
+                for i in range(len(results) - 1):
+                    if results[i]["status"] == "failed" and results[i + 1]["status"] == "success":
+                        try:
+                            t_failed = datetime.fromisoformat(results[i]["time"].replace("Z", "+00:00"))
+                            t_success = datetime.fromisoformat(results[i + 1]["time"].replace("Z", "+00:00"))
+                            delta = (t_success - t_failed).total_seconds()
+                            if delta >= 0:
+                                recovery_times.append(delta)
+                        except Exception:
+                            pass
+
+            if recovery_times:
+                return round(sum(recovery_times) / len(recovery_times), 2)
+            return None
+        except Exception as e:
+            logger.warning(f"计算 MTTR 失败: {e}")
+            return None
 
     def get_aggregate_stats(self, owner: str = None, repo: str = None) -> Dict[str, Any]:
         """
