@@ -149,6 +149,28 @@ try:
     router = create_router(cache, github_service, db, config_manager, gitcode_service)
     app.include_router(router)
 
+    # 注册 Workflow 路由 (LangGraph 工作流编排)
+    try:
+        from workflow.config import workflow_config
+        from workflow.api.routes import register_workflow_routes
+        from fastapi import APIRouter
+
+        workflow_config.initialize(
+            github_service=github_service,
+            db=db,
+            cache=cache,
+            config_manager=config_manager,
+            gitcode_service=gitcode_service,
+        )
+        workflow_router = APIRouter()
+        register_workflow_routes(workflow_router)
+        app.include_router(workflow_router)
+        logger.info("Workflow 路由注册成功")
+    except ImportError as e:
+        logger.warning(f"Workflow 模块未安装，跳过: {e}")
+    except Exception as e:
+        logger.warning(f"Workflow 路由注册失败: {e}")
+
     # 添加请求追踪中间件
     from fastapi import Request
     from fastapi.responses import JSONResponse
