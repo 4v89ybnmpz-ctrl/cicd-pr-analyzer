@@ -19,16 +19,9 @@ _tasks: Dict[str, Dict[str, Any]] = {}
 _task_lock = threading.Lock()
 
 
-def run_full_analysis(owner: str, repo: str, max_prs: int = 0) -> Dict[str, Any]:
-    """
-    同步执行全量分析工作流
-    """
-    if not workflow_config.ready:
-        return {"error": "工作流未初始化，请先调用 workflow_config.initialize()"}
-
-    task_id = f"full_{owner}_{repo}_{int(datetime.now().timestamp())}"
-
-    initial_state: PipelineState = {
+def _make_initial_state(owner: str, repo: str, max_prs: int) -> PipelineState:
+    """构造初始状态"""
+    return {
         "owner": owner,
         "repo": repo,
         "max_prs": max_prs,
@@ -38,6 +31,10 @@ def run_full_analysis(owner: str, repo: str, max_prs: int = 0) -> Dict[str, Any]
         "details": {},
         "reviews": {},
         "cicd_results": [],
+        "stats_report": {},
+        "ai_analysis": "",
+        "ai_suggestions": [],
+        "ai_risk_assessment": "",
         "report": {},
         "current_step": "init",
         "progress": 0.0,
@@ -46,7 +43,17 @@ def run_full_analysis(owner: str, repo: str, max_prs: int = 0) -> Dict[str, Any]
         "completed_at": "",
     }
 
-    # 记录任务
+
+def run_full_analysis(owner: str, repo: str, max_prs: int = 0) -> Dict[str, Any]:
+    """
+    同步执行全量分析工作流 (含 AI 分析)
+    """
+    if not workflow_config.ready:
+        return {"error": "工作流未初始化，请先调用 workflow_config.initialize()"}
+
+    task_id = f"full_{owner}_{repo}_{int(datetime.now().timestamp())}"
+    initial_state = _make_initial_state(owner, repo, max_prs)
+
     with _task_lock:
         _tasks[task_id] = {
             "task_id": task_id,
@@ -71,6 +78,8 @@ def run_full_analysis(owner: str, repo: str, max_prs: int = 0) -> Dict[str, Any]
             "task_id": task_id,
             "status": "completed",
             "report": result.get("report", {}),
+            "ai_analysis": result.get("ai_analysis", ""),
+            "ai_suggestions": result.get("ai_suggestions", []),
             "progress": result.get("progress", 100.0),
             "errors": result.get("errors", []),
         }
@@ -92,7 +101,6 @@ def run_full_analysis_async(owner: str, repo: str, max_prs: int = 0) -> str:
     """
     task_id = f"full_{owner}_{repo}_{int(datetime.now().timestamp())}"
 
-    # 预先记录任务
     with _task_lock:
         _tasks[task_id] = {
             "task_id": task_id,

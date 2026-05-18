@@ -22,8 +22,18 @@ class PipelineState(TypedDict):
     details: Dict[str, Any]
     reviews: Dict[str, Any]
 
-    # 分析结果
+    # CI/CD 分析结果
     cicd_results: List[Dict[str, Any]]
+
+    # 统计报告 (规则引擎生成)
+    stats_report: Dict[str, Any]
+
+    # AI 深度分析结果
+    ai_analysis: str
+    ai_suggestions: List[str]
+    ai_risk_assessment: str
+
+    # 最终报告 (统计 + AI 合并)
     report: Dict[str, Any]
 
     # 进度追踪

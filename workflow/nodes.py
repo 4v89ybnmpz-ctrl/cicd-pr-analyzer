@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_pr_list_node(state: PipelineState) -> Dict[str, Any]:
-    """
-    节点: 获取 PR 列表
-    """
+    """节点: 获取 PR 列表"""
     cfg = workflow_config
     owner = state["owner"]
     repo = state["repo"]
@@ -34,7 +32,6 @@ def fetch_pr_list_node(state: PipelineState) -> Dict[str, Any]:
 
     pr_numbers = [pr["number"] for pr in result["prs"]]
 
-    # 保存到数据库
     if cfg.db is not None:
         try:
             cfg.db.save_pr_data(owner, repo, result)
@@ -50,9 +47,7 @@ def fetch_pr_list_node(state: PipelineState) -> Dict[str, Any]:
 
 
 def fetch_comments_node(state: PipelineState) -> Dict[str, Any]:
-    """
-    节点: 并发获取所有 PR 评论
-    """
+    """节点: 并发获取所有 PR 评论"""
     cfg = workflow_config
     owner = state["owner"]
     repo = state["repo"]
@@ -83,15 +78,13 @@ def fetch_comments_node(state: PipelineState) -> Dict[str, Any]:
     return {
         "comments": results,
         "current_step": "fetch_comments",
-        "progress": 40.0,
+        "progress": 35.0,
         "errors": errors,
     }
 
 
 def fetch_details_node(state: PipelineState) -> Dict[str, Any]:
-    """
-    节点: 并发获取 PR 详情
-    """
+    """节点: 并发获取 PR 详情"""
     cfg = workflow_config
     owner = state["owner"]
     repo = state["repo"]
@@ -111,14 +104,12 @@ def fetch_details_node(state: PipelineState) -> Dict[str, Any]:
     return {
         "details": details,
         "current_step": "fetch_details",
-        "progress": 55.0,
+        "progress": 50.0,
     }
 
 
 def fetch_reviews_node(state: PipelineState) -> Dict[str, Any]:
-    """
-    节点: 并发获取 PR Reviews
-    """
+    """节点: 并发获取 PR Reviews"""
     cfg = workflow_config
     owner = state["owner"]
     repo = state["repo"]
@@ -138,15 +129,12 @@ def fetch_reviews_node(state: PipelineState) -> Dict[str, Any]:
     return {
         "reviews": reviews,
         "current_step": "fetch_reviews",
-        "progress": 70.0,
+        "progress": 60.0,
     }
 
 
 def analyze_cicd_node(state: PipelineState) -> Dict[str, Any]:
-    """
-    节点: CI/CD 分析
-    从评论中提取 CI/CD 结果，存入 cicd_results 集合
-    """
+    """节点: CI/CD 分析 — 从评论中提取 CI/CD 结果"""
     from app.analysis.cicd_extractor import CICDExtractor
 
     owner = state["owner"]
@@ -166,20 +154,20 @@ def analyze_cicd_node(state: PipelineState) -> Dict[str, Any]:
         for r in structured:
             all_results.append(r.to_db_dict())
 
-    # 保存到数据库
     if workflow_config.db is not None and all_results:
         workflow_config.db.save_cicd_results_batch(all_results)
 
     return {
         "cicd_results": all_results,
         "current_step": "analyze_cicd",
-        "progress": 90.0,
+        "progress": 70.0,
     }
 
 
-def generate_report_node(state: PipelineState) -> Dict[str, Any]:
+def generate_stats_report_node(state: PipelineState) -> Dict[str, Any]:
     """
-    节点: 生成洞察报告
+    节点: 生成统计报告 (规则引擎)
+    纯数据聚合，不依赖 AI
     """
     from app.api.routers.analysis import _build_insights
 
@@ -187,14 +175,13 @@ def generate_report_node(state: PipelineState) -> Dict[str, Any]:
     repo = state["repo"]
     db = workflow_config.db
 
-    logger.info(f"[节点] 生成报告: {owner}/{repo}")
+    logger.info(f"[节点] 统计报告: {owner}/{repo}")
 
     if db is None:
         return {
-            "report": {"error": "数据库未连接"},
-            "current_step": "generate_report",
-            "progress": 100.0,
-            "completed_at": datetime.now().isoformat(),
+            "stats_report": {"error": "数据库未连接"},
+            "current_step": "generate_stats_report",
+            "progress": 75.0,
         }
 
     summary = db.get_cicd_summary_from_db(owner, repo)
@@ -202,7 +189,7 @@ def generate_report_node(state: PipelineState) -> Dict[str, Any]:
     failure = db.get_cicd_failure_analysis_from_db(owner, repo)
     insights = _build_insights(summary, failure)
 
-    report = {
+    stats_report = {
         "owner": owner,
         "repo": repo,
         "summary": summary,
@@ -210,12 +197,45 @@ def generate_report_node(state: PipelineState) -> Dict[str, Any]:
         "failure_analysis": failure,
         "insights": insights,
         "data_source_count": summary.get("total", 0),
+    }
+
+    return {
+        "stats_report": stats_report,
+        "current_step": "generate_stats_report",
+        "progress": 75.0,
+    }
+
+
+def generate_final_report_node(state: PipelineState) -> Dict[str, Any]:
+    """
+    节点: 合并统计报告 + AI 分析，生成最终报告
+    """
+    owner = state["owner"]
+    repo = state["repo"]
+    stats = state.get("stats_report", {})
+    ai_analysis = state.get("ai_analysis", "")
+    ai_suggestions = state.get("ai_suggestions", [])
+    ai_risk = state.get("ai_risk_assessment", "")
+
+    logger.info(f"[节点] 最终报告: {owner}/{repo}")
+
+    report = {
+        "owner": owner,
+        "repo": repo,
+        "summary": stats.get("summary", {}),
+        "trends": stats.get("trends", []),
+        "failure_analysis": stats.get("failure_analysis", {}),
+        "insights": stats.get("insights", []),
+        "data_source_count": stats.get("data_source_count", 0),
+        "ai_analysis": ai_analysis,
+        "ai_suggestions": ai_suggestions,
+        "ai_risk_assessment": ai_risk,
         "generated_at": datetime.now().isoformat(),
     }
 
     return {
         "report": report,
-        "current_step": "generate_report",
+        "current_step": "generate_final_report",
         "progress": 100.0,
         "completed_at": datetime.now().isoformat(),
     }
