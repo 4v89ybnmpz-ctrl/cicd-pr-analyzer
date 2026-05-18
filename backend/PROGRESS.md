@@ -363,7 +363,7 @@ app/
 
 #### 实施计划
 - Phase 1: Agent 基类 + Collector Agent (最小可用) ✅
-- Phase 2: Analyst Agent + Reporter Agent (核心能力)
+- Phase 2: Analyst Agent + Reporter Agent (核心能力) ✅
 - Phase 3: Orchestrator + 图编排 (多 Agent 协作)
 - Phase 4: 通信协议 + API + 测试
 
@@ -384,6 +384,26 @@ app/
     - `check_db_cache` — 检查数据库缓存
     - `query_cicd_results` — 查询已有分析结果
 - [test_agent_base.py](../workflow/tests/test_agent_base.py) - 14 项测试 (100% 通过)
+
+#### Phase 2 完成 (2026-05-18)
+- [analyst_agent.py](../workflow/agents/analyst_agent.py) - Analyst Agent
+  - system prompt: CI/CD 工程效能分析专家，根据数据特征动态选择分析维度
+  - 6 个 LangChain Tool:
+    - `analyze_cicd_comments` — 从评论提取 CI/CD 结果
+    - `get_cicd_stats` — 统计数据
+    - `get_cicd_trends` — 趋势数据
+    - `get_failure_analysis` — 失败分析
+    - `query_pr_details` — PR 详情（辅助）
+    - `query_pr_reviews` — Reviews（辅助）
+- [reporter_agent.py](../workflow/agents/reporter_agent.py) - Reporter Agent
+  - system prompt: 报告撰写专家，支持三级报告（执行摘要/技术详情/行动计划）
+  - 5 个 LangChain Tool:
+    - `generate_stats_report` — 规则引擎统计
+    - `ai_generate_suggestions` — AI 改进建议
+    - `ai_risk_assessment` — AI 风险评估
+    - `format_report_md` — Markdown 格式化
+    - `format_report_json` — JSON 验证
+- [test_agent_phase2.py](../workflow/tests/test_agent_phase2.py) - 16 项测试 (100% 通过)
 
 ### 22. CI/CD 工程能力洞察报告 🚧 (2026-05-18 开始)
 

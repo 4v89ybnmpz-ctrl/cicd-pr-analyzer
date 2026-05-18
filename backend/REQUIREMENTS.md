@@ -245,29 +245,29 @@
 - [x] 增量采集 — Agent 对比 DB 已有数据，只拉取增量部分
 
 ### 24.4 Analyst Agent (分析 Agent)
-- [ ] Analyst system prompt — CI/CD 工程效能分析专家角色
-- [ ] 分析工具集:
-  - [ ] `analyze_cicd_comments(comments)` — CI/CD 评论识别 + 结构化提取
-  - [ ] `get_cicd_stats(owner, repo)` — 获取 CI/CD 统计数据
-  - [ ] `get_cicd_trends(owner, repo, granularity)` — 获取趋势数据
-  - [ ] `get_failure_analysis(owner, repo)` — 获取失败分析
-  - [ ] `query_pr_details(owner, repo)` — 查询 PR 详情（辅助分析协作模式）
-  - [ ] `query_pr_reviews(owner, repo)` — 查询 PR Reviews（辅助分析 review 质量）
-- [ ] 自主分析 — Agent 根据数据特征选择分析维度
+- [x] Analyst system prompt — CI/CD 工程效能分析专家角色
+- [x] 分析工具集:
+  - [x] `analyze_cicd_comments(comments)` — CI/CD 评论识别 + 结构化提取
+  - [x] `get_cicd_stats(owner, repo)` — 获取 CI/CD 统计数据
+  - [x] `get_cicd_trends(owner, repo, granularity)` — 获取趋势数据
+  - [x] `get_failure_analysis(owner, repo)` — 获取失败分析
+  - [x] `query_pr_details(owner, repo)` — 查询 PR 详情（辅助分析协作模式）
+  - [x] `query_pr_reviews(owner, repo)` — 查询 PR Reviews（辅助分析 review 质量）
+- [x] 自主分析 — Agent 根据数据特征选择分析维度
   - 数据量大时: 聚合统计 + 趋势分析
   - 数据量小时: 逐条深入分析
   - 失败率高时: 重点做根因分析
-- [ ] AI 深度洞察 — Claude 对统计数据做 6 维度深度分析（复用现有 prompt）
+- [x] AI 深度洞察 — Claude 对统计数据做 6 维度深度分析（复用现有 prompt）
 
 ### 24.5 Reporter Agent (报告 Agent)
-- [ ] Reporter system prompt — 报告撰写专家角色，面向不同受众调整报告风格
-- [ ] 报告工具集:
-  - [ ] `generate_stats_report(stats, trends, failure)` — 生成规则引擎统计报告
-  - [ ] `ai_generate_suggestions(analysis, stats)` — AI 生成改进建议
-  - [ ] `ai_risk_assessment(analysis, failure)` — AI 风险评估
-  - [ ] `format_report_md(report)` — Markdown 格式化报告
-  - [ ] `format_report_json(report)` — JSON 结构化报告
-- [ ] 报告分级 — 根据受众生成不同详细程度的报告
+- [x] Reporter system prompt — 报告撰写专家角色，面向不同受众调整报告风格
+- [x] 报告工具集:
+  - [x] `generate_stats_report(stats, trends, failure)` — 生成规则引擎统计报告
+  - [x] `ai_generate_suggestions(analysis, stats)` — AI 生成改进建议
+  - [x] `ai_risk_assessment(analysis, failure)` — AI 风险评估
+  - [x] `format_report_md(report)` — Markdown 格式化报告
+  - [x] `format_report_json(report)` — JSON 结构化报告
+- [x] 报告分级 — 根据受众生成不同详细程度的报告
   - 执行摘要版: 面向管理层，1页纸
   - 技术详情版: 面向工程师，含数据和代码
   - 行动计划版: 面向 PM，含优先级排序的建议列表
