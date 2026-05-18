@@ -226,11 +226,11 @@
 - [x] Agent 错误处理 — 工具调用失败时 Agent 自主决定重试或换策略
 
 ### 24.2 Orchestrator Agent (调度 Agent)
-- [ ] Orchestrator system prompt — 总调度角色，理解用户意图，决定调用哪个 Agent
-- [ ] Agent 路由工具 — `delegate_to_collector()`、`delegate_to_analyst()`、`delegate_to_reporter()`
-- [ ] 任务分解 — 将"分析 rust-lang/rust 的 CI/CD 能力"分解为多 Agent 子任务
-- [ ] 结果汇总 — 收集各 Agent 返回结果，组装最终响应
-- [ ] 决策逻辑 — 根据数据量、平台类型等条件动态调整策略
+- [x] Orchestrator system prompt — 总调度角色，理解用户意图，决定调用哪个 Agent
+- [x] Agent 路由工具 — `delegate_to_collector()`、`delegate_to_analyst()`、`delegate_to_reporter()`
+- [x] 任务分解 — 将"分析 rust-lang/rust 的 CI/CD 能力"分解为多 Agent 子任务
+- [x] 结果汇总 — 收集各 Agent 返回结果，组装最终响应
+- [x] 决策逻辑 — 根据数据量、平台类型等条件动态调整策略
 
 ### 24.3 Collector Agent (数据采集 Agent)
 - [x] Collector system prompt — 数据采集专家角色，理解"需要什么数据"
@@ -280,11 +280,11 @@
   - 例: Analyst 发现缺少评论数据 → 请求 Collector 补充拉取
 
 ### 24.7 LangGraph 多 Agent 图编排
-- [ ] Orchestrator 主图 — `create_react_agent` + 子图调用
-- [ ] Collector 子图 — 采集 Agent 的内部决策图
-- [ ] Analyst 子图 — 分析 Agent 的内部决策图
-- [ ] Reporter 子图 — 报告 Agent 的内部决策图
-- [ ] 图拓扑:
+- [x] Orchestrator 主图 — `create_react_agent` + 子图调用
+- [x] Collector 子图 — 采集 Agent 的内部决策图
+- [x] Analyst 子图 — 分析 Agent 的内部决策图
+- [x] Reporter 子图 — 报告 Agent 的内部决策图
+- [x] 图拓扑:
   ```
   用户请求 → Orchestrator → [判断需要什么]
       ├── delegate_to_collector() → Collector Agent → 返回数据
@@ -292,13 +292,13 @@
       └── delegate_to_reporter()  → Reporter Agent  → 返回报告
   Orchestrator 汇总 → 返回用户
   ```
-- [ ] 保留现有图 — `build_full_analysis_graph()` 保留为快速通道（不需要 Agent 决策时使用）
+- [x] 保留现有图 — `build_full_analysis_graph()` 保留为快速通道（不需要 Agent 决策时使用）
 
 ### 24.8 API 接口
-- [ ] `POST /agent/analyze` — 多 Agent 分析（输入 owner/repo，Orchestrator 自主规划）
-- [ ] `POST /agent/analyze/async` — 异步多 Agent 分析
-- [ ] `GET /agent/status/{task_id}` — 查询 Agent 执行状态（含每个 Agent 的进度）
-- [ ] `GET /agent/tasks` — 列出所有 Agent 任务
+- [x] `POST /agent/analyze` — 多 Agent 分析（输入 owner/repo，Orchestrator 自主规划）
+- [x] `POST /agent/analyze/async` — 异步多 Agent 分析
+- [x] `GET /agent/status/{task_id}` — 查询 Agent 执行状态（含每个 Agent 的进度）
+- [x] `GET /agent/tasks` — 列出所有 Agent 任务
 - [ ] `POST /agent/chat` — 对话式接口（支持追问"深入分析失败原因"等）
 
 ### 24.9 测试用例

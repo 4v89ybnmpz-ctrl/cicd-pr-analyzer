@@ -364,7 +364,7 @@ app/
 #### 实施计划
 - Phase 1: Agent 基类 + Collector Agent (最小可用) ✅
 - Phase 2: Analyst Agent + Reporter Agent (核心能力) ✅
-- Phase 3: Orchestrator + 图编排 (多 Agent 协作)
+- Phase 3: Orchestrator + 图编排 (多 Agent 协作) ✅
 - Phase 4: 通信协议 + API + 测试
 
 #### Phase 1 完成 (2026-05-18)
@@ -404,6 +404,20 @@ app/
     - `format_report_md` — Markdown 格式化
     - `format_report_json` — JSON 验证
 - [test_agent_phase2.py](../workflow/tests/test_agent_phase2.py) - 16 项测试 (100% 通过)
+
+#### Phase 3 完成 (2026-05-18)
+- [orchestrator_agent.py](../workflow/agents/orchestrator_agent.py) - Orchestrator Agent
+  - system prompt: 总调度角色，按顺序调度 Collector → Analyst → Reporter
+  - 3 个路由工具: delegate_to_collector/analyst/reporter
+  - 错误处理: Agent 不可用时返回降级提示
+- [agent_graphs.py](../workflow/agent_graphs.py) - 2 种图模式
+  - `build_multi_agent_graph()`: Orchestrator 自主调度（单节点图，内部 tool_call 决策）
+  - `build_sequential_agent_graph()`: 顺序 3 步（collector → analyst → reporter）
+- [runner.py](../workflow/runner.py) - 新增 `run_multi_agent_analysis()` / `run_multi_agent_async()`
+- [api/routes.py](../workflow/api/routes.py) - 新增 Agent API 端点:
+  - `POST /agent/analyze` / `POST /agent/analyze/async`
+  - `GET /agent/status/{task_id}` / `GET /agent/tasks`
+- [test_agent_phase3.py](../workflow/tests/test_agent_phase3.py) - 11 项测试 (100% 通过)
 
 ### 22. CI/CD 工程能力洞察报告 🚧 (2026-05-18 开始)
 

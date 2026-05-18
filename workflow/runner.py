@@ -123,6 +123,90 @@ def run_full_analysis_async(owner: str, repo: str, max_prs: int = 0) -> str:
     return task_id
 
 
+def run_multi_agent_analysis(owner: str, repo: str, max_prs: int = 0,
+                             mode: str = "orchestrator") -> Dict[str, Any]:
+    """
+    多 Agent 分析
+    :param mode: "orchestrator" (自主调度) 或 "sequential" (顺序执行)
+    """
+    if not workflow_config.ready:
+        return {"error": "工作流未初始化"}
+
+    task_id = f"agent_{owner}_{repo}_{int(datetime.now().timestamp())}"
+    initial_state = _make_initial_state(owner, repo, max_prs)
+
+    with _task_lock:
+        _tasks[task_id] = {
+            "task_id": task_id,
+            "type": f"multi_agent_{mode}",
+            "owner": owner,
+            "repo": repo,
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    try:
+        from .agent_graphs import build_multi_agent_graph, build_sequential_agent_graph
+
+        if mode == "sequential":
+            graph = build_sequential_agent_graph()
+        else:
+            graph = build_multi_agent_graph()
+
+        result = graph.invoke(initial_state)
+
+        with _task_lock:
+            _tasks[task_id]["status"] = "completed"
+            _tasks[task_id]["completed_at"] = result.get("completed_at", "")
+
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "report": result.get("report", {}),
+            "progress": result.get("progress", 100.0),
+            "errors": result.get("errors", []),
+            "mode": mode,
+        }
+    except Exception as e:
+        logger.error(f"多 Agent 分析失败: {e}")
+        with _task_lock:
+            _tasks[task_id]["status"] = "failed"
+            _tasks[task_id]["error"] = str(e)
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "error": str(e),
+            "mode": mode,
+        }
+
+
+def run_multi_agent_async(owner: str, repo: str, max_prs: int = 0,
+                          mode: str = "orchestrator") -> str:
+    """异步多 Agent 分析"""
+    task_id = f"agent_{owner}_{repo}_{int(datetime.now().timestamp())}"
+
+    with _task_lock:
+        _tasks[task_id] = {
+            "task_id": task_id,
+            "type": f"multi_agent_{mode}",
+            "owner": owner,
+            "repo": repo,
+            "status": "pending",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    def _run():
+        result = run_multi_agent_analysis(owner, repo, max_prs, mode)
+        with _task_lock:
+            if task_id in _tasks:
+                _tasks[task_id].update(result)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    executor.submit(_run)
+
+    return task_id
+
+
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     """获取任务状态"""
     with _task_lock:
