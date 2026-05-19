@@ -62,6 +62,11 @@ class WorkflowConfig:
             self.llm = None
 
         self._initialized = True
+
+        # 初始化完成后启动后台线程
+        from .runner import _start_background_threads
+        _start_background_threads()
+
         logger.info("WorkflowConfig 初始化完成")
 
     @property
