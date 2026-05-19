@@ -73,6 +73,9 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# QA 文档
+*_qa.md
+
 # Temporary
 *.tmp
 *.bak
