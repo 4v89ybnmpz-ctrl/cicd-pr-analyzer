@@ -76,6 +76,16 @@ def register_database_routes(router, db):
         result = db.list_pr_reviews(owner, repo, page, size, sort_by, sort_order_int)
         return {**result, "timestamp": datetime.now().isoformat()}
 
+    @router.get("/database/commits")
+    async def query_pr_commits(owner: str = None, repo: str = None, page: int = 1, size: int = 20,
+                               sort_by: str = "updated_at", sort_order: str = "desc"):
+        """查询 PR Commits 数据"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        sort_order_int = -1 if sort_order == "desc" else 1
+        result = db.list_pr_commits(owner, repo, page, size, sort_by, sort_order_int)
+        return {**result, "timestamp": datetime.now().isoformat()}
+
     @router.get("/database/details")
     async def query_pr_details(owner: str = None, repo: str = None, page: int = 1, size: int = 20,
                                sort_by: str = "updated_at", sort_order: str = "desc",

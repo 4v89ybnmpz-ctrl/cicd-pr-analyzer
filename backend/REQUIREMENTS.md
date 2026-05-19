@@ -273,9 +273,9 @@
   - 行动计划版: 面向 PM，含优先级排序的建议列表
 
 ### 24.6 Agent 间通信协议
-- [ ] 消息格式定义 — AgentMessage (sender/receiver/content/metadata)
-- [ ] 数据传递 — 通过 LangGraph State 在 Agent 间传递结构化数据
-- [ ] 结果确认 — 下游 Agent 可以向上游 Agent 请求数据补充
+- [x] 消息格式定义 — AgentMessage (sender/receiver/content/metadata)
+- [x] 数据传递 — 通过 LangGraph State 在 Agent 间传递结构化数据
+- [x] 结果确认 — 下游 Agent 可以向上游 Agent 请求数据补充
   - 例: Reporter 发现分析维度不够 → 请求 Analyst 补充特定维度
   - 例: Analyst 发现缺少评论数据 → 请求 Collector 补充拉取
 
@@ -299,24 +299,24 @@
 - [x] `POST /agent/analyze/async` — 异步多 Agent 分析
 - [x] `GET /agent/status/{task_id}` — 查询 Agent 执行状态（含每个 Agent 的进度）
 - [x] `GET /agent/tasks` — 列出所有 Agent 任务
-- [ ] `POST /agent/chat` — 对话式接口（支持追问"深入分析失败原因"等）
+- [x] `POST /agent/chat` — 对话式接口（支持追问"深入分析失败原因"等）
 
 ### 24.9 测试用例
-- [ ] Agent 基类测试 — 工具绑定、消息处理、错误恢复
-- [ ] Collector Agent 测试 — 工具调用 Mock、增量决策验证
-- [ ] Analyst Agent 测试 — 分析维度选择 Mock、AI 分析 Mock
-- [ ] Reporter Agent 测试 — 报告分级验证、格式化验证
-- [ ] Orchestrator 测试 — Agent 路由决策、任务分解、结果汇总
-- [ ] 端到端集成测试 — 完整多 Agent 协作流程验证
+- [x] Agent 基类测试 — 工具绑定、消息处理、错误恢复
+- [x] Collector Agent 测试 — 工具调用 Mock、增量决策验证
+- [x] Analyst Agent 测试 — 分析维度选择 Mock、AI 分析 Mock
+- [x] Reporter Agent 测试 — 报告分级验证、格式化验证
+- [x] Orchestrator 测试 — Agent 路由决策、任务分解、结果汇总
+- [x] 端到端集成测试 — 完整多 Agent 协作流程验证
 
 ### 24.10 实施优先级
-1. **Phase 1** (基础): 24.1 Agent 基类 + 24.3 Collector Agent（最小可用）
-2. **Phase 2** (核心): 24.4 Analyst Agent + 24.5 Reporter Agent（核心能力）
-3. **Phase 3** (编排): 24.2 Orchestrator + 24.7 图编排（多 Agent 协作）
-4. **Phase 4** (增强): 24.6 通信协议 + 24.8 API + 24.9 测试
+1. **Phase 1** (基础): 24.1 Agent 基类 + 24.3 Collector Agent（最小可用） ✅
+2. **Phase 2** (核心): 24.4 Analyst Agent + 24.5 Reporter Agent（核心能力） ✅
+3. **Phase 3** (编排): 24.2 Orchestrator + 24.7 图编排（多 Agent 协作） ✅
+4. **Phase 4** (增强): 24.6 通信协议 + 24.8 API + 24.9 测试 ✅
 
 ### 24.11 技术依赖
 - [x] langgraph >= 0.2.0 (已安装)
 - [x] langchain-core >= 0.3.0 (已安装)
 - [x] langchain-anthropic >= 0.3.0 (已安装)
-- [ ] 现有服务层包装为 LangChain Tool（github_service / database_service / CICDExtractor）
+- [x] 现有服务层包装为 LangChain Tool（github_service / database_service / CICDExtractor）

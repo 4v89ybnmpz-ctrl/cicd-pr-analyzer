@@ -911,6 +911,131 @@ class GitHubPRService:
             "failed_count": failed_count
         }
 
+    def fetch_pr_commits(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
+        """
+        获取指定 PR 的 Commits
+        :param owner: 仓库所有者
+        :param repo: 仓库名称
+        :param pr_number: PR 编号
+        :return: Commits 数据字典
+        """
+        logger.info(f"开始获取 {owner}/{repo} PR#{pr_number} 的 Commits")
+
+        all_commits = []
+        page = 1
+        error = None
+
+        try:
+            while True:
+                token = self.token_pool.get_token()
+                headers = {
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "GitHub-PR-Fetcher"
+                }
+
+                if token:
+                    headers["Authorization"] = f"token {token}"
+
+                url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}/commits"
+                params = {"per_page": self.per_page, "page": page}
+
+                response = self._make_request(url, headers, params, 30)
+
+                if response.status_code == 404:
+                    error = "PR不存在"
+                    logger.warning(f"{owner}/{repo} PR#{pr_number} 不存在")
+                    break
+
+                if response.status_code != 200:
+                    error = f"API请求失败: {response.status_code}"
+                    logger.error(f"获取 {owner}/{repo} PR#{pr_number} Commits 失败: {response.status_code}")
+                    break
+
+                commits = response.json()
+
+                if not commits:
+                    break
+
+                for commit in commits:
+                    commit_data = commit.get("commit", {})
+                    author = commit_data.get("author", {})
+                    committer = commit_data.get("committer", {})
+                    all_commits.append({
+                        "sha": commit.get("sha", ""),
+                        "message": commit_data.get("message", ""),
+                        "author_name": author.get("name", ""),
+                        "author_email": author.get("email", ""),
+                        "author_date": author.get("date", ""),
+                        "committer_name": committer.get("name", ""),
+                        "committer_date": committer.get("date", ""),
+                        "url": commit.get("html_url", ""),
+                        "verified": commit_data.get("verification", {}).get("verified", False),
+                        "additions": commit.get("stats", {}).get("additions", 0),
+                        "deletions": commit.get("stats", {}).get("deletions", 0),
+                        "total_changes": commit.get("stats", {}).get("total", 0),
+                        "files_changed": len(commit.get("files", [])),
+                    })
+
+                page += 1
+                time.sleep(self.request_delay)
+
+            logger.info(f"获取 {owner}/{repo} PR#{pr_number} Commits 完成，共 {len(all_commits)} 条")
+
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取 {owner}/{repo} PR#{pr_number} Commits 异常: {e}")
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": pr_number,
+            "commits": all_commits,
+            "total": len(all_commits),
+            "error": error
+        }
+
+    def fetch_all_pr_commits(self, owner: str, repo: str, pr_numbers: List[int]) -> Dict[str, Any]:
+        """
+        并发获取多个 PR 的 Commits
+        """
+        logger.info(f"开始并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 的 Commits")
+
+        results = []
+        success_count = 0
+        failed_count = 0
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self.fetch_pr_commits, owner, repo, pr_num): pr_num
+                for pr_num in pr_numbers
+            }
+            for future in as_completed(futures):
+                pr_num = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    if result["error"] is None:
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    results.append({
+                        "owner": owner, "repo": repo, "pr_number": pr_num,
+                        "commits": [], "total": 0, "error": str(e)
+                    })
+
+        logger.info(f"并发获取 Commits 完成，成功: {success_count}, 失败: {failed_count}")
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "results": results,
+            "total_prs": len(pr_numbers),
+            "success_count": success_count,
+            "failed_count": failed_count
+        }
+
     def fetch_all_pr_details_batch(self, owner: str, repo: str, pr_numbers: List[int]) -> Dict[str, Any]:
         """
         并发获取多个PR的评论和时间线
