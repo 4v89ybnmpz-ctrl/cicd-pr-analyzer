@@ -206,7 +206,7 @@ def test_reporter_creation():
     from workflow.agents.reporter_agent import ReporterAgent
     r = ReporterAgent()
     assert r.name == "reporter"
-    assert len(r.tool_names) == 5
+    assert len(r.tool_names) == 6
     assert "generate_stats_report" in r.tool_names
     assert "format_report_md" in r.tool_names
     print("  ✅ ReporterAgent 创建正确")

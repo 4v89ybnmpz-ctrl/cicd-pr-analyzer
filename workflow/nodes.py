@@ -169,7 +169,7 @@ def generate_stats_report_node(state: PipelineState) -> Dict[str, Any]:
     节点: 生成统计报告 (规则引擎)
     纯数据聚合，不依赖 AI
     """
-    from app.api.routers.analysis import _build_insights
+    from workflow.agents.insights_engine import build_insights
 
     owner = state["owner"]
     repo = state["repo"]
@@ -187,7 +187,7 @@ def generate_stats_report_node(state: PipelineState) -> Dict[str, Any]:
     summary = db.get_cicd_summary_from_db(owner, repo)
     trends = db.get_cicd_trends_from_db(owner, repo)
     failure = db.get_cicd_failure_analysis_from_db(owner, repo)
-    insights = _build_insights(summary, failure)
+    insights = build_insights(summary, failure)
 
     stats_report = {
         "owner": owner,

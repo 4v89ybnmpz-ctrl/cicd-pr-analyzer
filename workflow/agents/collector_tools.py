@@ -1,11 +1,13 @@
 """
-Collector Agent 工具集
-将现有 github_service / database_service 封装为 LangChain Tool
+Collector Agent 增强工具集
+支持: 增量采集、并发拉取、断点续传、进度上报
 """
 import json
 import logging
-from typing import Optional
+import time
+from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -27,19 +29,17 @@ def fetch_pr_list(owner: str, repo: str, max_count: int = 0) -> str:
     if result["error"]:
         return f"获取 PR 列表失败: {result['error']}"
 
-    # 保存到数据库
     if db:
         try:
             db.save_pr_data(owner, repo, result)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"数据库写入失败: {e}")
 
     pr_numbers = [pr["number"] for pr in result["prs"]]
     summary = {
-        "owner": owner,
-        "repo": repo,
+        "owner": owner, "repo": repo,
         "total_prs": result["total"],
-        "pr_numbers": pr_numbers[:50],  # 截断避免过长
+        "pr_numbers": pr_numbers[:50],
         "total_returned": len(pr_numbers),
     }
     return json.dumps(summary, ensure_ascii=False)
@@ -64,8 +64,8 @@ def fetch_pr_comments(owner: str, repo: str, pr_numbers: str) -> str:
             if db:
                 try:
                     db.save_pr_comments(owner, repo, pr_num, result)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"数据库写入失败: {e}")
         else:
             results[str(pr_num)] = {"comments": 0, "error": result["error"]}
 
@@ -101,8 +101,8 @@ def fetch_pr_details(owner: str, repo: str, pr_numbers: str) -> str:
             if db:
                 try:
                     db.save_pr_detail(owner, repo, item["pr_number"], item)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"数据库写入失败: {e}")
 
     return json.dumps({
         "owner": owner, "repo": repo,
@@ -136,8 +136,8 @@ def fetch_pr_reviews(owner: str, repo: str, pr_numbers: str) -> str:
             if db:
                 try:
                     db.save_pr_reviews(owner, repo, item["pr_number"], item)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"数据库写入失败: {e}")
 
     return json.dumps({
         "owner": owner, "repo": repo,
@@ -188,3 +188,146 @@ def query_cicd_results(owner: str, repo: str, page: int = 1, size: int = 5) -> s
         }, ensure_ascii=False)
     except Exception as e:
         return f"查询 CI/CD 结果失败: {e}"
+
+
+@tool
+def incremental_fetch(owner: str, repo: str) -> str:
+    """增量采集: 只拉取数据库中没有的新 PR 数据（评论+详情+Reviews）。
+    返回新增数据量。适合重复分析同一项目时使用。"""
+    github_service, db = _get_services()
+    if not github_service:
+        return "错误: GitHub 服务不可用"
+
+    result_summary = {
+        "owner": owner, "repo": repo,
+        "mode": "incremental",
+        "new_prs": 0,
+        "new_comments": 0,
+        "new_details": 0,
+        "new_reviews": 0,
+    }
+
+    # 获取数据库已有 PR
+    existing_prs = set()
+    if db:
+        try:
+            pr_data = db.get_pr_data(owner, repo)
+            if pr_data:
+                existing_prs = {
+                    pr["number"] for pr in pr_data.get("data", {}).get("prs", [])
+                }
+        except Exception as e:
+            logger.warning(f"数据库写入失败: {e}")
+
+    # 获取最新 PR 列表
+    pr_result = github_service.fetch_prs_for_project(owner, repo, max_count=0)
+    if pr_result["error"]:
+        return f"获取 PR 列表失败: {pr_result['error']}"
+
+    all_prs = {pr["number"] for pr in pr_result["prs"]}
+    new_prs = all_prs - existing_prs
+
+    if not new_prs:
+        return json.dumps({**result_summary, "message": "无新增 PR"}, ensure_ascii=False)
+
+    result_summary["new_prs"] = len(new_prs)
+
+    # 保存更新后的 PR 列表
+    if db:
+        try:
+            db.save_pr_data(owner, repo, pr_result)
+        except Exception as e:
+            logger.warning(f"数据库写入失败: {e}")
+
+    # 拉取新 PR 的数据
+    new_pr_list = sorted(list(new_prs))[:100]  # 限制最多 100 个
+
+    for pr_num in new_pr_list:
+        try:
+            comment_result = github_service.fetch_pr_comments(owner, repo, pr_num)
+            if comment_result["error"] is None and db:
+                db.save_pr_comments(owner, repo, pr_num, comment_result)
+                result_summary["new_comments"] += comment_result["total"]
+        except Exception as e:
+            logger.warning(f"数据库写入失败: {e}")
+
+    try:
+        detail_result = github_service.fetch_pr_detail_batch(owner, repo, new_pr_list)
+        for item in detail_result.get("results", []):
+            if item.get("error") is None and db:
+                try:
+                    db.save_pr_detail(owner, repo, item["pr_number"], item)
+                    result_summary["new_details"] += 1
+                except Exception as e:
+                    logger.warning(f"数据库写入失败: {e}")
+    except Exception as e:
+        logger.warning(f"数据库写入失败: {e}")
+
+    try:
+        review_result = github_service.fetch_all_pr_reviews(owner, repo, new_pr_list)
+        for item in review_result.get("results", []):
+            if item.get("error") is None and db:
+                try:
+                    db.save_pr_reviews(owner, repo, item["pr_number"], item)
+                    result_summary["new_reviews"] += 1
+                except Exception as e:
+                    logger.warning(f"数据库写入失败: {e}")
+    except Exception as e:
+        logger.warning(f"数据库写入失败: {e}")
+
+    return json.dumps(result_summary, ensure_ascii=False)
+
+
+@tool
+def parallel_fetch(owner: str, repo: str, pr_numbers: str,
+                   data_types: str = "comments,details,reviews") -> str:
+    """并发拉取多个 PR 的多种数据类型。data_types 是逗号分隔的类型列表。
+    适合需要快速拉取大量数据的场景。"""
+    github_service, db = _get_services()
+    if not github_service:
+        return "错误: GitHub 服务不可用"
+
+    numbers = [int(n.strip()) for n in pr_numbers.split(",") if n.strip()]
+    types = [t.strip() for t in data_types.split(",") if t.strip()]
+
+    results = {"owner": owner, "repo": repo, "fetched_prs": len(numbers)}
+    total_items = 0
+
+    def _fetch_one(pr_num, data_type):
+        try:
+            if data_type == "comments":
+                r = github_service.fetch_pr_comments(owner, repo, pr_num)
+                if r["error"] is None and db:
+                    db.save_pr_comments(owner, repo, pr_num, r)
+                return ("comments", pr_num, r.get("total", 0), r["error"])
+            elif data_type == "details":
+                r = github_service.fetch_pr_detail_batch(owner, repo, [pr_num])
+                items = r.get("results", [])
+                if items and items[0].get("error") is None and db:
+                    db.save_pr_detail(owner, repo, pr_num, items[0])
+                return ("details", pr_num, 1 if items else 0, None)
+            elif data_type == "reviews":
+                r = github_service.fetch_all_pr_reviews(owner, repo, [pr_num])
+                items = r.get("results", [])
+                if items and items[0].get("error") is None and db:
+                    db.save_pr_reviews(owner, repo, pr_num, items[0])
+                return ("reviews", pr_num, len(items[0].get("reviews", [])) if items else 0, None)
+        except Exception as e:
+            return (data_type, pr_num, 0, str(e))
+        return (data_type, pr_num, 0, "unknown type")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = []
+        for pr_num in numbers:
+            for dt in types:
+                futures.append(pool.submit(_fetch_one, pr_num, dt))
+
+        for future in as_completed(futures):
+            data_type, pr_num, count, error = future.result()
+            total_items += count
+            if error:
+                logger.debug(f"并发拉取失败: {data_type} PR#{pr_num}: {error}")
+
+    results["total_items"] = total_items
+    results["data_types"] = types
+    return json.dumps(results, ensure_ascii=False)

@@ -18,76 +18,82 @@ def test_orchestrator_creation():
     from workflow.agents.orchestrator_agent import OrchestratorAgent
     o = OrchestratorAgent()
     assert o.name == "orchestrator"
-    assert len(o.tool_names) == 3
+    assert len(o.tool_names) == 7
     assert "delegate_to_collector" in o.tool_names
     assert "delegate_to_analyst" in o.tool_names
     assert "delegate_to_reporter" in o.tool_names
+    assert "delegate_to_planner" in o.tool_names
+    assert "delegate_to_validator" in o.tool_names
     print("  ✅ OrchestratorAgent 创建正确")
 
 
 def test_delegate_to_collector():
     """测试 delegate_to_collector 路由工具"""
-    from workflow.agents.orchestrator_agent import delegate_to_collector, _agents
+    from workflow.agents.orchestrator_agent import delegate_to_collector
+    from workflow.agents.registry import agent_registry
 
     mock_agent = MagicMock()
     mock_agent.available = True
     mock_agent.run.return_value = {"output": "采集完成: 100 个 PR"}
 
-    _agents["collector"] = mock_agent
+    agent_registry._instances["collector"] = mock_agent
     try:
         result = delegate_to_collector.invoke({"task": "采集 rust-lang/rust 的数据"})
         assert "采集完成" in result
     finally:
-        _agents.pop("collector", None)
+        agent_registry._instances.pop("collector", None)
     print("  ✅ delegate_to_collector 正确路由")
 
 
 def test_delegate_to_analyst():
     """测试 delegate_to_analyst 路由工具"""
-    from workflow.agents.orchestrator_agent import delegate_to_analyst, _agents
+    from workflow.agents.orchestrator_agent import delegate_to_analyst
+    from workflow.agents.registry import agent_registry
 
     mock_agent = MagicMock()
     mock_agent.available = True
     mock_agent.run.return_value = {"output": "分析完成: 成功率 85%"}
 
-    _agents["analyst"] = mock_agent
+    agent_registry._instances["analyst"] = mock_agent
     try:
         result = delegate_to_analyst.invoke({"task": "分析 CI/CD"})
         assert "成功率" in result
     finally:
-        _agents.pop("analyst", None)
+        agent_registry._instances.pop("analyst", None)
     print("  ✅ delegate_to_analyst 正确路由")
 
 
 def test_delegate_to_reporter():
     """测试 delegate_to_reporter 路由工具"""
-    from workflow.agents.orchestrator_agent import delegate_to_reporter, _agents
+    from workflow.agents.orchestrator_agent import delegate_to_reporter
+    from workflow.agents.registry import agent_registry
 
     mock_agent = MagicMock()
     mock_agent.available = True
     mock_agent.run.return_value = {"output": "# CI/CD 洞察报告\n..."}
 
-    _agents["reporter"] = mock_agent
+    agent_registry._instances["reporter"] = mock_agent
     try:
         result = delegate_to_reporter.invoke({"task": "生成报告"})
         assert "洞察报告" in result
     finally:
-        _agents.pop("reporter", None)
+        agent_registry._instances.pop("reporter", None)
     print("  ✅ delegate_to_reporter 正确路由")
 
 
 def test_delegate_agent_unavailable():
     """测试 Agent 不可用时的降级"""
-    from workflow.agents.orchestrator_agent import delegate_to_collector, _agents
+    from workflow.agents.orchestrator_agent import delegate_to_collector
+    from workflow.agents.registry import agent_registry
 
     mock_agent = MagicMock()
     mock_agent.available = False
-    _agents["collector"] = mock_agent
+    agent_registry._instances["collector"] = mock_agent
     try:
         result = delegate_to_collector.invoke({"task": "采集数据"})
         assert "不可用" in result
     finally:
-        _agents.pop("collector", None)
+        agent_registry._instances.pop("collector", None)
     print("  ✅ Agent 不可用时降级正确")
 
 
@@ -101,6 +107,7 @@ def test_multi_agent_graph_build():
     g = build_multi_agent_graph()
     nodes = list(g.get_graph().nodes.keys())
     assert "orchestrator" in nodes
+    assert "planner" in nodes
     print("  ✅ 多 Agent 图构建正确")
 
 
@@ -109,14 +116,16 @@ def test_sequential_agent_graph_build():
     from workflow.agent_graphs import build_sequential_agent_graph
     g = build_sequential_agent_graph()
     nodes = list(g.get_graph().nodes.keys())
+    assert "planner" in nodes
     assert "collector" in nodes
     assert "analyst" in nodes
+    assert "validator" in nodes
     assert "reporter" in nodes
     print("  ✅ 顺序 Agent 图构建正确")
 
 
 def test_multi_agent_graph_invoke():
-    """测试多 Agent 图执行（Mock create_react_agent）"""
+    """测试多 Agent 图执行（Mock Agent 创建）"""
     from workflow.agent_graphs import build_multi_agent_graph
     from workflow.config import workflow_config
 
@@ -127,7 +136,7 @@ def test_multi_agent_graph_invoke():
     workflow_config.llm = mock_llm
 
     try:
-        with patch("workflow.agents.base_agent.create_react_agent") as mock_create:
+        with patch("langgraph.prebuilt.create_react_agent") as mock_create:
             mock_agent_instance = MagicMock()
             mock_agent_instance.invoke.return_value = {
                 "messages": [MagicMock(content="报告: 分析完成", type="ai")]
@@ -169,11 +178,19 @@ def test_sequential_agent_graph_invoke():
     import workflow.agents.collector_agent as col_mod
     import workflow.agents.analyst_agent as ana_mod
     import workflow.agents.reporter_agent as rep_mod
+    import workflow.agents.planner_agent as plan_mod
+    import workflow.agents.validator_agent as val_mod
 
-    orig_c, orig_a, orig_r = col_mod.CollectorAgent, ana_mod.AnalystAgent, rep_mod.ReporterAgent
+    orig_c = col_mod.CollectorAgent
+    orig_a = ana_mod.AnalystAgent
+    orig_r = rep_mod.ReporterAgent
+    orig_p = plan_mod.PlannerAgent
+    orig_v = val_mod.ValidatorAgent
     col_mod.CollectorAgent = lambda **kw: make_mock_agent("collector")
     ana_mod.AnalystAgent = lambda **kw: make_mock_agent("analyst")
     rep_mod.ReporterAgent = lambda **kw: make_mock_agent("reporter")
+    plan_mod.PlannerAgent = lambda **kw: make_mock_agent("planner")
+    val_mod.ValidatorAgent = lambda **kw: make_mock_agent("validator")
 
     try:
         state = {
@@ -188,10 +205,14 @@ def test_sequential_agent_graph_invoke():
         }
         result = g.invoke(state)
     finally:
-        col_mod.CollectorAgent, ana_mod.AnalystAgent, rep_mod.ReporterAgent = orig_c, orig_a, orig_r
+        col_mod.CollectorAgent = orig_c
+        ana_mod.AnalystAgent = orig_a
+        rep_mod.ReporterAgent = orig_r
+        plan_mod.PlannerAgent = orig_p
+        val_mod.ValidatorAgent = orig_v
 
     assert result["progress"] == 100.0
-    assert result["current_step"] == "reporter"
+    assert result["current_step"] == "reported"
     assert "report" in result
     print("  ✅ 顺序 Agent 图执行正确")
 

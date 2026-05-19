@@ -131,7 +131,7 @@ def test_collector_agent_creation():
 
     agent = CollectorAgent()
     assert agent.name == "collector"
-    assert len(agent.tool_names) == 6
+    assert len(agent.tool_names) == 8
     assert "fetch_pr_list" in agent.tool_names
     assert "check_db_cache" in agent.tool_names
     assert "query_cicd_results" in agent.tool_names
