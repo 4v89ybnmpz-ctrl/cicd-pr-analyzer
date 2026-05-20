@@ -18,7 +18,14 @@ def _get_services():
 @tool
 def analyze_cicd_comments(owner: str, repo: str) -> str:
     """从数据库中的 PR 评论识别并提取 CI/CD 构建结果。返回提取到的 CI/CD 记录数和状态分布。"""
-    from app.analysis.cicd_extractor import CICDExtractor
+    try:
+        from app.analysis.cicd_extractor import CICDExtractor
+    except ImportError:
+        return json.dumps({
+            "error": "CICDExtractor 模块不可用（backend 未在 Python 路径中）",
+            "hint": "通过后端服务调用，或确保 backend/ 目录已加入 sys.path",
+        }, ensure_ascii=False)
+
     _, db = _get_services()
     if not db:
         return "数据库不可用"

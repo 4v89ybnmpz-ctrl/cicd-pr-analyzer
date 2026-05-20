@@ -248,6 +248,11 @@ class PlannerAgent(BaseAgent):
 
     name = "planner"
     system_prompt = PLANNER_SYSTEM_PROMPT
+    description = "任务规划 Agent，分析项目画像并生成 DAG 执行计划"
+    capabilities = [
+        "project_profiling", "dag_planning", "strategy_selection",
+        "parallel_group_identification",
+    ]
 
     def _register_tools(self) -> list:
         return [

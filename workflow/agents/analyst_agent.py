@@ -59,6 +59,11 @@ class AnalystAgent(BaseAgent):
 
     name = "analyst"
     system_prompt = ANALYST_SYSTEM_PROMPT
+    description = "CI/CD 工程效能分析 Agent，提取构建结果并做深度洞察"
+    capabilities = [
+        "cicd_extraction", "statistics_analysis", "trend_analysis",
+        "failure_analysis", "pr_detail_analysis", "review_analysis",
+    ]
 
     def _register_tools(self) -> list:
         return [

@@ -217,6 +217,11 @@ class ValidatorAgent(BaseAgent):
 
     name = "validator"
     system_prompt = VALIDATOR_SYSTEM_PROMPT
+    description = "数据质量验证 Agent，检查数据完整性和分析可信度"
+    capabilities = [
+        "data_completeness_check", "stats_sanity_check",
+        "data_freshness_check", "analysis_quality_assessment",
+    ]
 
     def _register_tools(self) -> list:
         return [

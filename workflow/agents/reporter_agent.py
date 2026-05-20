@@ -56,10 +56,15 @@ REPORTER_SYSTEM_PROMPT = """你是一位技术报告撰写专家。你的任务�
 
 
 class ReporterAgent(BaseAgent):
-    """报告撰写 Agent"""
+    """报告生成 Agent"""
 
     name = "reporter"
     system_prompt = REPORTER_SYSTEM_PROMPT
+    description = "报告生成 Agent，整合统计数据和 AI 分析，输出 Markdown/HTML/JSON 格式报告"
+    capabilities = [
+        "stats_report", "ai_suggestions", "risk_assessment",
+        "markdown_format", "html_format", "json_format",
+    ]
 
     def _register_tools(self) -> list:
         return [

@@ -79,6 +79,12 @@ class CollectorAgent(BaseAgent):
 
     name = "collector"
     system_prompt = COLLECTOR_SYSTEM_PROMPT
+    description = "数据采集 Agent，从 GitHub 获取 PR 数据（列表、评论、详情、Reviews）"
+    capabilities = [
+        "pr_list_fetch", "pr_comments_fetch", "pr_details_fetch",
+        "pr_reviews_fetch", "db_cache_check", "incremental_fetch",
+        "parallel_fetch",
+    ]
 
     def _register_tools(self) -> list:
         return [
