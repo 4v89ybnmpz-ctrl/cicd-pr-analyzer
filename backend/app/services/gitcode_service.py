@@ -1,39 +1,41 @@
 """
-GitCode PR 服务模块
+GitCode PR 服务模块（异步版本）
 负责从 GitCode API 获取 PR 数据
 GitCode 基于 GitLab，使用 GitLab API 风格
+使用 httpx 替代 requests，asyncio.gather 替代 ThreadPoolExecutor
 """
-import requests
-import threading
+import asyncio
 import time
 from typing import Dict, Any, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from functools import wraps
 import re
+import urllib.parse
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 
 def retry_on_failure(max_retries: int = 3, delay: int = 5):
     """
-    重试装饰器
+    异步重试装饰器
     :param max_retries: 最大重试次数
     :param delay: 重试间隔（秒）
     :return: 装饰器函数
     """
     def decorator(func):
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             last_exception = None
             for attempt in range(max_retries):
                 try:
-                    return func(*args, **kwargs)
+                    return await func(*args, **kwargs)
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries - 1:
                         logger.warning(f"GitCode 请求失败 (尝试 {attempt + 1}/{max_retries}): {e}, {delay}秒后重试...")
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
                     else:
                         logger.error(f"GitCode 请求失败，已达到最大重试次数 {max_retries}: {e}")
             raise last_exception
@@ -43,7 +45,7 @@ def retry_on_failure(max_retries: int = 3, delay: int = 5):
 
 class GitCodeTokenPool:
     """
-    GitCode Token 池管理类
+    GitCode Token 池管理类（异步安全）
     支持多个 Token 轮询使用
     """
 
@@ -54,10 +56,10 @@ class GitCodeTokenPool:
         """
         self.tokens = tokens if tokens else []
         self.current_index = 0
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
         logger.info(f"GitCode Token 池初始化完成，共 {len(self.tokens)} 个 Token")
 
-    def get_token(self) -> Optional[str]:
+    async def get_token(self) -> Optional[str]:
         """
         获取下一个可用的 Token
         :return: Token 字符串
@@ -65,30 +67,29 @@ class GitCodeTokenPool:
         if not self.tokens:
             return None
 
-        with self.lock:
+        async with self.lock:
             token = self.tokens[self.current_index]
             self.current_index = (self.current_index + 1) % len(self.tokens)
             return token
 
-    def add_token(self, token: str):
+    async def add_token(self, token: str):
         """添加 Token"""
-        with self.lock:
+        async with self.lock:
             if token not in self.tokens:
                 self.tokens.append(token)
                 logger.info(f"GitCode Token 已添加，当前共 {len(self.tokens)} 个 Token")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取 Token 池统计信息"""
-        with self.lock:
-            return {
-                "total_tokens": len(self.tokens),
-                "current_index": self.current_index
-            }
+        return {
+            "total_tokens": len(self.tokens),
+            "current_index": self.current_index
+        }
 
 
 class GitCodePRService:
     """
-    GitCode PR 服务类
+    GitCode PR 服务类（异步版本）
     GitCode 基于 GitLab，使用 GitLab API 风格
     GitCode API 文档: https://gitcode.net/help/api/merge_requests.md
     """
@@ -109,6 +110,8 @@ class GitCodePRService:
         self.max_workers = api_settings.get("max_workers", 3)
         self.max_retries = 3
         self.retry_delay = 5
+        # 异步 HTTP 客户端（跟随服务生命周期，在 main.py lifespan 中关闭）
+        self._client: Optional[httpx.AsyncClient] = None
         logger.info(f"GitCode PR 服务初始化完成，Base URL: {self.base_url}")
 
         # 已知的 Bot 用户名模式
@@ -129,12 +132,24 @@ class GitCodePRService:
             r"^bot-.*",
         ]
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_client(self) -> httpx.AsyncClient:
+        """获取或创建异步 HTTP 客户端"""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def close(self):
+        """关闭 HTTP 客户端"""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+    async def _get_headers(self) -> Dict[str, str]:
         """
         获取请求头
         :return: 请求头字典
         """
-        token = self.token_pool.get_token()
+        token = await self.token_pool.get_token()
         headers = {
             "Accept": "application/json",
         }
@@ -175,12 +190,11 @@ class GitCodePRService:
         :param repo: 仓库名
         :return: 编码后的项目路径
         """
-        import urllib.parse
         return urllib.parse.quote(f"{owner}/{repo}", safe='')
 
     @retry_on_failure(max_retries=3, delay=5)
-    def fetch_merge_requests(self, owner: str, repo: str, state: str = None,
-                             page: int = 1, per_page: int = None) -> Dict[str, Any]:
+    async def fetch_merge_requests(self, owner: str, repo: str, state: str = None,
+                                   page: int = 1, per_page: int = None) -> Dict[str, Any]:
         """
         获取合并请求列表（GitCode/GitLab 称 MR，等同于 PR）
         :param owner: 项目所有者/命名空间
@@ -204,8 +218,9 @@ class GitCodePRService:
 
         logger.info(f"获取 GitCode MR: {owner}/{repo}, page={page}")
 
-        headers = self._get_headers()
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        headers = await self._get_headers()
+        client = self._get_client()
+        response = await client.get(url, headers=headers, params=params, timeout=30)
 
         if response.status_code != 200:
             logger.error(f"获取 GitCode MR 失败: {response.status_code} - {response.text}")
@@ -228,7 +243,7 @@ class GitCodePRService:
         total_count = int(response.headers.get("X-Total", 0))
         total_pages = int(response.headers.get("X-Total-Pages", 0))
 
-        time.sleep(self.request_delay)
+        await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -280,7 +295,7 @@ class GitCodePRService:
         }
 
     @retry_on_failure(max_retries=3, delay=5)
-    def fetch_mr_comments(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
+    async def fetch_mr_comments(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
         """
         获取合并请求评论
         :param owner: 项目所有者
@@ -293,8 +308,9 @@ class GitCodePRService:
 
         logger.info(f"获取 GitCode MR 评论: {owner}/{repo} !{mr_iid}")
 
-        headers = self._get_headers()
-        response = requests.get(url, headers=headers, timeout=30)
+        headers = await self._get_headers()
+        client = self._get_client()
+        response = await client.get(url, headers=headers, timeout=30)
 
         if response.status_code != 200:
             logger.error(f"获取 GitCode MR 评论失败: {response.status_code}")
@@ -318,7 +334,7 @@ class GitCodePRService:
             formatted_comment = self._format_comment(note)
             comments.append(formatted_comment)
 
-        time.sleep(self.request_delay)
+        await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -357,7 +373,7 @@ class GitCodePRService:
         }
 
     @retry_on_failure(max_retries=3, delay=5)
-    def fetch_mr_detail(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
+    async def fetch_mr_detail(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
         """
         获取合并请求详细信息
         :param owner: 项目所有者
@@ -370,8 +386,9 @@ class GitCodePRService:
 
         logger.info(f"获取 GitCode MR 详情: {owner}/{repo} !{mr_iid}")
 
-        headers = self._get_headers()
-        response = requests.get(url, headers=headers, timeout=30)
+        headers = await self._get_headers()
+        client = self._get_client()
+        response = await client.get(url, headers=headers, timeout=30)
 
         if response.status_code != 200:
             logger.error(f"获取 GitCode MR 详情失败: {response.status_code}")
@@ -386,7 +403,7 @@ class GitCodePRService:
         data = response.json()
         detail = self._format_mr_detail(data)
 
-        time.sleep(self.request_delay)
+        await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -467,7 +484,7 @@ class GitCodePRService:
         }
 
     @retry_on_failure(max_retries=3, delay=5)
-    def fetch_mr_changes(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
+    async def fetch_mr_changes(self, owner: str, repo: str, mr_iid: int) -> Dict[str, Any]:
         """
         获取合并请求代码变更
         :param owner: 项目所有者
@@ -480,8 +497,9 @@ class GitCodePRService:
 
         logger.info(f"获取 GitCode MR 变更: {owner}/{repo} !{mr_iid}")
 
-        headers = self._get_headers()
-        response = requests.get(url, headers=headers, timeout=30)
+        headers = await self._get_headers()
+        client = self._get_client()
+        response = await client.get(url, headers=headers, timeout=30)
 
         if response.status_code != 200:
             return {
@@ -506,7 +524,7 @@ class GitCodePRService:
                 "deleted_file": change.get("deleted_file", False)
             })
 
-        time.sleep(self.request_delay)
+        await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -517,7 +535,7 @@ class GitCodePRService:
             "error": None
         }
 
-    def fetch_all_mr_comments(self, owner: str, repo: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def fetch_all_mr_comments(self, owner: str, repo: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         并发获取所有 MR 的评论
         :param owner: 项目所有者
@@ -528,41 +546,37 @@ class GitCodePRService:
         logger.info(f"并发获取 GitCode {owner}/{repo} 所有 MR 评论，限制: {limit}")
 
         # 先获取 MR 列表
-        mr_data = self.fetch_merge_requests(owner, repo, state="all", per_page=limit)
+        mr_data = await self.fetch_merge_requests(owner, repo, state="all", per_page=limit)
         merge_requests = mr_data.get("merge_requests", [])
 
         if not merge_requests:
             return []
 
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_mr = {
-                executor.submit(self.fetch_mr_comments, owner, repo, mr["iid"]): mr
-                for mr in merge_requests[:limit]
-            }
+        semaphore = asyncio.Semaphore(self.max_workers)
 
-            for future in as_completed(future_to_mr):
-                mr = future_to_mr[future]
+        async def _fetch_comment(mr):
+            async with semaphore:
                 try:
-                    comment_data = future.result()
-                    results.append({
+                    comment_data = await self.fetch_mr_comments(owner, repo, mr["iid"])
+                    return {
                         "mr_iid": mr["iid"],
                         "mr_title": mr["title"],
                         "comments": comment_data.get("comments", []),
                         "total_count": comment_data.get("total_count", 0)
-                    })
+                    }
                 except Exception as e:
                     logger.error(f"获取 MR !{mr['iid']} 评论失败: {e}")
-                    results.append({
+                    return {
                         "mr_iid": mr["iid"],
                         "mr_title": mr["title"],
                         "comments": [],
                         "error": str(e)
-                    })
+                    }
 
-        return results
+        results = await asyncio.gather(*[_fetch_comment(mr) for mr in merge_requests[:limit]])
+        return list(results)
 
-    def fetch_all_mr_details(self, owner: str, repo: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def fetch_all_mr_details(self, owner: str, repo: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         并发获取所有 MR 的详细信息
         :param owner: 项目所有者
@@ -572,29 +586,25 @@ class GitCodePRService:
         """
         logger.info(f"并发获取 GitCode {owner}/{repo} 所有 MR 详情，限制: {limit}")
 
-        mr_data = self.fetch_merge_requests(owner, repo, state="all", per_page=limit)
+        mr_data = await self.fetch_merge_requests(owner, repo, state="all", per_page=limit)
         merge_requests = mr_data.get("merge_requests", [])
 
         if not merge_requests:
             return []
 
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_mr = {
-                executor.submit(self.fetch_mr_detail, owner, repo, mr["iid"]): mr
-                for mr in merge_requests[:limit]
-            }
+        semaphore = asyncio.Semaphore(self.max_workers)
 
-            for future in as_completed(future_to_mr):
-                mr = future_to_mr[future]
+        async def _fetch_detail(mr):
+            async with semaphore:
                 try:
-                    detail_data = future.result()
-                    results.append(detail_data)
+                    detail_data = await self.fetch_mr_detail(owner, repo, mr["iid"])
+                    return detail_data
                 except Exception as e:
                     logger.error(f"获取 MR !{mr['iid']} 详情失败: {e}")
-                    results.append({
+                    return {
                         "mr_iid": mr["iid"],
                         "error": str(e)
-                    })
+                    }
 
-        return results
+        results = await asyncio.gather(*[_fetch_detail(mr) for mr in merge_requests[:limit]])
+        return list(results)

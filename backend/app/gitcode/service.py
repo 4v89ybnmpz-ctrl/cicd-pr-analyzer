@@ -1,6 +1,6 @@
 """
-AtomGit API 服务
-通过 AtomGit API v5 获取 PR 和评论数据
+AtomGit API 服务（异步版本）
+通过 AtomGit API v5 获取 PR 和评论数据，使用 httpx 异步客户端
 
 API 文档:
   GET /repos/:owner/:repo/pulls              → PR 列表
@@ -8,12 +8,12 @@ API 文档:
   GET /repos/:owner/:repo/pulls/:number/comments → PR 评论
 """
 import re
-import time
+import asyncio
 import logging
-import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from functools import wraps
-from datetime import datetime
+
+import httpx
 
 from .config import ATOMGIT_CONFIG
 
@@ -21,19 +21,19 @@ logger = logging.getLogger(__name__)
 
 
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
-    """重试装饰器"""
+    """异步重试装饰器"""
     def decorator(func):
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             last_exception = None
             for attempt in range(max_retries):
                 try:
-                    return func(*args, **kwargs)
+                    return await func(*args, **kwargs)
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries - 1:
                         logger.warning(f"请求失败 (尝试 {attempt+1}/{max_retries}): {e}, {delay}s 后重试")
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
                     else:
                         logger.error(f"请求失败，已达最大重试次数: {e}")
             raise last_exception
@@ -43,7 +43,7 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
 
 class AtomGitService:
     """
-    AtomGit API 服务类
+    AtomGit API 服务类（异步版本）
     封装 AtomGit API v5 的 PR 评论数据获取
     """
 
@@ -65,7 +65,22 @@ class AtomGitService:
             "ci-bot", "renovate-bot", "dependabot-bot",
         ]
 
+        # 异步 HTTP 客户端（跟随服务生命周期）
+        self._client: Optional[httpx.AsyncClient] = None
+
         logger.info(f"AtomGit 服务初始化完成, Base URL: {self.base_url}")
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """获取或创建异步 HTTP 客户端"""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.config["timeout"])
+        return self._client
+
+    async def close(self):
+        """关闭 HTTP 客户端"""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     def _get_params(self, **kwargs) -> Dict[str, Any]:
         """构建请求参数（自动附加 token）"""
@@ -85,10 +100,11 @@ class AtomGitService:
         return False
 
     @retry_on_failure(max_retries=3, delay=1.0)
-    def _request(self, url: str, params: Dict = None) -> requests.Response:
-        """发起 API 请求"""
+    async def _request(self, url: str, params: Dict = None) -> httpx.Response:
+        """发起异步 API 请求"""
+        client = self._get_client()
         headers = {"Accept": "application/json"}
-        response = requests.get(url, headers=headers, params=params, timeout=self.config["timeout"])
+        response = await client.get(url, headers=headers, params=params)
 
         if response.status_code == 401:
             raise Exception(f"Token 无效: {response.text[:200]}")
@@ -99,16 +115,16 @@ class AtomGitService:
 
         return response
 
-    def get_user(self) -> Optional[Dict[str, Any]]:
+    async def get_user(self) -> Optional[Dict[str, Any]]:
         """获取当前用户信息（验证 Token）"""
         try:
-            r = self._request(f"{self.base_url}/user", self._get_params())
+            r = await self._request(f"{self.base_url}/user", self._get_params())
             return r.json()
         except Exception as e:
             logger.error(f"获取用户信息失败: {e}")
             return None
 
-    def fetch_pulls(self, owner: str, repo: str,
+    async def fetch_pulls(self, owner: str, repo: str,
                     state: str = "all", page: int = 1,
                     per_page: int = None, sort: str = "updated",
                     direction: str = "desc") -> Dict[str, Any]:
@@ -133,7 +149,7 @@ class AtomGitService:
         logger.info(f"获取 PR 列表: {owner}/{repo}, page={page}")
 
         try:
-            r = self._request(url, params)
+            r = await self._request(url, params)
             pulls = r.json()
 
             # 格式化 PR 数据
@@ -151,7 +167,7 @@ class AtomGitService:
             logger.error(f"获取 PR 列表失败: {e}")
             return {"owner": owner, "repo": repo, "pulls": [], "total": 0, "error": str(e)}
 
-    def fetch_pull_comments(self, owner: str, repo: str,
+    async def fetch_pull_comments(self, owner: str, repo: str,
                             pull_number: int, page: int = 1,
                             per_page: int = None) -> Dict[str, Any]:
         """
@@ -169,7 +185,7 @@ class AtomGitService:
         logger.info(f"获取 PR 评论: {owner}/{repo} #{pull_number}, page={page}")
 
         try:
-            r = self._request(url, params)
+            r = await self._request(url, params)
             comments = r.json()
 
             # 格式化评论
@@ -189,7 +205,7 @@ class AtomGitService:
             return {"owner": owner, "repo": repo, "pull_number": pull_number,
                     "comments": [], "total": 0, "error": str(e)}
 
-    def fetch_all_pull_comments(self, owner: str, repo: str,
+    async def fetch_all_pull_comments(self, owner: str, repo: str,
                                 pull_number: int) -> Dict[str, Any]:
         """
         获取 PR 的全部评论（自动分页）
@@ -202,7 +218,7 @@ class AtomGitService:
         page = 1
 
         while True:
-            result = self.fetch_pull_comments(owner, repo, pull_number, page=page, per_page=100)
+            result = await self.fetch_pull_comments(owner, repo, pull_number, page=page, per_page=100)
             if result.get("error"):
                 return result
 
@@ -213,7 +229,7 @@ class AtomGitService:
                 break
 
             page += 1
-            time.sleep(self.request_delay)
+            await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -224,7 +240,7 @@ class AtomGitService:
             "error": None,
         }
 
-    def fetch_pulls_with_comments(self, owner: str, repo: str,
+    async def fetch_pulls_with_comments(self, owner: str, repo: str,
                                   limit: int = 10, state: str = "all") -> Dict[str, Any]:
         """
         批量获取 PR 及其评论
@@ -237,7 +253,7 @@ class AtomGitService:
         logger.info(f"批量获取 {owner}/{repo} PR 评论, limit={limit}")
 
         # 获取 PR 列表
-        pulls_result = self.fetch_pulls(owner, repo, state=state, per_page=limit)
+        pulls_result = await self.fetch_pulls(owner, repo, state=state, per_page=limit)
         if pulls_result.get("error"):
             return pulls_result
 
@@ -250,7 +266,7 @@ class AtomGitService:
             pull_number = pull["number"]
 
             # 获取评论
-            comment_result = self.fetch_all_pull_comments(owner, repo, pull_number)
+            comment_result = await self.fetch_all_pull_comments(owner, repo, pull_number)
             comments = comment_result.get("comments", [])
 
             # 统计
@@ -273,7 +289,7 @@ class AtomGitService:
                 f"{len(comments)} 条评论 (Bot:{pr_bot})"
             )
 
-            time.sleep(self.request_delay)
+            await asyncio.sleep(self.request_delay)
 
         return {
             "owner": owner,
@@ -285,11 +301,11 @@ class AtomGitService:
             "error": None,
         }
 
-    def fetch_all_project_comments(self, owner: str, repo: str,
-                                    state: str = "all",
-                                    max_prs: int = 0,
-                                    skip_no_comments: bool = False,
-                                    on_pr_done: callable = None) -> Dict[str, Any]:
+    async def fetch_all_project_comments(self, owner: str, repo: str,
+                                        state: str = "all",
+                                        max_prs: int = 0,
+                                        skip_no_comments: bool = False,
+                                        on_pr_done: callable = None) -> Dict[str, Any]:
         """
         获取整个项目的全部 PR 评论（自动分页遍历所有 PR）
         :param owner: 仓库所有者
@@ -311,7 +327,7 @@ class AtomGitService:
 
         # 遍历所有 PR 页
         while True:
-            pulls_result = self.fetch_pulls(owner, repo, state=state, page=page, per_page=per_page)
+            pulls_result = await self.fetch_pulls(owner, repo, state=state, page=page, per_page=per_page)
             if pulls_result.get("error"):
                 logger.error(f"获取 PR 列表失败 (page={page}): {pulls_result['error']}")
                 break
@@ -334,7 +350,7 @@ class AtomGitService:
                     continue
 
                 # 获取评论
-                comment_result = self.fetch_all_pull_comments(owner, repo, pull_number)
+                comment_result = await self.fetch_all_pull_comments(owner, repo, pull_number)
                 comments = comment_result.get("comments", [])
 
                 pr_bot = sum(1 for c in comments if c.get("is_bot"))
@@ -363,7 +379,7 @@ class AtomGitService:
                     except Exception:
                         pass
 
-                time.sleep(self.request_delay)
+                await asyncio.sleep(self.request_delay)
 
             # 检查是否需要继续翻页
             if max_prs > 0 and total_prs >= max_prs:
@@ -372,7 +388,7 @@ class AtomGitService:
                 break
 
             page += 1
-            time.sleep(self.request_delay)
+            await asyncio.sleep(self.request_delay)
 
         logger.info(
             f"全量获取完成: {owner}/{repo} "

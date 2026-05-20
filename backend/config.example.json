@@ -43,8 +43,35 @@
     "backup_count": 5
   },
   "cors": {
-    "Gallow_origins": ["*"],
+    "allow_origins": ["*"],
     "allow_methods": ["*"],
-    "allow_headers": ["*"]
+    "allow_headers": ["*"],
+    "allow_credentials": true
+  },
+  "security": {
+    "auth_enabled": false,
+    "api_keys": [
+      {
+        "key": "sk-your-api-key-here",
+        "name": "default",
+        "enabled": true
+      }
+    ],
+    "rate_limit": {
+      "enabled": true,
+      "window_seconds": 60,
+      "max_requests": 60,
+      "strict_max_requests": 20,
+      "strict_paths": [
+        "/github/prs/details/batch",
+        "/analysis/cicd/analyze",
+        "/agent/analyze",
+        "/browser/fetch"
+      ]
+    },
+    "security_headers": {
+      "enabled": true,
+      "custom_headers": {}
+    }
   }
 }

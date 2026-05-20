@@ -5,13 +5,15 @@ from fastapi import HTTPException
 from datetime import datetime
 import logging
 
+from app.models.responses import ConfigResponse, ConfigReloadResponse, CacheStatsResponse, MessageResponse
+
 logger = logging.getLogger(__name__)
 
 
 def register_config_routes(router, cache, github_service, config_manager):
     """注册配置相关路由"""
 
-    @router.get("/config")
+    @router.get("/config", response_model=ConfigResponse)
     async def get_config():
         """获取配置信息"""
         logger.info("获取配置信息")
@@ -27,7 +29,7 @@ def register_config_routes(router, cache, github_service, config_manager):
             "timestamp": datetime.now().isoformat()
         }
 
-    @router.post("/config/reload")
+    @router.post("/config/reload", response_model=ConfigReloadResponse)
     async def reload_config():
         """重新加载配置"""
         logger.info("重新加载配置")
@@ -67,14 +69,14 @@ def register_config_routes(router, cache, github_service, config_manager):
 def register_cache_routes(router, cache):
     """注册缓存相关路由"""
 
-    @router.get("/cache/stats")
+    @router.get("/cache/stats", response_model=CacheStatsResponse)
     async def get_cache_stats():
         """获取缓存统计信息"""
         logger.info("获取缓存统计信息")
         stats = cache.get_stats()
         return {"cache_stats": stats, "timestamp": datetime.now().isoformat()}
 
-    @router.delete("/cache/clear")
+    @router.delete("/cache/clear", response_model=MessageResponse)
     async def clear_cache():
         """清空缓存"""
         logger.info("清空缓存")

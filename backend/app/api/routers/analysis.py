@@ -10,6 +10,7 @@ from typing import Optional
 from app.models.cicd_models import (
     CICDReport, CICDResultSummary, CICDInsight, TimeGranularity,
 )
+from app.models.responses import CICDAnalysisTriggerResponse, CICDTrendsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 def register_analysis_routes(router: APIRouter, db, cache):
     """注册 CI/CD 分析路由"""
 
-    @router.post("/analysis/cicd/analyze/{owner}/{repo}", tags=["CI/CD 分析"])
+    @router.post("/analysis/cicd/analyze/{owner}/{repo}", tags=["CI/CD 分析"], response_model=CICDAnalysisTriggerResponse)
     async def analyze_cicd_comments(
         owner: str,
         repo: str,
@@ -35,9 +36,12 @@ def register_analysis_routes(router: APIRouter, db, cache):
         extractor = CICDExtractor()
 
         # 从 pr_comments 集合读取该项目的所有评论
-        collection = db.db['pr_comments']
         query = {"owner": owner, "repo": repo}
-        comments_docs = list(collection.find(query, {"_id": 0}))
+        try:
+            comments_docs = await db.db['pr_comments'].find(query, {"_id": 0}).to_list(length=None)
+        except Exception as e:
+            logger.error(f"查询 pr_comments 失败: {e}")
+            raise HTTPException(status_code=500, detail=f"查询评论数据失败: {e}")
 
         if not comments_docs:
             return {"message": "未找到评论数据", "owner": owner, "repo": repo, "analyzed": 0}
@@ -67,7 +71,7 @@ def register_analysis_routes(router: APIRouter, db, cache):
                     break
             db_results.append(r_dict)
 
-        save_result = db.save_cicd_results_batch(db_results)
+        save_result = await db.save_cicd_results_batch(db_results)
 
         return {
             "message": "CI/CD 分析完成",
@@ -98,14 +102,14 @@ def register_analysis_routes(router: APIRouter, db, cache):
             start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
         # 获取汇总统计
-        summary_data = db.get_cicd_summary_from_db(owner, repo, start_date, end_date)
+        summary_data = await db.get_cicd_summary_from_db(owner, repo, start_date, end_date)
 
         # 获取趋势数据
-        trends = db.get_cicd_trends_from_db(owner, repo, granularity="day",
+        trends = await db.get_cicd_trends_from_db(owner, repo, granularity="day",
                                             start_date=start_date, end_date=end_date)
 
         # 获取失败分析
-        failure_analysis = db.get_cicd_failure_analysis_from_db(owner, repo,
+        failure_analysis = await db.get_cicd_failure_analysis_from_db(owner, repo,
                                                                  start_date=start_date, end_date=end_date)
 
         # 构建洞察项
@@ -138,9 +142,9 @@ def register_analysis_routes(router: APIRouter, db, cache):
         """获取 CI/CD 统计数据"""
         if db is None or db.db is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
-        return db.get_cicd_summary_from_db(owner, repo, start_date, end_date)
+        return await db.get_cicd_summary_from_db(owner, repo, start_date, end_date)
 
-    @router.get("/analysis/cicd/trends/{owner}/{repo}", tags=["CI/CD 分析"])
+    @router.get("/analysis/cicd/trends/{owner}/{repo}", tags=["CI/CD 分析"], response_model=CICDTrendsResponse)
     async def get_cicd_trends(
         owner: str,
         repo: str,
@@ -151,7 +155,7 @@ def register_analysis_routes(router: APIRouter, db, cache):
         """获取 CI/CD 趋势数据"""
         if db is None or db.db is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
-        trends = db.get_cicd_trends_from_db(owner, repo, granularity=granularity,
+        trends = await db.get_cicd_trends_from_db(owner, repo, granularity=granularity,
                                             start_date=start_date, end_date=end_date)
         return {"owner": owner, "repo": repo, "granularity": granularity, "trends": trends}
 
@@ -170,7 +174,7 @@ def register_analysis_routes(router: APIRouter, db, cache):
         """查询 CI/CD 结果（分页）"""
         if db is None or db.db is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
-        return db.query_cicd_results(
+        return await db.query_cicd_results(
             owner=owner, repo=repo,
             pr_number=pr_number, build_status=build_status, parser_name=parser_name,
             start_date=start_date, end_date=end_date,

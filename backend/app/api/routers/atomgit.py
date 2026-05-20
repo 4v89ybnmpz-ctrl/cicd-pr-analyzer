@@ -5,6 +5,7 @@ AtomGit API 路由
 import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException
+from app.models.responses import AtomGitBatchCommentsResponse
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ def register_atomgit_routes(router, db):
             raise HTTPException(status_code=401, detail="未配置 AtomGit Token")
 
         service = AtomGitService(access_token=token)
-        result = service.fetch_pulls(owner, repo, state=state, page=page, per_page=size)
+        result = await service.fetch_pulls(owner, repo, state=state, page=page, per_page=size)
 
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
@@ -42,7 +43,7 @@ def register_atomgit_routes(router, db):
             raise HTTPException(status_code=401, detail="未配置 AtomGit Token")
 
         service = AtomGitService(access_token=token)
-        result = service.fetch_all_pull_comments(owner, repo, pull_number)
+        result = await service.fetch_all_pull_comments(owner, repo, pull_number)
 
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
@@ -57,11 +58,11 @@ def register_atomgit_routes(router, db):
                 "total": result["total"],
                 "platform": "atomgit",
             }
-            db.save_pr_comments(owner, repo, pull_number, comments_data)
+            await db.save_pr_comments(owner, repo, pull_number, comments_data)
 
         return {**result, "timestamp": datetime.now().isoformat()}
 
-    @router.get("/atomgit/pulls/{owner}/{repo}/comments")
+    @router.get("/atomgit/pulls/{owner}/{repo}/comments", response_model=AtomGitBatchCommentsResponse)
     async def get_atomgit_all_comments(owner: str, repo: str, limit: int = 10, state: str = "all"):
         """
         批量获取 PR 评论并保存到数据库
@@ -76,7 +77,7 @@ def register_atomgit_routes(router, db):
             raise HTTPException(status_code=401, detail="未配置 AtomGit Token")
 
         service = AtomGitService(access_token=token)
-        result = service.fetch_pulls_with_comments(owner, repo, limit=limit, state=state)
+        result = await service.fetch_pulls_with_comments(owner, repo, limit=limit, state=state)
 
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
@@ -95,7 +96,7 @@ def register_atomgit_routes(router, db):
                     "platform": "atomgit",
                     "bot_comments": pr.get("bot_comment_count", 0),
                 }
-                if db.save_pr_comments(owner, repo, pull_number, comments_data):
+                if await db.save_pr_comments(owner, repo, pull_number, comments_data):
                     saved_count += 1
 
         return {
@@ -118,7 +119,7 @@ def register_atomgit_routes(router, db):
             "timestamp": datetime.now().isoformat(),
         }
 
-    @router.get("/atomgit/pulls/{owner}/{repo}/comments/all")
+    @router.get("/atomgit/pulls/{owner}/{repo}/comments/all", response_model=AtomGitBatchCommentsResponse)
     async def get_atomgit_project_all_comments(
         owner: str, repo: str,
         state: str = "all",
@@ -141,19 +142,7 @@ def register_atomgit_routes(router, db):
 
         service = AtomGitService(access_token=token)
 
-        # 保存计数
-        saved = {"count": 0}
-
-        def on_pr_done(pull_number, comment_count, bot_count, total_done):
-            """每个 PR 完成后保存到数据库"""
-            if db is None:
-                return
-            # 从结果中取最新的一条
-            # 回调中无法直接拿 comments，用6通过 service 重新获取太浪费
-            # 改为在主流程中保存
-            pass
-
-        result = service.fetch_all_project_comments(
+        result = await service.fetch_all_project_comments(
             owner, repo,
             state=state,
             max_prs=max_prs,
@@ -177,7 +166,7 @@ def register_atomgit_routes(router, db):
                     "platform": "atomgit",
                     "bot_comments": pr.get("bot_comment_count", 0),
                 }
-                if db.save_pr_comments(owner, repo, pull_number, comments_data):
+                if await db.save_pr_comments(owner, repo, pull_number, comments_data):
                     saved_count += 1
 
         return {
