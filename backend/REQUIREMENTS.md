@@ -320,3 +320,154 @@
 - [x] langchain-core >= 0.3.0 (已安装)
 - [x] langchain-anthropic >= 0.3.0 (已安装)
 - [x] 现有服务层包装为 LangChain Tool（github_service / database_service / CICDExtractor）
+
+---
+
+## 25. 安全加固
+> 针对企业级安全标准，对系统进行全面安全加固，包括 API 认证、CORS 限制、请求限流、安全响应头、日志脱敏等。
+
+### 25.1 API 认证中间件
+- [x] API Key 认证机制 — 通过请求头 `X-API-Key` 或查询参数 `api_key` 验证身份
+- [x] API Key 配置管理 — 支持在 `config.json` 中配置多个 API Key（key + name + enabled）
+- [x] 白名单路径 — `/`, `/health`, `/docs`, `/openapi.json` 等公共路径免认证
+- [x] 认证失败返回标准 401 错误 — 含 `WWW-Authenticate` 响应头
+- [x] 可选启用 — 通过 `security.auth_enabled` 配置项控制，默认关闭（向后兼容）
+
+### 25.2 CORS 安全加固
+- [x] CORS 白名单配置 — 从 `config.json` 的 `cors.allow_origins` 读取，替代硬编码 `["*"]`
+- [x] 支持 `*` 通配符（仅开发环境使用，生产环境应配置具体域名）
+- [x] CORS 相关方法/头部/凭证均可配置
+
+### 25.3 安全响应头
+- [x] 添加安全响应头中间件 — 在所有响应中自动注入:
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `X-XSS-Protection: 1; mode=block`
+  - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+  - `Content-Security-Policy: default-src 'self'`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+- [x] 安全响应头可通过 `security.security_headers` 配置开关
+
+### 25.4 API 请求限流
+- [x] 全局限流 — 基于 IP 的请求频率限制（默认 60次/分钟）
+- [x] 路由级别限流 — 对数据写入类接口施加更严格限制（默认 20次/分钟）
+- [x] 限流配置可调 — 通过 `security.rate_limit` 配置项控制窗口大小和最大请求数
+- [x] 超限返回 429 Too Many Requests — 含 `Retry-After` 响应头
+
+### 25.5 敏感信息日志脱敏
+- [x] Token 脱敏 — 日志中 Token 只显示前4位和后4位，中间用 `****` 替代
+- [x] 密码脱敏 — 数据库密码、API Key 等敏感信息在日志中自动脱敏
+- [x] 请求参数脱敏 — 请求 URL 中 `api_key` 参数自动脱敏
+- [x] 日志脱敏工具函数 — `core/security.py` 中提供统一的脱敏工具
+
+### 25.6 Git 安全增强
+- [x] .gitignore 完善补全 — 确保所有敏感文件模式都被忽略
+- [x] 安全检查脚本 — 启动时检测敏感文件是否被 git 追踪，发出告警
+
+### 25.7 安全配置集成
+- [x] config.json 新增 `security` 配置节 — 统一管理认证、限流、安全头等配置
+- [x] config.example.json 同步更新 — 提供安全配置示例（不含真实密钥）
+- [x] 所有安全功能可通过配置开关独立启用/禁用
+
+### 25.8 测试用例
+- [x] 认证中间件测试 — 有效/无效/缺失 API Key、白名单路径、401 响应格式
+- [x] CORS 测试 — 白名单域名放行、非白名单拒绝、通配符模式
+- [x] 安全响应头测试 — 验证所有安全头正确注入
+- [x] 限流测试 — 超限返回 429、Retry-After 头、正常请求不受影响
+- [x] 日志脱敏测试 — Token/密码/Key 脱敏格式正确
+
+---
+
+## 26. 异步改造
+> 将全量同步 I/O（requests + pymongo + ThreadPoolExecutor）改造为原生异步（httpx + motor + asyncio），
+> 充分利用 FastAPI 异步特性，提升并发性能和资源利用率。
+
+### 26.1 依赖替换
+- [x] `requests` → `httpx`（异步 HTTP 客户端）
+- [x] `pymongo.MongoClient` → `motor.motor_asyncio.AsyncIOMotorClient`（异步 MongoDB 驱动）
+- [x] `ThreadPoolExecutor` → `asyncio.gather` / `asyncio.Semaphore`（异步并发）
+- [x] `threading.Lock` → `asyncio.Lock`（异步锁）
+- [x] `time.sleep()` → `asyncio.sleep()`（异步等待）
+
+### 26.2 公共组件改造 (base_service.py)
+- [x] `retry_on_failure` → 异步重试装饰器（async wrapper + asyncio.sleep）
+- [x] `TokenPool` → threading.Lock 替换为 asyncio.Lock
+- [x] `TaskProgress` → threading.Lock 替换为 asyncio.Lock
+
+### 26.3 GitHub 服务异步化 (github_service.py)
+- [x] `requests.get` → `httpx.AsyncClient.get`
+- [x] `_make_request` → `async def _make_request`
+- [x] 所有 `fetch_*` 方法 → `async def fetch_*`
+- [x] `ThreadPoolExecutor` 并发 → `asyncio.gather` + `asyncio.Semaphore` 控制并发数
+- [x] `time.sleep` → `asyncio.sleep`
+
+### 26.4 数据库服务异步化 (database_service.py)
+- [x] `MongoClient` → `AsyncIOMotorClient`
+- [x] 所有集合操作（`update_one`/`find_one`/`find`/`count_documents`/`aggregate`）添加 `await`
+- [x] `list(cursor)` → `await cursor.to_list(length=None)`
+- [x] `connect()` → `async def connect()`
+
+### 26.5 GitCode 服务异步化 (gitcode_service.py)
+- [x] 与 GitHub 服务同模式改造（httpx + asyncio.gather）
+
+### 26.6 API 路由层适配
+- [x] 所有路由处理函数中添加 `await` 调用异步服务方法
+- [x] 路由层 `ThreadPoolExecutor` → `asyncio.gather`
+- [x] analysis.py 中直接 pymongo 操作迁移为通过 db 服务层调用
+
+### 26.7 主应用异步化 (main.py)
+- [x] 使用 FastAPI `lifespan` 异步上下文管理器（替代模块级初始化）
+- [x] 数据库连接/断开放入 lifespan
+- [x] 安全中间件兼容异步
+
+### 26.8 测试用例
+- [x] 异步服务方法测试（Mock httpx.AsyncClient）
+- [x] 异步数据库方法测试（Mock motor）
+- [x] API 集成测试使用 httpx.AsyncClient
+
+---
+
+## 27. 统一 Pydantic Response Models
+> 将所有 API 返回的 `Dict[str, Any]` 替换为类型安全的 Pydantic Response Model，
+> 实现自动 OpenAPI 文档生成、类型校验和接口规范化。
+
+### 27.1 基础 Response 模型
+- [ ] 创建 `models/responses.py` — 统一管理所有 Response Model
+- [ ] 通用包装模型: `PaginatedResponse[T]`（分页）、`DataTimestampResponse[T]`（数据+时间戳）
+- [ ] 通用简单模型: `MessageResponse`（消息）、`HealthResponse`（健康检查）、`RootResponse`（根路径）
+- [ ] 所有 Response 模型含 `timestamp: str` 字段
+
+### 27.2 GitHub 服务 Response 模型
+- [ ] `PRItem` — 单条 PR 信息
+- [ ] `PRListResult` — PR 列表结果（含 owner/repo/prs/error）
+- [ ] `CommentItem` / `PRCommentsResult` — 评论
+- [ ] `TimelineEventItem` / `PRTimelineResult` — 时间线
+- [ ] `PRDetailResult` — PR 详情
+- [ ] `ReviewItem` / `PRReviewsResult` — Reviews
+- [ ] `CommitItem` / `PRCommitsResult` — Commits
+- [ ] `MultiPRCollectionResponse` — 多 PR 并发获取结果
+- [ ] `BatchProjectsResponse` — 多项目批量获取结果
+- [ ] `TokenPoolResponse` — Token 池信息
+
+### 27.3 数据库查询 Response 模型
+- [ ] `DatabaseStatsResponse` — 数据库统计
+- [ ] `DatabaseAggregateResponse` — 聚合统计
+- [ ] `DatabasePaginatedResponse` — 分页查询结果
+- [ ] `DatabaseSearchResponse` — 搜索结果（含 keyword）
+
+### 27.4 CI/CD 分析 Response 模型
+- [ ] `CICDAnalysisTriggerResponse` — 触发分析结果
+- [ ] 复用已有 `CICDReport` / `CICDResultSummary` 等模型
+
+### 27.5 其他 Response 模型
+- [ ] `TaskResponse` / `TaskListResponse` — 任务管理
+- [ ] `ConfigResponse` / `CacheStatsResponse` — 配置和缓存
+- [ ] `ErrorResponse` — 统一错误响应
+
+### 27.6 路由集成
+- [ ] 所有路由端点添加 `response_model` 参数
+- [ ] 验证 OpenAPI 文档自动生成正确
+
+### 27.7 测试用例
+- [ ] Response Model 序列化/反序列化测试
+- [ ] 字段缺失/类型错误的校验测试

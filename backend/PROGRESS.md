@@ -30,6 +30,8 @@
 | 22. CI/CD 工程能力洞察报告 | ✅ 完成 | 2026-05-18 |
 | 23. PR Reviews 接口 | ✅ 完成 | 2026-05-18 |
 | 24. 多 Agent 协作系统 | ✅ 完成 | 2026-05-19 |
+| 25. 安全加固 | ✅ 完成 | 2026-05-20 |
+| 26. 异步改造 | ✅ 完成 | 2026-05-20 |
 
 ## 详细实现记录
 
@@ -595,8 +597,8 @@ app/
 ## 测试结果
 
 ```
-总测试数: 139 (Phase 6: 40 + Phase 5 增强: 38 + Phase 1-4: 52 + AI Nodes: 9)
-✅ 通过: 139
+总测试数: 179 (安全加固: 40 + Phase 6: 40 + Phase 5 增强: 38 + Phase 1-4: 52 + AI Nodes: 9)
+✅ 通过: 179
 ❌ 失败: 0
 通过率: 100%
 ```
@@ -605,4 +607,120 @@ app/
 
 ## 最后更新时间
 
-2026-05-19 (Phase 6 Agent 系统深度优化完成)
+2026-05-20 (异步改造 + 安全加固完成)
+
+---
+
+### 26. 异步改造 ✅ (2026-05-20 新增)
+
+> 将全量同步 I/O 改造为原生异步，充分利用 FastAPI 异步特性
+
+#### 26.1 核心变更
+- **依赖替换**
+  - `requests` → `httpx`（异步 HTTP 客户端）
+  - `pymongo.MongoClient` → `motor.AsyncIOMotorClient`（异步 MongoDB 驱动）
+  - `ThreadPoolExecutor` → `asyncio.gather` + `asyncio.Semaphore`
+  - `threading.Lock` → `asyncio.Lock`
+  - `time.sleep()` → `await asyncio.sleep()`
+
+#### 26.2 服务层改造
+- [base_service.py](app/services/base_service.py) — 异步公共组件
+  - `retry_on_failure` → async 装饰器
+  - `TokenPool` → asyncio.Lock
+  - `TaskProgress` → asyncio.Lock
+- [github_service.py](app/services/github_service.py) — GitHub 服务异步化
+  - `httpx.AsyncClient` 替代 `requests`
+  - 所有 `fetch_*` 方法 → `async def`
+  - `asyncio.gather` + `Semaphore` 替代 ThreadPoolExecutor
+  - 新增 `_get_client()` 和 `async def close()` 生命周期管理
+- [database_service.py](app/services/database_service.py) — 数据库服务异步化
+  - `motor.AsyncIOMotorClient` 替代 `pymongo.MongoClient`
+  - 所有集合操作添加 `await`
+  - `list(cursor)` → `await cursor.to_list(length=None)`
+  - `aggregate` 使用 `async for` 或 `.to_list()`
+- [gitcode_service.py](app/services/gitcode_service.py) — GitCode 服务异步化
+  - 同 GitHub 服务模式改造
+- [app/gitcode/service.py](app/gitcode/service.py) — AtomGit 服务异步化
+  - httpx + async 方法
+
+#### 26.3 路由层适配
+- 所有 9 个路由模块添加 `await`：
+  - [github.py](app/api/routers/github.py) — ThreadPoolExecutor → asyncio.gather + Semaphore
+  - [database.py](app/api/routers/database.py) — 所有 db.* 调用添加 await
+  - [gitcode.py](app/api/routers/gitcode.py) — 所有服务调用添加 await
+  - [analysis.py](app/api/routers/analysis.py) — db 调用 await + 直接 pymongo 改为 motor 异步操作
+  - [task.py](app/api/routers/task.py) — task_progress_manager + db 调用 await
+  - [atomgit.py](app/api/routers/atomgit.py) — AtomGit 服务 + db 调用 await
+  - [config.py](app/api/routers/config.py) — 无需修改（仅调用同步 config_manager）
+  - [base.py](app/api/routers/base.py) — 无需修改（纯返回）
+  - [browser.py](app/api/routers/browser.py) — 已是 async，无需修改
+
+#### 26.4 主应用改造
+- [main.py](app/main.py) — 使用 FastAPI `lifespan` 异步上下文管理器
+  - 数据库连接/断开放入 lifespan（异步 `await db.connect()` / `await db.disconnect()`）
+  - HTTP 客户端关闭放入 lifespan（`await github_service.close()`）
+  - 移除模块级 `db.connect()` 同步调用
+  - 移除 `signal_handler` 中的同步 `db.disconnect()`
+
+#### 26.5 requirements.txt 更新
+- `requests>=2.31.0` → `httpx>=0.27.0`
+- 新增 `motor>=3.3.0`
+
+---
+
+### 25. 安全加固 ✅ (2026-05-20 新增)
+
+#### 25.1 安全模块 [core/security.py](app/core/security.py)
+- **API Key 认证 (`APIKeyAuth`)**
+  - 支持请求头 `X-API-Key`、查询参数 `api_key`、`Authorization: Bearer` 三种方式传递 Key
+  - 支持简单字符串格式和详细对象格式（含 name/enabled）的 API Key 配置
+  - 公共路径（`/`、`/health`、`/docs`、`/openapi.json` 等）免认证
+  - 认证失败返回 401 + `WWW-Authenticate` 响应头
+  - 通过 `security.auth_enabled` 配置开关，默认关闭（向后兼容）
+- **请求限流 (`RateLimiter`)**
+  - 基于 IP 的滑动窗口限流算法（内存存储，线程安全）
+  - 全局默认 60 次/分钟，写入类路径严格限制 20 次/分钟
+  - 支持 `X-Forwarded-For` / `X-Real-IP` 代理头获取真实 IP
+  - 超限返回 429 + `Retry-After` 头
+  - 自动清理过期记录防止内存泄漏
+- **安全响应头 (`SecurityHeadersConfig`)**
+  - 6 项安全头: `X-Content-Type-Options`、`X-Frame-Options`、`X-XSS-Protection`、`Strict-Transport-Security`、`Content-Security-Policy`、`Referrer-Policy`
+  - 支持自定义头和覆盖默认头
+- **日志脱敏工具**
+  - `mask_token()` — Token/Key 脱敏（保留前后 4 位）
+  - `mask_password()` — 密码脱敏（仅显示长度）
+  - `mask_url_params()` — URL 敏感查询参数脱敏
+  - `mask_dict()` — 字典敏感字段批量脱敏
+- **Git 安全检查 (`run_security_check()`)**
+  - 启动时自动扫描 Git 追踪文件，检测敏感文件泄露
+- **统一安全中间件 (`SecurityMiddleware`)**
+  - 整合认证 → 限流 → 安全头注入的完整请求处理链路
+  - 附加 `X-RateLimit-Limit` / `X-RateLimit-Remaining` 响应头
+
+#### 25.2 CORS 安全加固
+- [main.py](app/main.py) — CORS 白名单从 `config.json` 的 `cors.allow_origins` 读取
+- 替代硬编码 `["*"]`，支持字符串和数组两种配置格式
+- 生产环境可配置具体域名白名单
+
+#### 25.3 配置更新
+- [config.example.json](config.example.json) — 新增 `security` 配置节:
+  - `auth_enabled` + `api_keys` — API Key 认证配置
+  - `rate_limit` — 限流配置（窗口、上限、严格路径）
+  - `security_headers` — 安全响应头开关 + 自定义头
+- [config.example.json](config.example.json) — 修复 CORS 配置键名 `Gallow_origins` → `allow_origins`
+
+#### 25.4 Git 安全增强
+- [.gitignore](../.gitignore) — 增强:
+  - 新增 `.env.production`、`.env.staging` 环境文件排除
+  - 新增 TLS 证书/私钥文件模式（`*.pem`、`*.key`、`*.crt`、`*.p12` 等）
+  - 新增 SSH 密钥、Java Keystore、云服务凭证文件排除
+  - 新增 `secrets/` 顶层目录排除
+
+#### 25.5 测试用例 [test_security.py](app/test/test_security.py)
+- 40 项测试（100% 通过）:
+  - 日志脱敏: 10 项（Token/密码/URL参数/字典脱敏各种边界情况）
+  - API Key 认证: 11 项（启用/关闭/公共路径/请求头/查询参数/Bearer/无效/缺失/禁用Key/多Key）
+  - 请求限流: 9 项（关闭/正常/超限/剩余计数/不同IP/严格路径/429响应/清理/代理IP）
+  - 安全响应头: 4 项（默认/关闭/自定义/覆盖）
+  - Git 安全检查: 1 项
+  - 集成测试: 5 项（认证拒绝/通过/组合/公共路径/文档资源）

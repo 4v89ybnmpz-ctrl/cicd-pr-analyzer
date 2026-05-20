@@ -40,9 +40,11 @@ backend/logs/
 *.db
 *.sqlite
 
-# Environment
+# Environment & Secrets (关键安全文件)
 .env
 .env.local
+.env.production
+.env.staging
 
 # Config (含敏感信息，使用 .example.json 代替)
 backend/config.json
@@ -50,10 +52,12 @@ backend/db_config.json
 backend/encryption_key.json
 encryption_key.json
 
-# Secrets
+# Secrets (Docker Secrets / TLS 证书)
 backend/secrets/*.txt
 backend/secrets/*.key
 backend/secrets/*.pem
+backend/secrets/*.crt
+secrets/
 
 # Data
 backend/data/
@@ -79,3 +83,15 @@ htmlcov/
 # Temporary
 *.tmp
 *.bak
+
+# Security: 确保不意外提交敏感文件
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.jks
+credentials.json
+service-account*.json
