@@ -7,6 +7,8 @@ const api = axios.create({
 
 export const getDatabaseStats = () => api.get('/database/stats')
 
+export const getProjectsOverview = () => api.get('/database/projects/overview')
+
 export const getPrList = (params) => api.get('/database/prs', { params })
 
 export const getPrData = (owner, repo) => api.get(`/database/prs/${owner}/${repo}`)

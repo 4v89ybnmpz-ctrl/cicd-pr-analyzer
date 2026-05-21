@@ -10,6 +10,7 @@ import {
   AlertOutlined,
   ClockCircleOutlined,
   ThunderboltOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import PrList from './pages/PrList'
@@ -22,11 +23,13 @@ import Issues from './pages/Issues'
 import IssueTimelines from './pages/IssueTimelines'
 import Tasks from './pages/Tasks'
 import UserRepos from './pages/UserRepos'
+import ProjectsOverview from './pages/ProjectsOverview'
 
 const { Header, Sider, Content } = Layout
 
 const menuItems = [
   { key: 'dashboard', icon: <DashboardOutlined />, label: '概览' },
+  { key: 'projects-overview', icon: <AppstoreOutlined />, label: '项目总览' },
   { key: 'prs', icon: <FileTextOutlined />, label: 'PR 列表' },
   { key: 'details', icon: <ProfileOutlined />, label: 'PR 详情' },
   { key: 'comments', icon: <CommentOutlined />, label: 'PR 评论' },
@@ -42,14 +45,16 @@ function App() {
   const [prDataFilter, setPrDataFilter] = useState(null)
   const [userReposUsername, setUserReposUsername] = useState('')
 
-  const navigate = (key, username) => {
+  const navigate = (key, username, extra) => {
     setPage(key)
     if (username) setUserReposUsername(username)
+    if (extra && extra.owner && extra.repo) setPrDataFilter({ owner: extra.owner, repo: extra.repo })
   }
 
   const renderPage = () => {
     switch (page) {
       case 'dashboard': return <Dashboard onNavigate={navigate} />
+      case 'projects-overview': return <ProjectsOverview onNavigate={navigate} />
       case 'prs': return <PrList onNavigate={navigate} setFilter={setPrDataFilter} />
       case 'prdata': return <PrData filter={prDataFilter} onBack={() => setPage('prs')} />
       case 'details': return <PrDetails />
