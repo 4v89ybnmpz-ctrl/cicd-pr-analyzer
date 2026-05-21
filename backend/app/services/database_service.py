@@ -4,6 +4,7 @@
 """
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
 import logging
 
 try:
@@ -92,28 +93,256 @@ class DatabaseService:
             return False
         try:
             collection = self.db['pr_data']
-            document = {
-                "owner": owner, "repo": repo, "data": pr_data,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }
-            await collection.update_one(
-                {"owner": owner, "repo": repo},
-                {"$set": document},
-                upsert=True
-            )
-            logger.info(f"PR 数据已保存: {owner}/{repo}")
+            prs = pr_data.get("prs", [])
+            now = datetime.now().isoformat()
+            operations = []
+            for pr in prs:
+                pr_number = pr.get("number")
+                if pr_number is None:
+                    continue
+                document = {
+                    "owner": owner,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "title": pr.get("title"),
+                    "user": pr.get("user"),
+                    "state": pr.get("state"),
+                    "created_at": pr.get("created_at"),
+                    "updated_at": pr.get("updated_at"),
+                    "url": pr.get("url"),
+                    "saved_at": now,
+                }
+                operations.append(
+                    collection.update_one(
+                        {"owner": owner, "repo": repo, "pr_number": pr_number},
+                        {"$set": document},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"PR 数据已保存: {owner}/{repo}, 共 {len(operations)} 条")
             return True
         except Exception as e:
             logger.error(f"保存 PR 数据失败: {e}")
             return False
 
+    async def update_pr_data(self, owner: str, repo: str, github_service) -> Dict[str, Any]:
+        """增量更新 PR 数据：对比 updated_at，有变化则替换，无则新增"""
+        if self.db is None:
+            return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
+        try:
+            collection = self.db['pr_data']
+            cursor = collection.find({"owner": owner, "repo": repo}, {"pr_number": 1, "updated_at": 1, "_id": 0})
+            old_docs = await cursor.to_list(length=None)
+            old_map = {d["pr_number"]: d.get("updated_at") for d in old_docs}
+            old_numbers = set(old_map.keys())
+
+            result = await github_service.fetch_prs_for_project(owner, repo, max_count=100)
+            if result.get("error"):
+                return {"error": result["error"], "updated": 0, "added": 0, "unchanged": 0}
+
+            now = datetime.now().isoformat()
+            updated, added, unchanged = 0, 0, 0
+            operations = []
+            for pr in result.get("prs", []):
+                pr_number = pr.get("number")
+                if pr_number is None:
+                    continue
+                new_updated = pr.get("updated_at")
+                if pr_number in old_numbers:
+                    if old_map[pr_number] != new_updated:
+                        document = {
+                            "owner": owner, "repo": repo, "pr_number": pr_number,
+                            "title": pr.get("title"), "user": pr.get("user"),
+                            "state": pr.get("state"), "created_at": pr.get("created_at"),
+                            "updated_at": new_updated, "url": pr.get("url"),
+                            "saved_at": now,
+                        }
+                        operations.append(collection.update_one(
+                            {"owner": owner, "repo": repo, "pr_number": pr_number},
+                            {"$set": document},
+                        ))
+                        updated += 1
+                    else:
+                        unchanged += 1
+                else:
+                    document = {
+                        "owner": owner, "repo": repo, "pr_number": pr_number,
+                        "title": pr.get("title"), "user": pr.get("user"),
+                        "state": pr.get("state"), "created_at": pr.get("created_at"),
+                        "updated_at": new_updated, "url": pr.get("url"),
+                        "saved_at": now,
+                    }
+                    operations.append(collection.update_one(
+                        {"owner": owner, "repo": repo, "pr_number": pr_number},
+                        {"$set": document},
+                        upsert=True,
+                    ))
+                    added += 1
+
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"PR 数据更新完成: {owner}/{repo}, 更新={updated}, 新增={added}, 未变={unchanged}")
+            return {"updated": updated, "added": added, "unchanged": unchanged, "error": None}
+        except Exception as e:
+            logger.error(f"更新 PR 数据失败: {e}")
+            return {"error": str(e), "updated": 0, "added": 0, "unchanged": 0}
+
+    async def update_issues(self, owner: str, repo: str, github_service) -> Dict[str, Any]:
+        """增量更新 Issues 数据"""
+        if self.db is None:
+            return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
+        try:
+            collection = self.db['issues']
+            cursor = collection.find({"owner": owner, "repo": repo}, {"number": 1, "updated_at": 1, "_id": 0})
+            old_docs = await cursor.to_list(length=None)
+            old_map = {d["number"]: d.get("updated_at") for d in old_docs}
+
+            result = await github_service.fetch_issues(owner, repo, max_count=100)
+            if result.get("error"):
+                return {"error": result["error"], "updated": 0, "added": 0, "unchanged": 0}
+
+            now = datetime.now().isoformat()
+            updated, added, unchanged = 0, 0, 0
+            operations = []
+            for issue in result.get("issues", []):
+                number = issue.get("number")
+                if number is None:
+                    continue
+                new_updated = issue.get("updated_at")
+                if number in old_map:
+                    if old_map[number] != new_updated:
+                        document = {**issue, "owner": owner, "repo": repo, "saved_at": now}
+                        operations.append(collection.update_one(
+                            {"owner": owner, "repo": repo, "number": number},
+                            {"$set": document},
+                        ))
+                        updated += 1
+                    else:
+                        unchanged += 1
+                else:
+                    document = {**issue, "owner": owner, "repo": repo, "saved_at": now}
+                    operations.append(collection.update_one(
+                        {"owner": owner, "repo": repo, "number": number},
+                        {"$set": document},
+                        upsert=True,
+                    ))
+                    added += 1
+
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"Issues 更新完成: {owner}/{repo}, 更新={updated}, 新增={added}, 未变={unchanged}")
+            return {"updated": updated, "added": added, "unchanged": unchanged, "error": None}
+        except Exception as e:
+            logger.error(f"更新 Issues 失败: {e}")
+            return {"error": str(e), "updated": 0, "added": 0, "unchanged": 0}
+
+    async def update_comments(self, owner: str, repo: str, github_service) -> Dict[str, Any]:
+        """增量更新 PR 评论数据：获取数据库中已有 PR，重新拉取评论"""
+        if self.db is None:
+            return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
+        try:
+            pr_data = await self.get_pr_data(owner, repo)
+            if not pr_data:
+                return {"error": "无 PR 数据，请先获取 PR", "updated": 0, "added": 0, "unchanged": 0}
+            pr_numbers = [pr["number"] for pr in pr_data.get("prs", [])]
+
+            collection = self.db['pr_comments']
+            cursor = collection.find({"owner": owner, "repo": repo}, {"comment_id": 1, "updated_at": 1, "_id": 0})
+            old_docs = await cursor.to_list(length=None)
+            old_map = {d["comment_id"]: d.get("updated_at") for d in old_docs}
+
+            semaphore = asyncio.Semaphore(github_service.max_workers)
+            total_updated, total_added, total_unchanged = 0, 0, 0
+
+            async def _fetch_pr_comments(pr_num):
+                nonlocal total_updated, total_added, total_unchanged
+                async with semaphore:
+                    result = await github_service.fetch_pr_comments(owner, repo, pr_num)
+                    if result.get("error"):
+                        return
+                    now = datetime.now().isoformat()
+                    operations = []
+                    for comment in result.get("comments", []):
+                        comment_id = str(comment.get("id"))
+                        if not comment_id:
+                            continue
+                        new_updated = comment.get("updated_at")
+                        if comment_id in old_map:
+                            if old_map[comment_id] != new_updated:
+                                document = {
+                                    "owner": owner, "repo": repo, "pr_number": pr_num,
+                                    "comment_id": comment_id,
+                                    "user": comment.get("user"),
+                                    "user_id": comment.get("user_id"),
+                                    "user_type": comment.get("user_type"),
+                                    "is_bot": comment.get("is_bot", False),
+                                    "author_association": comment.get("author_association"),
+                                    "body": comment.get("body"),
+                                    "url": comment.get("url"),
+                                    "reactions": comment.get("reactions"),
+                                    "created_at": comment.get("created_at"),
+                                    "updated_at": new_updated,
+                                    "saved_at": now,
+                                }
+                                operations.append(collection.update_one(
+                                    {"comment_id": comment_id}, {"$set": document}
+                                ))
+                                total_updated += 1
+                            else:
+                                total_unchanged += 1
+                        else:
+                            document = {
+                                "owner": owner, "repo": repo, "pr_number": pr_num,
+                                "comment_id": comment_id,
+                                "user": comment.get("user"),
+                                "user_id": comment.get("user_id"),
+                                "user_type": comment.get("user_type"),
+                                "is_bot": comment.get("is_bot", False),
+                                "author_association": comment.get("author_association"),
+                                "body": comment.get("body"),
+                                "url": comment.get("url"),
+                                "reactions": comment.get("reactions"),
+                                "created_at": comment.get("created_at"),
+                                "updated_at": new_updated,
+                                "saved_at": now,
+                            }
+                            operations.append(collection.update_one(
+                                {"comment_id": comment_id}, {"$set": document}, upsert=True
+                            ))
+                            total_added += 1
+                    if operations:
+                        await asyncio.gather(*operations)
+                    await asyncio.sleep(github_service.request_delay)
+
+            await asyncio.gather(*[_fetch_pr_comments(n) for n in pr_numbers])
+            logger.info(f"评论更新完成: {owner}/{repo}, 更新={total_updated}, 新增={total_added}, 未变={total_unchanged}")
+            return {"updated": total_updated, "added": total_added, "unchanged": total_unchanged, "error": None}
+        except Exception as e:
+            logger.error(f"更新评论失败: {e}")
+            return {"error": str(e), "updated": 0, "added": 0, "unchanged": 0}
+
     async def get_pr_data(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
         if self.db is None:
             return None
         try:
-            collection = self.db['pr_data']
-            return await collection.find_one({"owner": owner, "repo": repo}, {"_id": 0})
+            cursor = self.db['pr_data'].find({"owner": owner, "repo": repo}, {"_id": 0})
+            docs = await cursor.to_list(length=None)
+            if not docs:
+                return None
+            prs = []
+            for doc in docs:
+                prs.append({
+                    "number": doc.get("pr_number"),
+                    "title": doc.get("title"),
+                    "user": doc.get("user"),
+                    "state": doc.get("state"),
+                    "created_at": doc.get("created_at"),
+                    "updated_at": doc.get("updated_at"),
+                    "url": doc.get("url"),
+                })
+            return {"owner": owner, "repo": repo, "prs": prs, "total": len(prs), "error": None}
         except Exception as e:
             logger.error(f"获取 PR 数据失败: {e}")
             return None
@@ -122,8 +351,16 @@ class DatabaseService:
         if self.db is None:
             return []
         try:
-            cursor = self.db['pr_data'].find({}, {"_id": 0}).limit(limit)
-            return await cursor.to_list(length=limit)
+            pipeline = [
+                {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "total": {"$sum": 1}}},
+                {"$limit": limit},
+            ]
+            cursor = self.db['pr_data'].aggregate(pipeline)
+            results = []
+            async for doc in cursor:
+                key = doc["_id"]
+                results.append({"owner": key["owner"], "repo": key["repo"], "total": doc["total"]})
+            return results
         except Exception as e:
             logger.error(f"列出 PR 数据失败: {e}")
             return []
@@ -132,29 +369,291 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            result = await self.db['pr_data'].delete_one({"owner": owner, "repo": repo})
+            result = await self.db['pr_data'].delete_many({"owner": owner, "repo": repo})
             if result.deleted_count > 0:
-                logger.info(f"PR 数据已删除: {owner}/{repo}")
+                logger.info(f"PR 数据已删除: {owner}/{repo}, 共 {result.deleted_count} 条")
                 return True
             return False
         except Exception as e:
             logger.error(f"删除 PR 数据失败: {e}")
             return False
 
+    async def save_user_profile(self, profile: Dict[str, Any]) -> bool:
+        if self.db is None:
+            return False
+        try:
+            login = profile.get("login")
+            if not login:
+                return False
+            now = datetime.now().isoformat()
+            await self.db['user_profiles'].update_one(
+                {"login": login},
+                {"$set": {**profile, "saved_at": now}},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"保存用户 Profile 失败: {e}")
+            return False
+
+    async def save_user_profiles_batch(self, profiles: List[Dict[str, Any]]) -> int:
+        if self.db is None or not profiles:
+            return 0
+        try:
+            now = datetime.now().isoformat()
+            operations = []
+            for p in profiles:
+                login = p.get("login")
+                if not login:
+                    continue
+                operations.append(
+                    self.db['user_profiles'].update_one(
+                        {"login": login},
+                        {"$set": {**p, "saved_at": now}},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"批量保存用户 Profile: {len(operations)} 条")
+            return len(operations)
+        except Exception as e:
+            logger.error(f"批量保存用户 Profile 失败: {e}")
+            return 0
+
+    async def list_user_profiles(self, page: int = 1, size: int = 20,
+                                  sort_by: str = "followers", sort_order: int = -1) -> Dict[str, Any]:
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+        try:
+            collection = self.db['user_profiles']
+            total = await collection.count_documents({})
+            skip = (page - 1) * size
+            cursor = collection.find({}, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = await cursor.to_list(length=size)
+            return {"data": data, "total": total, "page": page, "size": size,
+                    "total_pages": (total + size - 1) // size if size > 0 else 0}
+        except Exception as e:
+            logger.error(f"查询用户 Profile 列表失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
+    async def save_user_repos(self, username: str, repos_data: Dict[str, Any]) -> bool:
+        if self.db is None:
+            return False
+        try:
+            now = datetime.now().isoformat()
+            collection = self.db['user_contributed_repos']
+            operations = []
+            for repo in repos_data.get("repos", []):
+                document = {**repo, "username": username, "saved_at": now}
+                operations.append(
+                    collection.update_one(
+                        {"username": username, "repo": repo["repo"]},
+                        {"$set": document},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"用户参与项目已保存: {username}, 共 {len(operations)} 个项目")
+            return True
+        except Exception as e:
+            logger.error(f"保存用户参与项目失败: {e}")
+            return False
+
+    async def list_user_repos(self, username: str = None, page: int = 1, size: int = 20,
+                               sort_by: str = "total_events", sort_order: int = -1) -> Dict[str, Any]:
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+        try:
+            query = {}
+            if username:
+                query["username"] = username
+            total = await self.db['user_contributed_repos'].count_documents(query)
+            skip = (page - 1) * size
+            cursor = self.db['user_contributed_repos'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = await cursor.to_list(length=size)
+            return {"data": data, "total": total, "page": page, "size": size,
+                    "total_pages": (total + size - 1) // size if size > 0 else 0}
+        except Exception as e:
+            logger.error(f"查询用户参与项目失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
+    async def save_issues(self, owner: str, repo: str, issues_data: Dict[str, Any]) -> bool:
+        if self.db is None:
+            return False
+        try:
+            collection = self.db['issues']
+            issues = issues_data.get("issues", [])
+            now = datetime.now().isoformat()
+            operations = []
+            for issue in issues:
+                number = issue.get("number")
+                if number is None:
+                    continue
+                document = {**issue, "owner": owner, "repo": repo, "saved_at": now}
+                operations.append(
+                    collection.update_one(
+                        {"owner": owner, "repo": repo, "number": number},
+                        {"$set": document},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"Issues 数据已保存: {owner}/{repo}, 共 {len(operations)} 条")
+            return True
+        except Exception as e:
+            logger.error(f"保存 Issues 数据失败: {e}")
+            return False
+
+    async def get_issue(self, owner: str, repo: str, number: int) -> Optional[Dict[str, Any]]:
+        if self.db is None:
+            return None
+        try:
+            return await self.db['issues'].find_one({"owner": owner, "repo": repo, "number": number}, {"_id": 0})
+        except Exception as e:
+            logger.error(f"获取 Issue 数据失败: {e}")
+            return None
+
+    async def list_issues(self, owner: str = None, repo: str = None,
+                           page: int = 1, size: int = 20,
+                           sort_by: str = "created_at", sort_order: int = -1,
+                           state: str = None) -> Dict[str, Any]:
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+        try:
+            query = {}
+            if owner:
+                query["owner"] = owner
+            if repo:
+                query["repo"] = repo
+            if state:
+                query["state"] = state
+            total = await self.db['issues'].count_documents(query)
+            skip = (page - 1) * size
+            cursor = self.db['issues'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = await cursor.to_list(length=size)
+            return {"data": data, "total": total, "page": page, "size": size,
+                    "total_pages": (total + size - 1) // size if size > 0 else 0}
+        except Exception as e:
+            logger.error(f"查询 Issues 列表失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
+    async def save_issue_timeline(self, owner: str, repo: str, issue_number: int, timeline_data: Dict[str, Any]) -> bool:
+        if self.db is None:
+            return False
+        try:
+            collection = self.db['issue_timelines']
+            events = timeline_data.get("events", [])
+            is_pr = timeline_data.get("is_pr", False)
+            now = datetime.now().isoformat()
+            operations = []
+            for event in events:
+                event_id = event.get("event_id")
+                if event_id is None:
+                    continue
+                document = {
+                    "owner": owner, "repo": repo, "issue_number": issue_number,
+                    "is_pr": is_pr,
+                    "event_id": str(event_id),
+                    "event_type": event.get("event_type"),
+                    "actor": event.get("actor"),
+                    "actor_id": event.get("actor_id"),
+                    "actor_type": event.get("actor_type"),
+                    "commit_id": event.get("commit_id"),
+                    "commit_url": event.get("commit_url"),
+                    "label": event.get("label"),
+                    "label_color": event.get("label_color"),
+                    "assignee": event.get("assignee"),
+                    "milestone": event.get("milestone"),
+                    "body": event.get("body"),
+                    "url": event.get("url"),
+                    "state": event.get("state"),
+                    "author_association": event.get("author_association"),
+                    "reactions_total": event.get("reactions_total"),
+                    "source_type": event.get("source_type"),
+                    "source_issue_url": event.get("source_issue_url"),
+                    "created_at": event.get("created_at"),
+                    "saved_at": now,
+                }
+                operations.append(
+                    collection.update_one(
+                        {"owner": owner, "repo": repo, "event_id": str(event_id)},
+                        {"$set": document},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"Issue Timeline 已保存: {owner}/{repo} Issue#{issue_number}, 共 {len(operations)} 条")
+            return True
+        except Exception as e:
+            logger.error(f"保存 Issue Timeline 失败: {e}")
+            return False
+
+    async def list_issue_timelines(self, owner: str = None, repo: str = None, issue_number: int = None,
+                                    page: int = 1, size: int = 20,
+                                    sort_by: str = "created_at", sort_order: int = -1) -> Dict[str, Any]:
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+        try:
+            query = {}
+            if owner:
+                query["owner"] = owner
+            if repo:
+                query["repo"] = repo
+            if issue_number:
+                query["issue_number"] = issue_number
+            total = await self.db['issue_timelines'].count_documents(query)
+            skip = (page - 1) * size
+            cursor = self.db['issue_timelines'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = await cursor.to_list(length=size)
+            return {"data": data, "total": total, "page": page, "size": size,
+                    "total_pages": (total + size - 1) // size if size > 0 else 0}
+        except Exception as e:
+            logger.error(f"查询 Issue Timeline 失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
     async def save_pr_comments(self, owner: str, repo: str, pr_number: int, comments_data: Dict[str, Any]) -> bool:
         if self.db is None:
             return False
         try:
             collection = self.db['pr_comments']
-            document = {
-                "owner": owner, "repo": repo, "pr_number": pr_number, "data": comments_data,
-                "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat()
-            }
-            await collection.update_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number},
-                {"$set": document}, upsert=True
-            )
-            logger.info(f"PR 评论数据已保存: {owner}/{repo} PR#{pr_number}")
+            comments = comments_data.get("comments", [])
+            now = datetime.now().isoformat()
+            operations = []
+            for comment in comments:
+                comment_id = comment.get("id")
+                if comment_id is None:
+                    continue
+                document = {
+                    "owner": owner,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "comment_id": str(comment_id),
+                    "user": comment.get("user"),
+                    "user_id": comment.get("user_id"),
+                    "user_type": comment.get("user_type"),
+                    "is_bot": comment.get("is_bot", False),
+                    "author_association": comment.get("author_association"),
+                    "body": comment.get("body"),
+                    "url": comment.get("url"),
+                    "reactions": comment.get("reactions"),
+                    "created_at": comment.get("created_at"),
+                    "updated_at": comment.get("updated_at"),
+                    "saved_at": now,
+                }
+                operations.append(
+                    collection.update_one(
+                        {"owner": owner, "repo": repo, "comment_id": str(comment_id)},
+                        {"$set": document},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"PR 评论数据已保存: {owner}/{repo} PR#{pr_number}, 共 {len(operations)} 条")
             return True
         except Exception as e:
             logger.error(f"保存 PR 评论数据失败: {e}")
@@ -164,9 +663,26 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_comments'].find_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
-            )
+            cursor = self.db['pr_comments'].find({"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0})
+            docs = await cursor.to_list(length=None)
+            if not docs:
+                return None
+            comments = []
+            for doc in docs:
+                comments.append({
+                    "id": doc.get("comment_id"),
+                    "user": doc.get("user"),
+                    "user_id": doc.get("user_id"),
+                    "user_type": doc.get("user_type"),
+                    "is_bot": doc.get("is_bot"),
+                    "author_association": doc.get("author_association"),
+                    "body": doc.get("body"),
+                    "url": doc.get("url"),
+                    "reactions": doc.get("reactions"),
+                    "created_at": doc.get("created_at"),
+                    "updated_at": doc.get("updated_at"),
+                })
+            return {"owner": owner, "repo": repo, "pr_number": pr_number, "comments": comments, "total": len(comments), "error": None}
         except Exception as e:
             logger.error(f"获取 PR 评论数据失败: {e}")
             return None
@@ -235,13 +751,31 @@ class DatabaseService:
         if self.db is None:
             return {"error": "数据库未连接"}
         try:
-            pr_count = await self.db['pr_data'].count_documents({})
             collection_names = await self.db.list_collection_names()
-            task_count = await self.db['tasks'].count_documents({}) if 'tasks' in collection_names else 0
-            pr_details_count = await self.db['pr_details'].count_documents({}) if 'pr_details' in collection_names else 0
+
+            async def _count(name):
+                return await self.db[name].count_documents({}) if name in collection_names else 0
+
+            pr_count = await _count('pr_data')
+            pr_details_count = await _count('pr_details')
+            pr_comments_count = await _count('pr_comments')
+            issues_count = await _count('issues')
+            issue_timelines_count = await _count('issue_timelines')
+            user_profiles_count = await _count('user_profiles')
+            user_repos_count = await _count('user_contributed_repos')
+            task_count = await _count('tasks')
+
             return {
-                "database": self.database_name, "pr_data_count": pr_count,
-                "pr_details_count": pr_details_count, "task_count": task_count, "status": "connected"
+                "database": self.database_name,
+                "status": "connected",
+                "pr_data_count": pr_count,
+                "pr_details_count": pr_details_count,
+                "pr_comments_count": pr_comments_count,
+                "issues_count": issues_count,
+                "issue_timelines_count": issue_timelines_count,
+                "user_profiles_count": user_profiles_count,
+                "user_contributed_repos_count": user_repos_count,
+                "task_count": task_count,
             }
         except Exception as e:
             logger.error(f"获取统计信息失败: {e}")
@@ -249,7 +783,7 @@ class DatabaseService:
 
     async def list_pr_comments(self, owner: str = None, repo: str = None,
                                page: int = 1, size: int = 20,
-                               sort_by: str = "updated_at", sort_order: int = -1) -> Dict[str, Any]:
+                               sort_by: str = "created_at", sort_order: int = -1) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
@@ -257,7 +791,7 @@ class DatabaseService:
             query = {}
             if owner:
                 query["owner"] = owner
-            if owner and repo:
+            if repo:
                 query["repo"] = repo
             total = await collection.count_documents(query)
             skip = (page - 1) * size

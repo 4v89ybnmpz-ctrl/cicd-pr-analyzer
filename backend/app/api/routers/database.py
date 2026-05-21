@@ -114,3 +114,44 @@ def register_database_routes(router, db):
             raise HTTPException(status_code=503, detail="数据库未连接")
         result = await db.get_aggregate_stats(owner, repo)
         return {"stats": result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/database/profiles")
+    async def list_user_profiles(page: int = 1, size: int = 20,
+                                  sort_by: str = "followers", sort_order: str = "desc"):
+        """查询用户 Profile 列表"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        sort_order_int = -1 if sort_order == "desc" else 1
+        result = await db.list_user_profiles(page, size, sort_by, sort_order_int)
+        return {**result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/database/user-repos")
+    async def list_user_repos(username: str = None, page: int = 1, size: int = 20,
+                               sort_by: str = "total_events", sort_order: str = "desc"):
+        """查询用户参与的项目"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        sort_order_int = -1 if sort_order == "desc" else 1
+        result = await db.list_user_repos(username, page, size, sort_by, sort_order_int)
+        return {**result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/database/issues")
+    async def list_issues(owner: str = None, repo: str = None, page: int = 1, size: int = 20,
+                           sort_by: str = "created_at", sort_order: str = "desc", state: str = None):
+        """查询 Issues 列表"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        sort_order_int = -1 if sort_order == "desc" else 1
+        result = await db.list_issues(owner, repo, page, size, sort_by, sort_order_int, state)
+        return {**result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/database/issue-timelines")
+    async def list_issue_timelines(owner: str = None, repo: str = None, issue_number: int = None,
+                                     page: int = 1, size: int = 20,
+                                     sort_by: str = "created_at", sort_order: str = "desc"):
+        """查询 Issue Timeline"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        sort_order_int = -1 if sort_order == "desc" else 1
+        result = await db.list_issue_timelines(owner, repo, issue_number, page, size, sort_by, sort_order_int)
+        return {**result, "timestamp": datetime.now().isoformat()}
