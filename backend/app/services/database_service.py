@@ -1231,6 +1231,86 @@ class DatabaseService:
             logger.warning(f"计算 MTTR 失败: {e}")
             return None
 
+    async def get_projects_overview(self) -> List[Dict[str, Any]]:
+        """获取所有项目的数据获取情况总览"""
+        if self.db is None:
+            return []
+        try:
+            collection_names = await self.db.list_collection_names()
+
+            async def _group_count(collection_name):
+                if collection_name not in collection_names:
+                    return {}
+                pipeline = [
+                    {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "count": {"$sum": 1}}}
+                ]
+                cursor = self.db[collection_name].aggregate(pipeline)
+                result = {}
+                async for doc in cursor:
+                    key = f"{doc['_id']['owner']}/{doc['_id']['repo']}"
+                    result[key] = doc["count"]
+                return result
+
+            pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, commits_counts = await asyncio.gather(
+                _group_count("pr_data"),
+                _group_count("pr_comments"),
+                _group_count("issues"),
+                _group_count("issue_timelines"),
+                _group_count("pr_details"),
+                _group_count("pr_reviews"),
+                _group_count("pr_commits"),
+            )
+
+            all_projects = set()
+            for m in [pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, commits_counts]:
+                all_projects.update(m.keys())
+
+            overview = []
+            for project_key in sorted(all_projects):
+                parts = project_key.split("/", 1)
+                owner, repo = parts[0], parts[1] if len(parts) > 1 else ""
+
+                pr_count = pr_data_counts.get(project_key, 0)
+                comments_count = comments_counts.get(project_key, 0)
+                issues_count = issues_counts.get(project_key, 0)
+                timeline_count = timeline_counts.get(project_key, 0)
+                details_count = details_counts.get(project_key, 0)
+                reviews_count = reviews_counts.get(project_key, 0)
+                commits_count = commits_counts.get(project_key, 0)
+
+                last_updated = None
+                for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details"]:
+                    if coll_name not in collection_names:
+                        continue
+                    doc = await self.db[coll_name].find_one(
+                        {"owner": owner, "repo": repo},
+                        {"saved_at": 1, "_id": 0},
+                        sort=[("saved_at", -1)],
+                    )
+                    if doc and doc.get("saved_at"):
+                        sa = doc["saved_at"]
+                        if last_updated is None or sa > last_updated:
+                            last_updated = sa
+
+                overview.append({
+                    "owner": owner,
+                    "repo": repo,
+                    "pr_count": pr_count,
+                    "comments_count": comments_count,
+                    "issues_count": issues_count,
+                    "timeline_count": timeline_count,
+                    "details_count": details_count,
+                    "reviews_count": reviews_count,
+                    "commits_count": commits_count,
+                    "last_updated": last_updated,
+                })
+
+            logger.info(f"项目总览: {len(overview)} 个项目")
+            return overview
+        except Exception as e:
+            logger.error(f"获取项目总览失败: {e}")
+            return []
+
     async def get_aggregate_stats(self, owner: str = None, repo: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"error": "数据库未连接"}

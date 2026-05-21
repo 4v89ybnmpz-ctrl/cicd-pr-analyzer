@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 def register_database_routes(router, db):
     """注册数据库相关路由"""
 
+    @router.get("/database/projects/overview")
+    async def get_projects_overview():
+        """获取所有项目的数据获取情况总览"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        overview = await db.get_projects_overview()
+        return {"projects": overview, "total": len(overview), "timestamp": datetime.now().isoformat()}
+
     @router.get("/database/stats", response_model=DatabaseStatsResponse)
     async def get_database_stats():
         """获取数据库统计信息"""
