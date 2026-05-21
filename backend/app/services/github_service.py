@@ -206,15 +206,17 @@ class GitHubPRService:
             headers["Authorization"] = f"token {token}"
         return headers
 
-    async def fetch_prs_for_project(self, owner: str, repo: str, max_count: int = 0) -> Dict[str, Any]:
+    async def fetch_prs_for_project(self, owner: str, repo: str, max_count: int = 0, start_page: int = 1) -> Dict[str, Any]:
         """获取指定项目的 PR 数据"""
         log_msg = f"开始获取 {owner}/{repo} 的 PR 数据"
+        if start_page > 1:
+            log_msg += f" (从第 {start_page} 页开始)"
         if max_count > 0:
             log_msg += f" (最多 {max_count} 个)"
         logger.info(log_msg)
 
         all_prs = []
-        page = 1
+        page = start_page
         error = None
 
         try:
@@ -643,6 +645,275 @@ class GitHubPRService:
 
         return {"owner": owner, "repo": repo, "results": final_results,
                 "total_prs": len(pr_numbers), "success_count": success_count, "failed_count": failed_count}
+
+    async def fetch_user_profile(self, username: str) -> Dict[str, Any]:
+        """获取 GitHub 用户 Profile"""
+        try:
+            headers = await self._get_headers()
+            url = f"{self.base_url}/users/{username}"
+            response = await self._make_request(url, headers, {}, 30)
+            if response.status_code != 200:
+                return {"username": username, "error": f"API 请求失败: {response.status_code}"}
+            data = response.json()
+            return {
+                "login": data.get("login"),
+                "id": data.get("id"),
+                "avatar_url": data.get("avatar_url"),
+                "html_url": data.get("html_url"),
+                "type": data.get("type"),
+                "name": data.get("name"),
+                "company": data.get("company"),
+                "blog": data.get("blog"),
+                "location": data.get("location"),
+                "email": data.get("email"),
+                "bio": data.get("bio"),
+                "public_repos": data.get("public_repos"),
+                "followers": data.get("followers"),
+                "following": data.get("following"),
+                "created_at": data.get("created_at"),
+                "error": None,
+            }
+        except Exception as e:
+            return {"username": username, "error": str(e)}
+
+    async def fetch_user_profiles_batch(self, usernames: List[str]) -> Dict[str, Any]:
+        """批量获取 GitHub 用户 Profile"""
+        semaphore = asyncio.Semaphore(self.max_workers)
+
+        async def _fetch(username):
+            async with semaphore:
+                result = await self.fetch_user_profile(username)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(u) for u in usernames], return_exceptions=True)
+        success, failed = [], []
+        for r in results:
+            if isinstance(r, Exception):
+                failed.append({"error": str(r)})
+            elif r.get("error"):
+                failed.append(r)
+            else:
+                success.append(r)
+        return {"profiles": success, "failed": failed, "total": len(usernames), "success_count": len(success), "failed_count": len(failed)}
+
+    async def fetch_user_contributed_repos(self, username: str, max_pages: int = 5) -> Dict[str, Any]:
+        """获取用户参与过的项目（通过 Events API）"""
+        repo_map = {}
+        page = 1
+        error = None
+
+        try:
+            while page <= max_pages:
+                headers = await self._get_headers()
+                url = f"{self.base_url}/users/{username}/events"
+                params = {"per_page": 100, "page": page}
+                response = await self._make_request(url, headers, params, 30)
+                if response.status_code != 200:
+                    error = f"API 请求失败: {response.status_code}"
+                    break
+                events = response.json()
+                if not events:
+                    break
+                for event in events:
+                    repo_name = event.get("repo", {}).get("name")
+                    event_type = event.get("type", "")
+                    if not repo_name:
+                        continue
+                    if repo_name not in repo_map:
+                        repo_map[repo_name] = {"repo": repo_name, "events": {}}
+                    if event_type not in repo_map[repo_name]["events"]:
+                        repo_map[repo_name]["events"][event_type] = 0
+                    repo_map[repo_name]["events"][event_type] += 1
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            repos = []
+            for name, info in repo_map.items():
+                total = sum(info["events"].values())
+                repos.append({
+                    "repo": name,
+                    "total_events": total,
+                    "event_types": info["events"],
+                })
+            repos.sort(key=lambda x: x["total_events"], reverse=True)
+            logger.info(f"获取用户 {username} 参与项目完成，共 {len(repos)} 个项目")
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取用户参与项目异常: {e}")
+
+        return {"username": username, "repos": repos, "total": len(repos), "error": error}
+
+    async def fetch_issues(self, owner: str, repo: str, max_count: int = 0, start_page: int = 1, state: str = "all") -> Dict[str, Any]:
+        """获取指定项目的 Issues 数据（不含 PR）"""
+        log_msg = f"开始获取 {owner}/{repo} 的 Issues 数据"
+        if start_page > 1:
+            log_msg += f" (从第 {start_page} 页开始)"
+        if max_count > 0:
+            log_msg += f" (最多 {max_count} 个)"
+        logger.info(log_msg)
+
+        all_items = []
+        page = start_page
+        error = None
+
+        try:
+            while True:
+                headers = await self._get_headers()
+                url = f"{self.base_url}/repos/{owner}/{repo}/issues"
+                params = {"state": state, "per_page": self.per_page, "page": page}
+
+                response = await self._make_request(url, headers, params, 30)
+
+                if response.status_code == 404:
+                    error = "仓库不存在"
+                    break
+                if response.status_code != 200:
+                    error = f"API 请求失败: {response.status_code}"
+                    break
+
+                issues = response.json()
+                if not issues:
+                    break
+
+                for issue in issues:
+                    if "pull_request" in issue:
+                        continue
+                    labels = [l.get("name") for l in (issue.get("labels") or [])]
+                    assignees = [a.get("login") for a in (issue.get("assignees") or [])]
+                    all_items.append({
+                        "number": issue.get("number"),
+                        "title": issue.get("title"),
+                        "user": (issue.get("user") or {}).get("login"),
+                        "state": issue.get("state"),
+                        "labels": labels,
+                        "assignees": assignees,
+                        "comments_count": issue.get("comments", 0),
+                        "created_at": issue.get("created_at"),
+                        "updated_at": issue.get("updated_at"),
+                        "closed_at": issue.get("closed_at"),
+                        "url": issue.get("html_url"),
+                        "body": (issue.get("body") or "")[:500],
+                    })
+
+                if max_count > 0 and len(all_items) >= max_count:
+                    all_items = all_items[:max_count]
+                    break
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            logger.info(f"获取 {owner}/{repo} Issues 完成，共 {len(all_items)} 个")
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取 {owner}/{repo} Issues 数据异常: {e}")
+
+        return {"owner": owner, "repo": repo, "issues": all_items, "total": len(all_items), "error": error}
+
+    async def fetch_issue_timeline(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+        """获取单个 Issue/PR 的 Timeline（PR 通过 Issues API 访问）"""
+        all_events = []
+        page = 1
+        error = None
+        is_pr = False
+
+        try:
+            # 先判断是 PR 还是 Issue
+            check_headers = await self._get_headers()
+            check_url = f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}"
+            check_resp = await self._make_request(check_url, check_headers, {}, 10)
+            if check_resp.status_code == 200:
+                is_pr = "pull_request" in check_resp.json()
+            elif check_resp.status_code == 404:
+                # 试试 PR API
+                pr_url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{issue_number}"
+                pr_resp = await self._make_request(pr_url, check_headers, {}, 10)
+                is_pr = pr_resp.status_code == 200
+            while True:
+                headers = await self._get_headers()
+                headers["Accept"] = "application/vnd.github.mockingbird-preview+json"
+                url = f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/timeline"
+                params = {"per_page": 100, "page": page}
+
+                response = await self._make_request(url, headers, params, 30)
+
+                if response.status_code == 404:
+                    error = "Issue/PR 不存在"
+                    break
+                if response.status_code != 200:
+                    error = f"API 请求失败: {response.status_code}"
+                    break
+
+                events = response.json()
+                if not events:
+                    break
+
+                for event in events:
+                    actor = event.get("actor") or event.get("user") or {}
+                    label = event.get("label") or {}
+                    assignee = event.get("assignee") or {}
+                    milestone = event.get("milestone") or {}
+                    source = event.get("source") or {}
+                    source_issue = source.get("issue") or {}
+                    reactions = event.get("reactions") or {}
+                    all_events.append({
+                        "event_id": event.get("id"),
+                        "event_type": event.get("event"),
+                        "actor": actor.get("login"),
+                        "actor_id": actor.get("id"),
+                        "actor_type": actor.get("type"),
+                        "commit_id": event.get("commit_id"),
+                        "commit_url": event.get("commit_url"),
+                        "label": label.get("name"),
+                        "label_color": label.get("color"),
+                        "assignee": assignee.get("login"),
+                        "milestone": milestone.get("title"),
+                        "body": (event.get("body") or "")[:500],
+                        "url": event.get("html_url") or event.get("url"),
+                        "state": event.get("state"),
+                        "author_association": event.get("author_association"),
+                        "reactions_total": reactions.get("total_count", 0),
+                        "source_type": source.get("type"),
+                        "source_issue_url": source_issue.get("html_url"),
+                        "created_at": event.get("created_at"),
+                    })
+
+                if len(events) < 100:
+                    break
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            logger.info(f"获取 {owner}/{repo} Issue#{issue_number} Timeline 完成，共 {len(all_events)} 个事件")
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取 Issue Timeline 异常: {e}")
+
+        return {"owner": owner, "repo": repo, "issue_number": issue_number, "is_pr": is_pr, "events": all_events, "total": len(all_events), "error": error}
+
+    async def fetch_issue_timelines_batch(self, owner: str, repo: str, issue_numbers: List[int]) -> Dict[str, Any]:
+        """批量获取多个 Issue/PR 的 Timeline"""
+        semaphore = asyncio.Semaphore(self.max_workers)
+        results, success_count, failed_count = [], 0, 0
+
+        async def _fetch(number):
+            async with semaphore:
+                result = await self.fetch_issue_timeline(owner, repo, number)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        task_results = await asyncio.gather(*[_fetch(n) for n in issue_numbers], return_exceptions=True)
+
+        for number, result in zip(issue_numbers, task_results):
+            if isinstance(result, Exception):
+                failed_count += 1
+            else:
+                results.append(result)
+                if result.get("error") is None:
+                    success_count += 1
+                else:
+                    failed_count += 1
+
+        return {"owner": owner, "repo": repo, "results": results, "total": len(issue_numbers), "success_count": success_count, "failed_count": failed_count}
 
 
 # 全局任务进度管理器
