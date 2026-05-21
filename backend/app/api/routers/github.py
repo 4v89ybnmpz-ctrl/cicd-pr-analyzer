@@ -380,3 +380,11 @@ async def _get_pr_numbers(owner: str, repo: str, limit: int, db, github_service)
     if pr_result["error"]:
         raise HTTPException(status_code=404, detail=pr_result["error"])
     return [pr["number"] for pr in pr_result["prs"][:limit]]
+
+    @router.get("/github/repos/{owner}/{repo}/stats")
+    async def get_repo_stats(owner: str, repo: str):
+        """获取仓库在 GitHub 上的各类数据总数"""
+        if github_service is None:
+            raise HTTPException(status_code=503, detail="GitHub 服务未配置")
+        result = await github_service.get_repo_stats(owner, repo)
+        return {"stats": result, "timestamp": datetime.now().isoformat()}

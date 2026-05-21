@@ -916,5 +916,63 @@ class GitHubPRService:
         return {"owner": owner, "repo": repo, "results": results, "total": len(issue_numbers), "success_count": success_count, "failed_count": failed_count}
 
 
+    def _parse_last_page(self, link_header: str) -> int:
+        if not link_header:
+            return 0
+        import re
+        match = re.search(r'<[^>]*[?&]page=(\d+)>;\s*rel="last"', link_header)
+        return int(match.group(1)) if match else 0
+
+    async def get_repo_stats(self, owner: str, repo: str) -> Dict[str, Any]:
+        """获取仓库在 GitHub 上的各类数据总数（PR/Issues/评论等）"""
+        import re
+        headers = await self._get_headers()
+        client = self._get_client()
+        result = {"owner": owner, "repo": repo}
+
+        try:
+            repo_resp = await self._make_request(
+                f"{self.base_url}/repos/{owner}/{repo}", headers, {})
+            if repo_resp.status_code != 200:
+                return {**result, "error": f"获取仓库信息失败: {repo_resp.status_code}"}
+            repo_data = repo_resp.json()
+            result["stargazers_count"] = repo_data.get("stargazers_count", 0)
+            result["forks_count"] = repo_data.get("forks_count", 0)
+            result["open_issues_count"] = repo_data.get("open_issues_count", 0)
+        except Exception as e:
+            return {**result, "error": f"获取仓库信息异常: {e}"}
+
+        async def _get_total(endpoint, params=None):
+            try:
+                p = {"state": "all", "per_page": 1, "page": 1}
+                if params:
+                    p.update(params)
+                resp = await client.get(
+                    f"{self.base_url}/repos/{owner}/{repo}/{endpoint}",
+                    headers=headers, params=p, timeout=15)
+                if resp.status_code != 200:
+                    return None
+                total = self._parse_last_page(resp.headers.get("link", ""))
+                return total if total > 0 else len(resp.json())
+            except Exception:
+                return None
+
+        pr_total, issues_total, pr_comments_total, issue_comments_total = await asyncio.gather(
+            _get_total("pulls"),
+            _get_total("issues"),
+            _get_total("pulls/comments"),
+            _get_total("issues/comments"),
+        )
+
+        result["github_pr_total"] = pr_total
+        result["github_issues_total"] = issues_total
+        if issues_total is not None and pr_total is not None:
+            result["github_pure_issues_total"] = issues_total - pr_total
+        result["github_pr_comments_total"] = pr_comments_total
+        result["github_issue_comments_total"] = issue_comments_total
+
+        return result
+
+
 # 全局任务进度管理器
 task_progress_manager = TaskProgress()
