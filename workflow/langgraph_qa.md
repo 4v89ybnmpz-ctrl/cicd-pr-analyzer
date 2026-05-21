@@ -1658,3 +1658,350 @@
 | Q90 | Plugin 基类定义 get_nodes/get_edges 接口；动态注册到 StateGraph |
 | Q91 | 多轮对话 State + chatbot/tools 节点循环；用户追问式分析 |
 | Q92 | 分片子 State / metadata 扩展字段 / state_version 版本号 / 配置驱动 |
+
+---
+
+## LangGraph 底层原理题
+
+### Q93: LangGraph 的图执行引擎内部是如何调度节点的？
+> **思考提示：** LangGraph 的调度机制：
+> 1. **拓扑排序**：`compile()` 时对节点进行拓扑排序，确定合法执行顺序
+> 2. **事件循环驱动**：内部基于 Python 生成器/协程实现，每个节点执行后 yield 状态更新
+> 3. **并行调度**：fan-out 时使用 `asyncio.gather`（异步）或 `concurrent.futures`（同步）并行执行
+> 4. **状态合并屏障**：fan-in 节点等待所有前驱节点完成后，合并状态再执行
+> 5. **BFS 拓扑遍历**：按广度优先逐层执行，同一层的并行节点同时调度
+>
+> 理解调度机制有助于：设计高效的并行拓扑、避免死锁（循环依赖）、优化关键路径。
+
+---
+
+### Q94: LangGraph 的 Checkpoint 内部存储了什么？为什么能支持"时间旅行"？
+> **思考提示：** 每个 Checkpoint 包含：
+> 1. **完整状态快照**：当前所有 State 字段的值（深拷贝）
+> 2. **元数据**：checkpoint_id、timestamp、当前节点名、下一步节点
+> 3. **待执行队列**：还未执行的后续节点列表
+> 4. **父 Checkpoint 引用**：形成链表结构，支持回溯
+>
+> "时间旅行"原理：
+> - 每个 checkpoint 是一个不可变快照，通过 `graph.get_state_history(config)` 获取完整历史链
+> - `graph.update_state(config, values, as_node="xxx")` 可以修改任意历史状态
+> - 修改后从该 checkpoint 重新执行，相当于"回到过去改写历史"
+>
+> 存储开销：每个 checkpoint 保存完整 State 拷贝，状态大时内存/磁盘消耗显著。
+
+---
+
+### Q95: LangGraph 的 `compile()` 内部做了哪些校验？
+> **思考提示：** 编译时校验：
+> 1. **入口点检查**：必须通过 `set_entry_point` 或 `add_edge(START, ...)` 设置唯一入口
+> 2. **节点存在性**：所有边的 source/target 必须是已注册的节点名或 `START`/`END`
+> 3. **悬挂节点检测**：没有入边或出边的孤立节点会给出警告
+> 4. **条件边返回值验证**：条件函数返回的节点名必须存在于图中
+> 5. **循环检测**：检测是否存在无出口的死循环（不含条件边的纯环）
+> 6. **State Schema 兼容性**：确保所有节点函数签名与 State 类型匹配
+>
+> 校验失败会抛出明确的错误信息（如 `ValueError: Node "xxx" not found`）。
+
+---
+
+### Q96: LangGraph 的同步执行和异步执行在底层有什么区别？
+> **思考提示：**
+> - **同步模式（`invoke`）**：
+>   1. 在调用线程中按拓扑顺序执行节点
+>   2. 并行节点使用 `concurrent.futures.ThreadPoolExecutor`
+>   3. 阻塞等待每个节点完成
+>
+> - **异步模式（`ainvoke`）**：
+>   1. 在 asyncio 事件循环中执行
+>   2. 并行节点使用 `asyncio.gather`
+>   3. 节点函数必须是 `async def` 才能真正异步
+>   4. 如果节点是同步函数，LangGraph 内部会自动用 `run_in_executor` 包装
+>
+> 混合场景：同步节点在异步图中会被线程池包装执行，不会阻塞事件循环，但有上下文切换开销。
+
+---
+
+## LangGraph 面试高频题
+
+### Q97: 请简述 LangGraph 的核心架构，它是如何实现有状态的工作流编排的？
+> **思考提示：** 面试回答框架：
+> 1. **核心抽象**：图（Graph）由节点（Node）和边（Edge）组成，状态（State）在节点间流转
+> 2. **状态管理**：TypedDict/Pydantic 定义 Schema，节点返回部分更新，框架自动浅合并
+> 3. **路由机制**：无条件边（固定顺序）+ 条件边（运行时动态决定）+ Command（节点内控制）
+> 4. **执行模型**：编译后生成有向无环图（DAG），按拓扑排序执行，支持 fan-out 并行
+> 5. **持久化**：Checkpoint 机制保存每步状态快照，支持中断恢复和时间旅行
+> 6. **LLM 集成**：节点内调用 LangChain LLM，图本身不关心节点内部实现
+>
+> 一句话总结：LangGraph = **有状态的 DAG 执行引擎 + LLM 原生支持**。
+
+---
+
+### Q98: LangGraph 和传统的 DAG 框架（如 Airflow）的本质区别是什么？
+> **思考提示：** 面试核心回答：
+>
+> | 维度 | LangGraph | 传统 DAG（Airflow） |
+> |------|-----------|---------------------|
+> | 状态管理 | 内置，自动合并 | 无，靠 XCom 手动传递 |
+> | 执行时机 | 即时触发 | 调度器定时/DAG 触发 |
+> | 控制流 | 条件路由 + 循环 + Command | 仅有分支（BranchPython） |
+> | LLM 集成 | 原生（LangChain 生态） | 需自定义 Operator |
+> | 人机交互 | interrupt 暂停等待人工 | 无内置支持 |
+> | 适用场景 | AI Agent、实时分析 | ETL、数据仓库 |
+>
+> 核心区别：LangGraph 的**状态自动流转 + 动态控制流 + LLM 原生**使其天然适合 AI 应用，而传统 DAG 适合确定性数据管道。
+
+---
+
+### Q99: 如何用 LangGraph 实现 ReAct（Reasoning + Acting）模式的 Agent？
+> **思考提示：** ReAct 是最经典的 Agent 模式，LangGraph 内置支持：
+> ```python
+> from langgraph.prebuilt import create_react_agent
+>
+> # 1. 定义工具
+> @tool
+> def fetch_pr_comments(owner: str, repo: str, pr_number: int):
+>     """获取指定 PR 的评论"""
+>     ...
+>
+> # 2. 创建 ReAct Agent
+> agent = create_react_agent(
+>     model=ChatAnthropic(model="claude-sonnet-4-20250514"),
+>     tools=[fetch_pr_comments, analyze_cicd, generate_report],
+> )
+>
+> # 3. 执行
+> result = agent.invoke({"messages": [("user", "分析 rust-lang/rust 的 CI/CD")]})
+> ```
+> ReAct 循环：**思考（LLM 推理）→ 行动（调用工具）→ 观察（获取结果）→ 再思考**，直到得出最终答案。
+> `create_react_agent` 内部就是一个包含 chatbot 和 tools 两个节点的循环图。
+
+---
+
+### Q100: LangGraph 的 interrupt（中断）机制的底层实现原理是什么？
+> **思考提示：** interrupt 实现原理：
+> 1. **检查点保存**：节点执行到 `interrupt()` 时，先保存当前完整状态到 Checkpoint
+> 2. **图暂停**：抛出特殊的 `GraphInterrupt` 异常，图的执行器捕获后优雅退出
+> 3. **状态标记**：在 checkpoint 元数据中标记 `interrupted=True` 和中断值
+> 4. **恢复入口**：调用 `graph.invoke(None, config)`（输入为 None）时，从 checkpoint 恢复执行
+> 5. **人工输入注入**：恢复时通过 `Command(resume=value)` 将人工输入注入到 State
+>
+> ```python
+> # 暂停
+> def review_node(state):
+>     draft = state["report"]
+>     feedback = interrupt("请审核报告", value=draft)  # 暂停点
+>     return {"report": apply_feedback(draft, feedback)}
+>
+> # 恢复
+> graph.invoke(Command(resume="建议增加趋势分析"), config)
+> ```
+
+---
+
+### Q101: 在生产环境中使用 LangGraph 需要注意哪些问题？
+> **思考提示：** 面试回答要点：
+> 1. **状态大小控制**：State 过大会导致 Checkpoint 存储爆炸，大对象应存数据库
+> 2. **并发安全**：同步模式下并行节点修改同一字段需要 Reducer
+> 3. **LLM 成本**：按 token 计费，需要缓存、截断、分级模型策略
+> 4. **超时处理**：LLM 调用可能很慢，需要设置 `timeout` 和降级方案
+> 5. **幂等性**：重复执行不产生副作用（数据库 upsert + 缓存 AI 结果）
+> 6. **可观测性**：集成 LangSmith 追踪，监控延迟和 token 消耗
+> 7. **安全性**：Prompt Injection 防御、API Key 管理、输入验证
+> 8. **版本管理**：图结构变更可能导致 Checkpoint 不兼容，需要版本迁移策略
+
+---
+
+## 项目实战深度题
+
+### Q102: 本项目的全量分析图执行一次大约需要多长时间？瓶颈在哪里？
+> **思考提示：** 时间估算（以 100 个 PR 为例）：
+> 1. `fetch_pr_list`：~2s（1 次 API 调用，分页）
+> 2. `fetch_comments`：~30s（100 个 PR 并发获取评论，每个 1-2 次 API 调用）
+> 3. `fetch_details`：~20s（100 个 PR 并发获取详情）
+> 4. `fetch_reviews`：~15s（100 个 PR 并发获取 reviews）
+> 5. `analyze_cicd`：~1s（纯本地计算）
+> 6. `generate_stats_report`：~1s（数据库查询）
+> 7. `ai_analyze`：~15-30s（LLM 生成长文分析）
+> 8. `ai_suggest`：~10-20s（LLM 生成建议）
+> 9. `generate_final_report`：~0.1s（数据合并）
+>
+> **瓶颈**：数据获取（comments+details+reviews 占 ~65s）和 LLM 调用（~25-50s）。
+> 优化方向：步骤 2-4 并行化（fan-out）可降到 ~30s；LLM 用更快模型（Haiku）可降到 ~5s。
+
+---
+
+### Q103: 本项目的 `analyze_cicd_node` 是如何与后端的 CICDExtractor 集成的？
+> **思考提示：** 集成细节（`nodes.py:136-164`）：
+> 1. 从 State 中读取 `comments`（前序节点 `fetch_comments_node` 的输出）
+> 2. 遍历每个 PR 的评论数据
+> 3. 调用 `CICDExtractor().extract_batch_structured(comments, owner, repo, pr_number)`
+> 4. 解析器通过 `ParserRegistry` 自动选择匹配的 CI/CD 解析器
+> 5. 结果转为 `to_db_dict()` 格式，批量存入数据库
+> 6. 将 `cicd_results` 写回 State，供后续 `generate_stats_report_node` 使用
+>
+> 关键设计：节点只做胶水代码（从 State 取数据 → 调用服务 → 结果写回 State），业务逻辑在服务层。
+
+---
+
+### Q104: 如果 `fetch_comments_node` 获取了 100 个 PR 的评论，但其中 20 个失败了，后续节点如何处理？
+> **思考提示：** 容错链：
+> 1. **comments 节点**：失败的 PR 不写入 `results` 字典，错误追加到 `errors` 列表。`results` 只包含成功的 80 个
+> 2. **details/reviews 节点**：基于 `pr_numbers` 获取所有 100 个 PR，各自独立处理失败
+> 3. **analyze_cicd 节点**：只遍历 `comments` 中存在的 PR（80 个），跳过缺失的
+> 4. **stats_report 节点**：基于数据库中的数据聚合统计，不受内存中缺失数据影响
+> 5. **ai_analyze 节点**：prompt 中注明"分析了 80/100 个 PR"，LLM 会考虑数据不完整的情况
+>
+> 整体策略：**部分失败不阻断流程，最终报告中体现数据完整性信息**。
+
+---
+
+### Q105: 本项目的 `generate_stats_report_node` 调用了 `_build_insights` 函数，这个函数来自哪里？为什么要跨模块导入？
+> **思考提示：**
+> ```python
+> from app.api.routers.analysis import _build_insights
+> ```
+> 这是 `nodes.py` 中唯一从 `api/routers` 层导入的函数，存在层次依赖倒置问题：
+> - 正常分层：`api → service → nodes`，但这里 `nodes → api`
+> - 原因：`_build_insights` 包含规则引擎的评级逻辑（A/B/C/D 评分），是纯函数但写在路由文件中
+> - 更好的做法：将 `_build_insights` 移到 `app/services/` 或 `app/analysis/` 层，保持依赖方向正确
+
+---
+
+### Q106: 本项目增量图的 `check_existing_node` 和 `route_by_diff` 是定义在 `build_incremental_graph` 函数内部的，为什么？
+> **思考提示：** 局部定义的原因：
+> 1. **闭包访问**：`check_existing_node` 需要访问 `workflow_config.db`，定义为闭包可以直接引用
+> 2. **仅此图使用**：这两个函数只在增量图中使用，不需要暴露为模块级函数
+> 3. **避免命名冲突**：如果未来有其他图也需要 check_existing 逻辑但实现不同，局部定义互不干扰
+>
+> 潜在问题：无法单独测试这两个函数。改进方案：提取为独立的模块级函数，db 通过参数或 config 传入。
+
+---
+
+## LangGraph 面试场景题
+
+### Q107: 面试官问"你在项目中是如何使用 LangGraph 的"，如何回答？
+> **思考提示：** 建议回答结构（STAR 法则）：
+>
+> **Situation（背景）**：项目需要从 GitHub 获取 PR 数据并分析 CI/CD 工程能力，涉及多步骤流程（数据采集→分析→AI 报告），用户需要手动调用 5+ 个 API。
+>
+> **Task（任务）**：设计一个一键分析的自动化流水线，支持全量/增量分析、AI 深度分析、进度追踪。
+>
+> **Action（行动）**：
+> 1. 使用 LangGraph StateGraph 定义 9 节点流水线，TypedDict State 在节点间自动流转
+> 2. 实现条件路由（增量分析中根据是否有新 PR 动态分流）
+> 3. 集成 Claude 做 CI/CD 深度分析和改进建议，AI 不可用时优雅降级
+> 4. 复用已有 backend 服务层，workflow 只做编排，不修改现有代码
+>
+> **Result（结果）**：一键触发端到端分析，支持同步/异步执行，进度可追踪，AI 可选启用。
+
+---
+
+### Q108: 面试官问"LangGraph 的 State 合并机制有什么坑"，如何回答？
+> **思考提示：** 核心坑点：
+> 1. **浅合并陷阱**：嵌套字典/列表是整体替换而非深度合并。如 `{"comments": {"100": [...]}}` 会覆盖整个 comments 字典
+> 2. **并行写入冲突**：两个并行节点返回同一 key 且无 Reducer，LangGraph 可能报 `InvalidUpdate`
+> 3. **None 值歧义**：返回 `{"field": None}` 会把字段设为 None（不是"不更新"），要完全不更新就不返回该 key
+> 4. **大 State 性能**：每个节点执行后做一次浅拷贝（用于 checkpoint），State 过大时拷贝开销显著
+> 5. **类型不一致**：TypedDict 无运行时验证，节点返回错误类型（如 int 代替 str）不会报错，但下游节点可能崩溃
+>
+> 解决方案：使用 `Annotated[type, reducer]`、控制 State 大小、考虑 Pydantic State。
+
+---
+
+### Q109: 面试官问"如何设计一个可靠的 LLM 工作流"，你会从哪些维度回答？
+> **思考提示：** 六个维度：
+> 1. **可靠性**：节点内 try/except + 全局兜底 + LLM 降级方案 + 重试策略
+> 2. **可观测性**：LangSmith 追踪 + 每步 logger.info + progress 字段 + stream 模式
+> 3. **成本控制**：缓存 AI 结果 + 分级模型 + 数据截断 + 条件调用（数据量小时跳过 AI）
+> 4. **安全性**：Prompt Injection 防御 + API Key 管理 + 输入验证 + 输出审查
+> 5. **扩展性**：插件系统 + 可替换 LLM + 可切换图 + 子图封装
+> 6. **性能**：fan-out 并行 + 异步 API + State 精简 + Checkpointing 断点续跑
+
+---
+
+### Q110: LangGraph 的图和有限状态机（FSM）有什么关系？
+> **思考提示：**
+> - **LangGraph 图 ≈ 增强的 FSM**：
+>   - 节点 = 状态（State）
+>   - 边 = 状态转移（Transition）
+>   - 条件边 = 条件转移
+>   - State = FSM 的数据寄存器
+>
+> - **LangGraph 超越 FSM 的地方**：
+>   1. **携带复杂数据**：FSM 通常只有当前状态标识，LangGraph 的 State 可以携带任意数据
+>   2. **并行执行**：FSM 是单线程的，LangGraph 支持 fan-out 并行
+>   3. **嵌套子图**：FSM 不支持嵌套，LangGraph 支持子图
+>   4. **中断恢复**：FSM 不支持暂停/恢复，LangGraph 通过 Checkpointing 支持
+>   5. **循环**：两者都支持，但 LangGraph 的条件循环更灵活
+>
+> 理解为"带数据的有向图 + 有限状态机的控制流"更准确。
+
+---
+
+### Q111: 如何向不熟悉 LangGraph 的团队成员解释本项目的 workflow 模块？
+> **思考提示：** 类比解释法：
+> 1. **类比流水线**：像一个工厂流水线，每个工位（节点）处理产品（State），完成后传给下一个工位
+> 2. **类比函数调用链**：类似 `a(b(c(d(input))))`，但自动管理中间数据的传递和错误处理
+> 3. **类比 Git CI**：类似 GitHub Actions 的 workflow，但用 Python 代码定义而非 YAML
+>
+> 用本项目的例子：
+> - 第 1 步：获取 PR 列表（输入 owner/repo → 输出 pr_numbers）
+> - 第 2 步：获取评论（输入 pr_numbers → 输出 comments）
+> - ...
+> - 最后一步：合并所有结果生成报告
+>
+> 关键优势：如果中间某步失败，可以重试/跳过，而不是整个流程白费。
+
+---
+
+## LangGraph 版本与演进题
+
+### Q112: LangGraph 从 0.1 到 0.2+ 有哪些重要的 API 变化？
+> **思考提示：** 主要变化：
+> 1. **`Command` API**（0.2+）：节点可以直接返回 `Command(update={}, goto="node")`，替代部分条件边场景
+> 2. **`interrupt` 函数**（0.2+）：替代旧版 `Command(resume=...)` 的人机交互方式
+> 3. **Checkpoint 接口变化**：`MemorySaver` 迁移到 `langgraph.checkpoint.memory`
+> 4. **`StateType` 参数**：`StateGraph` 的 State 参数支持更多类型
+> 5. **`RetryPolicy`**：新增内置重试策略
+>
+> 本项目使用 `langgraph>=0.2.0`，已采用新版 API。
+
+---
+
+### Q113: LangGraph 的未来发展方向是什么？有哪些值得关注的新特性？
+> **思考提示：** 发展方向：
+> 1. **LangGraph Platform**：云端托管服务，一键部署图为 API，自动处理 Checkpointing、并发、流式
+> 2. **多 Agent 协作**：`Supervisor` 模式（管理者 Agent 分配任务给专业 Agent）
+> 3. **长期记忆**：跨会话的持久化记忆（Long-term Memory），不只是单次执行的状态
+> 4. **自适应图**：LLM 可以在运行时动态修改图结构（添加/删除节点）
+> 5. **更丰富的 prebuilt**：更多开箱即用的 Agent 模板（RAG Agent、Code Review Agent 等）
+>
+> 对本项目的影响：未来可以用 LangGraph Platform 替代手动 API 路由，用 Supervisor 多 Agent 替代固定流程图。
+
+---
+
+## 参考答案速查（续）
+
+| 题号 | 关键答案 |
+|:---:|:---|
+| Q93 | 拓扑排序 + 事件循环 + fan-out 并行 + 状态合并屏障 + BFS 遍历 |
+| Q94 | 完整状态快照 + 元数据 + 父引用链表；不可变快照支持回溯和重放 |
+| Q95 | 入口点/节点存在性/悬挂节点/条件边返回值/循环检测/Schema 兼容性 |
+| Q96 | 同步用 ThreadPoolExecutor；异步用 asyncio.gather；同步节点自动包装 |
+| Q97 | State + Node + Edge + 条件路由 + Checkpoint + LLM 集成六层架构 |
+| Q98 | 状态自动管理 + 动态控制流 + LLM 原生 vs 无状态 + 定时调度 + 无 LLM |
+| Q99 | create_react_agent + tools；思考→行动→观察循环 |
+| Q100 | interrupt 保存 checkpoint + 抛出 GraphInterrupt + Command(resume) 恢复 |
+| Q101 | State 大小/并发安全/LLM 成本/超时/幂等/可观测/安全/版本管理 |
+| Q102 | 瓶颈：数据获取 ~65s + LLM ~25-50s；fan-out 并行可降至 ~30s |
+| Q103 | 从 State 取 comments → CICDExtractor → ParserRegistry → to_db_dict → 写回 State |
+| Q104 | 失败不写入 results；后续节点只遍历存在数据；报告注明数据完整性 |
+| Q105 | 从 api.routers.analysis 导入 _build_insights；存在层次依赖倒置问题 |
+| Q106 | 闭包访问 config.db / 仅增量图使用 / 避免命名冲突；缺点是不可单独测试 |
+| Q107 | STAR 法则：背景→任务→行动（StateGraph+条件路由+AI降级+服务复用）→结果 |
+| Q108 | 浅合并/并行冲突/None 歧义/大 State 性能/类型不一致五大坑 |
+| Q109 | 可靠性+可观测+成本+安全+扩展+性能六个维度 |
+| Q110 | 增强版 FSM；State 携带复杂数据 + 并行 + 子图 + 中断恢复 + 灵活循环 |
+| Q111 | 类比流水线/函数链/GitHub Actions；用项目 9 步流程举例说明 |
+| Q112 | Command API / interrupt 函数 / Checkpoint 迁移 / StateType / RetryPolicy |
+| Q113 | Platform 云托管 / 多 Agent Supervisor / 长期记忆 / 自适应图 / prebuilt 模板 |
