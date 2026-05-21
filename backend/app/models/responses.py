@@ -316,6 +316,11 @@ class DatabaseStats(BaseModel):
     database: Optional[str] = None
     pr_data_count: int = 0
     pr_details_count: int = 0
+    pr_comments_count: int = 0
+    issues_count: int = 0
+    issue_timelines_count: int = 0
+    user_profiles_count: int = 0
+    user_contributed_repos_count: int = 0
     task_count: int = 0
     status: str = "connected"
 
