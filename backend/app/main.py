@@ -112,6 +112,8 @@ async def lifespan(app: FastAPI):
     try:
         if await db.connect():
             logger.info("数据库连接成功")
+            from app.core.task_queue import task_queue
+            task_queue.set_db(db)
         else:
             logger.warning("数据库连接失败，数据持久化功能不可用")
     except Exception as e:
