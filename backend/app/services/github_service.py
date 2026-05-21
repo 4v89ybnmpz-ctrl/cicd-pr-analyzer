@@ -952,22 +952,38 @@ class GitHubPRService:
                     headers=headers, params=p, timeout=15)
                 if resp.status_code != 200:
                     return None
+                data = resp.json()
+                if not isinstance(data, list):
+                    return None
                 total = self._parse_last_page(resp.headers.get("link", ""))
-                return total if total > 0 else len(resp.json())
+                return total if total > 0 else len(data)
             except Exception:
                 return None
 
-        pr_total, issues_total, pr_comments_total, issue_comments_total = await asyncio.gather(
+        async def _get_total_via_search(query):
+            try:
+                resp = await client.get(
+                    f"{self.base_url}/search/issues",
+                    headers=headers,
+                    params={"q": query, "per_page": 1},
+                    timeout=15)
+                if resp.status_code == 200:
+                    return resp.json().get("total_count")
+                return None
+            except Exception:
+                return None
+
+        pr_total, pr_comments_total, issue_comments_total = await asyncio.gather(
             _get_total("pulls"),
-            _get_total("issues"),
             _get_total("pulls/comments"),
             _get_total("issues/comments"),
         )
 
+        repo_full = f"{owner}/{repo}"
+        pure_issues_total = await _get_total_via_search(f"repo:{repo_full} is:issue")
+
         result["github_pr_total"] = pr_total
-        result["github_issues_total"] = issues_total
-        if issues_total is not None and pr_total is not None:
-            result["github_pure_issues_total"] = issues_total - pr_total
+        result["github_pure_issues_total"] = pure_issues_total
         result["github_pr_comments_total"] = pr_comments_total
         result["github_issue_comments_total"] = issue_comments_total
 
