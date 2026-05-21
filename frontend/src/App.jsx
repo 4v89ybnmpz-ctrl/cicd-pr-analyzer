@@ -54,7 +54,7 @@ function App() {
   const renderPage = () => {
     switch (page) {
       case 'dashboard': return <Dashboard onNavigate={navigate} />
-      case 'projects-overview': return <ProjectsOverview onNavigate={navigate} />
+      case 'projects-overview': return <ProjectsOverview />
       case 'prs': return <PrList onNavigate={navigate} setFilter={setPrDataFilter} />
       case 'prdata': return <PrData filter={prDataFilter} onBack={() => setPage('prs')} />
       case 'details': return <PrDetails />
