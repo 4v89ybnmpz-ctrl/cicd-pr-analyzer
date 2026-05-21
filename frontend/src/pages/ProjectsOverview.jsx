@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge } from 'antd'
-import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, CheckCircleOutlined, SyncOutlined, LoadingOutlined } from '@ant-design/icons'
+import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 const METRICS = [
@@ -23,6 +23,13 @@ const TASK_ACTIONS = [
   { key: 'update_issues', label: '增量更新 Issues', desc: '对比 updated_at 增量更新已有 Issues', apiFn: 'updateIssues', icon: '🔄' },
   { key: 'update_comments', label: '增量更新评论', desc: '对比 updated_at 增量更新已有评论', apiFn: 'updateComments', icon: '🔄' },
 ]
+
+const STATUS_MAP = {
+  pending: { color: 'default', text: '等待中' },
+  running: { color: 'processing', text: '运行中' },
+  completed: { color: 'success', text: '完成' },
+  failed: { color: 'error', text: '失败' },
+}
 
 function Completeness({ project }) {
   const filled = METRICS.filter(m => project[m.key] > 0).length
@@ -47,7 +54,7 @@ function MetricCard({ label, count, color }) {
   )
 }
 
-function TaskButton({ action, owner, repo, onDone }) {
+function TaskButton({ action, owner, repo, onTaskCreated }) {
   const [loading, setLoading] = useState(false)
   const [param, setParam] = useState(action.defaultParam || 10)
 
@@ -67,7 +74,7 @@ function TaskButton({ action, owner, repo, onDone }) {
       } else {
         message.success(`${action.label} 已完成`)
       }
-      if (onDone) onDone()
+      if (onTaskCreated) onTaskCreated()
     } catch (e) {
       message.error(`${action.label} 失败: ${e.message}`)
     }
@@ -93,7 +100,7 @@ function TaskButton({ action, owner, repo, onDone }) {
               value={param}
               onChange={v => setParam(v || 10)}
               style={{ width: 70 }}
-              addonAfter={action.paramName === 'max_count' ? '条' : '条'}
+              addonAfter="条"
             />
           )}
           <Button
@@ -111,50 +118,52 @@ function TaskButton({ action, owner, repo, onDone }) {
   )
 }
 
-function ProjectDetail({ project, onBack, onRefresh }) {
+function ProjectDetail({ owner, repo, onBack }) {
+  const [project, setProject] = useState(null)
   const [recentTasks, setRecentTasks] = useState([])
+  const [loadingProject, setLoadingProject] = useState(true)
   const timerRef = useRef(null)
 
-  const fetchRecentTasks = async () => {
+  const refreshAll = useCallback(async () => {
     try {
-      const res = await api.getTaskList({ limit: 10 })
-      const all = res.data.tasks || []
-      const related = all.filter(t => {
-        const d = t.description || ''
-        return d.includes(project.owner) && d.includes(project.repo)
+      const [overviewRes, tasksRes] = await Promise.all([
+        api.getProjectsOverview(),
+        api.getTaskList({ limit: 50 }),
+      ])
+      const projects = overviewRes.data.projects || []
+      const current = projects.find(p => p.owner === owner && p.repo === repo)
+      if (current) setProject(current)
+
+      const allTasks = tasksRes.data.tasks || []
+      const related = allTasks.filter(t => {
+        const d = (t.description || '') + ' ' + (t.task_type || '')
+        return d.includes(owner) && d.includes(repo)
       })
       setRecentTasks(related)
     } catch {}
-  }
+    setLoadingProject(false)
+  }, [owner, repo])
 
   useEffect(() => {
-    fetchRecentTasks()
-    timerRef.current = setInterval(fetchRecentTasks, 3000)
+    refreshAll()
+    timerRef.current = setInterval(refreshAll, 3000)
     return () => clearInterval(timerRef.current)
-  }, [project.owner, project.repo])
+  }, [refreshAll])
 
-  const handleDone = () => {
-    onRefresh()
-    fetchRecentTasks()
-  }
+  if (loadingProject && !project) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
-  const STATUS_MAP = {
-    pending: { color: 'default', text: '等待中' },
-    running: { color: 'processing', text: '运行中' },
-    completed: { color: 'success', text: '完成' },
-    failed: { color: 'error', text: '失败' },
-  }
+  const runningCount = recentTasks.filter(t => t.status === 'running').length
 
   return (
     <div>
       <Space style={{ marginBottom: 20 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={onBack}>返回列表</Button>
         <h2 style={{ margin: 0 }}>
-          <a href={`https://github.com/${project.owner}/${project.repo}`} target="_blank" rel="noopener noreferrer">
-            {project.owner}/{project.repo}
+          <a href={`https://github.com/${owner}/${repo}`} target="_blank" rel="noopener noreferrer">
+            {owner}/{repo}
           </a>
         </h2>
-        {project.last_updated && (
+        {project?.last_updated && (
           <span style={{ color: '#999', fontSize: 12 }}>最后更新: {project.last_updated.substring(0, 16).replace('T', ' ')}</span>
         )}
       </Space>
@@ -162,7 +171,7 @@ function ProjectDetail({ project, onBack, onRefresh }) {
       <Row gutter={[12, 12]} style={{ marginBottom: 24 }}>
         {METRICS.map(m => (
           <Col key={m.key} span={3} style={{ minWidth: 100 }}>
-            <MetricCard label={m.label} count={project[m.key]} color={m.color} />
+            <MetricCard label={m.label} count={project?.[m.key] || 0} color={m.color} />
           </Col>
         ))}
       </Row>
@@ -171,7 +180,7 @@ function ProjectDetail({ project, onBack, onRefresh }) {
         <Col xs={24} lg={14}>
           <Card title={<span><ThunderboltOutlined style={{ marginRight: 8 }} />数据获取操作</span>} size="small">
             {TASK_ACTIONS.map(action => (
-              <TaskButton key={action.key} action={action} owner={project.owner} repo={project.repo} onDone={handleDone} />
+              <TaskButton key={action.key} action={action} owner={owner} repo={repo} onTaskCreated={refreshAll} />
             ))}
           </Card>
         </Col>
@@ -179,7 +188,7 @@ function ProjectDetail({ project, onBack, onRefresh }) {
           <Card
             title={
               <span>
-                <Badge count={recentTasks.filter(t => t.status === 'running').length} offset={[8, 0]}>
+                <Badge count={runningCount} offset={[8, 0]}>
                   <span>最近任务</span>
                 </Badge>
                 <span style={{ color: '#999', fontSize: 12, marginLeft: 12 }}>每 3s 刷新</span>
@@ -234,29 +243,24 @@ export default function ProjectsOverview() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [search, setSearch] = useState('')
-  const [selectedProject, setSelectedProject] = useState(null)
+  const [selected, setSelected] = useState(null)
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const res = await api.getProjectsOverview()
-      const projects = res.data.projects || []
-      setData(projects)
-      if (selectedProject) {
-        const updated = projects.find(p => p.owner === selectedProject.owner && p.repo === selectedProject.repo)
-        if (updated) setSelectedProject(updated)
-      }
+      setData(res.data.projects || [])
     } catch (e) {
       setError(e.message)
     }
     setLoading(false)
-  }
+  }, [])
 
-  useEffect(() => { fetchData() }, [])
+  useEffect(() => { fetchData() }, [fetchData])
 
-  if (selectedProject) {
-    return <ProjectDetail project={selectedProject} onBack={() => setSelectedProject(null)} onRefresh={fetchData} />
+  if (selected) {
+    return <ProjectDetail owner={selected.owner} repo={selected.repo} onBack={() => setSelected(null)} />
   }
 
   const filtered = search
@@ -301,7 +305,7 @@ export default function ProjectsOverview() {
       title: '操作', key: 'action', width: 80, fixed: 'right',
       render: (_, r) => (
         <Button size="small" type="primary" icon={<ThunderboltOutlined />}
-          onClick={() => setSelectedProject(r)}>
+          onClick={() => setSelected(r)}>
           管理
         </Button>
       ),
