@@ -4,13 +4,13 @@ import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined,
 import * as api from '../api'
 
 const METRICS = [
-  { key: 'pr_count', label: 'PR', color: '#1890ff' },
-  { key: 'comments_count', label: '评论', color: '#faad14' },
-  { key: 'issues_count', label: 'Issues', color: '#eb2f96' },
-  { key: 'timeline_count', label: 'Timeline', color: '#722ed1' },
-  { key: 'details_count', label: 'PR 详情', color: '#52c41a' },
-  { key: 'reviews_count', label: 'Reviews', color: '#13c2c2' },
-  { key: 'commits_count', label: 'Commits', color: '#fa541c' },
+  { key: 'pr_count', label: 'PR', color: '#1890ff', githubKey: 'github_pr_total' },
+  { key: 'comments_count', label: '评论', color: '#faad14', githubKey: 'github_pr_comments_total' },
+  { key: 'issues_count', label: 'Issues', color: '#eb2f96', githubKey: 'github_pure_issues_total' },
+  { key: 'timeline_count', label: 'Timeline', color: '#722ed1', githubKey: null },
+  { key: 'details_count', label: 'PR 详情', color: '#52c41a', githubKey: 'github_pr_total' },
+  { key: 'reviews_count', label: 'Reviews', color: '#13c2c2', githubKey: 'github_pr_total' },
+  { key: 'commits_count', label: 'Commits', color: '#fa541c', githubKey: 'github_pr_total' },
 ]
 
 const TASK_ACTIONS = [
@@ -45,11 +45,37 @@ function Completeness({ project }) {
   )
 }
 
-function MetricCard({ label, count, color }) {
+function MetricProgress({ label, fetched, total, color }) {
+  const pct = total > 0 ? Math.min(Math.round((fetched / total) * 100), 100) : 0
+  const hasTotal = total !== null && total !== undefined
+  let status = 'exception'
+  if (pct >= 100) status = 'success'
+  else if (pct >= 70) status = 'normal'
+  else if (pct > 0) status = 'active'
+
   return (
-    <Card size="small" style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 24, fontWeight: 600, color }}>{count ? count.toLocaleString() : 0}</div>
-      <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>{label}</div>
+    <Card size="small">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 500 }}>{label}</span>
+        <span style={{ fontSize: 12, color: '#999' }}>
+          {fetched.toLocaleString()}{hasTotal ? ` / ${total.toLocaleString()}` : ''}
+        </span>
+      </div>
+      {hasTotal ? (
+        <Tooltip title={`已获取 ${fetched.toLocaleString()} / GitHub 总计 ${total.toLocaleString()}`}>
+          <Progress
+            percent={pct}
+            size="small"
+            status={status}
+            strokeColor={color}
+            format={() => `${pct}%`}
+          />
+        </Tooltip>
+      ) : (
+        <div style={{ fontSize: 20, fontWeight: 600, color, textAlign: 'center', padding: '4px 0' }}>
+          {fetched.toLocaleString()}
+        </div>
+      )}
     </Card>
   )
 }
@@ -120,6 +146,7 @@ function TaskButton({ action, owner, repo, onTaskCreated }) {
 
 function ProjectDetail({ owner, repo, onBack }) {
   const [project, setProject] = useState(null)
+  const [githubStats, setGithubStats] = useState(null)
   const [recentTasks, setRecentTasks] = useState([])
   const [loadingProject, setLoadingProject] = useState(true)
   const timerRef = useRef(null)
@@ -144,15 +171,34 @@ function ProjectDetail({ owner, repo, onBack }) {
     setLoadingProject(false)
   }, [owner, repo])
 
+  const fetchGithubStats = useCallback(async () => {
+    try {
+      const res = await api.getRepoStats(owner, repo)
+      setGithubStats(res.data.stats || null)
+    } catch {}
+  }, [owner, repo])
+
   useEffect(() => {
     refreshAll()
+    fetchGithubStats()
     timerRef.current = setInterval(refreshAll, 3000)
     return () => clearInterval(timerRef.current)
-  }, [refreshAll])
+  }, [refreshAll, fetchGithubStats])
 
   if (loadingProject && !project) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
   const runningCount = recentTasks.filter(t => t.status === 'running').length
+
+  const overallPct = (() => {
+    if (!githubStats) return null
+    const comparisons = [
+      { fetched: project?.pr_count || 0, total: githubStats.github_pr_total },
+      { fetched: project?.comments_count || 0, total: githubStats.github_pr_comments_total },
+      { fetched: project?.issues_count || 0, total: githubStats.github_pure_issues_total },
+    ].filter(c => c.total !== null && c.total !== undefined && c.total > 0)
+    if (comparisons.length === 0) return null
+    return Math.round(comparisons.reduce((s, c) => s + Math.min(c.fetched / c.total, 1), 0) / comparisons.length * 100)
+  })()
 
   return (
     <div>
@@ -168,10 +214,41 @@ function ProjectDetail({ owner, repo, onBack }) {
         )}
       </Space>
 
+      {githubStats && !githubStats.error && (
+        <Row gutter={[16, 12]} style={{ marginBottom: 16 }}>
+          <Col span={6}>
+            <Card size="small">
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>整体完成度</div>
+                {overallPct !== null ? (
+                  <Progress type="circle" percent={overallPct} size={64} strokeColor={overallPct >= 80 ? '#52c41a' : overallPct >= 50 ? '#1890ff' : '#faad14'} />
+                ) : (
+                  <span style={{ color: '#999' }}>--</span>
+                )}
+              </div>
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small"><Statistic title="Stars" value={githubStats.stargazers_count || 0} valueStyle={{ color: '#faad14', fontSize: 20 }} /></Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small"><Statistic title="Forks" value={githubStats.forks_count || 0} valueStyle={{ color: '#1890ff', fontSize: 20 }} /></Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small"><Statistic title="Open Issues" value={githubStats.open_issues_count || 0} valueStyle={{ color: '#eb2f96', fontSize: 20 }} /></Card>
+          </Col>
+        </Row>
+      )}
+
       <Row gutter={[12, 12]} style={{ marginBottom: 24 }}>
         {METRICS.map(m => (
-          <Col key={m.key} span={3} style={{ minWidth: 100 }}>
-            <MetricCard label={m.label} count={project?.[m.key] || 0} color={m.color} />
+          <Col key={m.key} span={3} style={{ minWidth: 130 }}>
+            <MetricProgress
+              label={m.label}
+              fetched={project?.[m.key] || 0}
+              total={githubStats?.[m.githubKey]}
+              color={m.color}
+            />
           </Col>
         ))}
       </Row>

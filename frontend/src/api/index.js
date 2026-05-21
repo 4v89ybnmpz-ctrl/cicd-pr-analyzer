@@ -9,6 +9,8 @@ export const getDatabaseStats = () => api.get('/database/stats')
 
 export const getProjectsOverview = () => api.get('/database/projects/overview')
 
+export const getRepoStats = (owner, repo) => api.get(`/github/repos/${owner}/${repo}/stats`)
+
 export const getPrList = (params) => api.get('/database/prs', { params })
 
 export const getPrData = (owner, repo) => api.get(`/database/prs/${owner}/${repo}`)
