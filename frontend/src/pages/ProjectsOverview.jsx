@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge, Popconfirm, Descriptions } from 'antd'
-import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined } from '@ant-design/icons'
+import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge, Modal, Popconfirm, Descriptions } from 'antd'
+import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined, PlusOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 const METRICS = [
@@ -412,6 +412,9 @@ export default function ProjectsOverview() {
   const [error, setError] = useState(null)
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(null)
+  const [addModalOpen, setAddModalOpen] = useState(false)
+  const [addOwner, setAddOwner] = useState('')
+  const [addRepo, setAddRepo] = useState('')
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -510,6 +513,7 @@ export default function ProjectsOverview() {
           allowClear
         />
         <Button icon={<ReloadOutlined />} onClick={fetchData} loading={loading}>刷新</Button>
+        <Button type="dashed" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>添加项目</Button>
         <span style={{ color: '#999', fontSize: 12 }}>
           {filtered.length === data.length ? `共 ${data.length} 个项目` : `筛选: ${filtered.length} / ${data.length}`}
         </span>
@@ -523,6 +527,52 @@ export default function ProjectsOverview() {
         scroll={{ x: 1100 }}
         size="middle"
       />
+
+      <Modal
+        title="添加项目"
+        open={addModalOpen}
+        onCancel={() => { setAddModalOpen(false); setAddOwner(''); setAddRepo('') }}
+        onOk={() => {
+          const o = addOwner.trim()
+          const r = addRepo.trim()
+          if (!o || !r) { message.warning('请输入 owner 和 repo'); return }
+          const exists = data.find(p => p.owner === o && p.repo === r)
+          if (exists) { message.info('项目已在列表中'); setSelected(exists); setAddModalOpen(false); return }
+          setSelected({ owner: o, repo: r, pr_count: 0, comments_count: 0, issues_count: 0, timeline_count: 0, details_count: 0, reviews_count: 0, commits_count: 0 })
+          setAddModalOpen(false)
+          setAddOwner('')
+          setAddRepo('')
+          message.success(`已添加 ${o}/${r}，请前往管理页获取数据`)
+        }}
+        okText="添加并进入管理"
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <div>
+              <div style={{ marginBottom: 4, fontWeight: 500 }}>GitHub 仓库地址</div>
+              <Space>
+                <Input placeholder="Owner (如 octocat)" value={addOwner} onChange={e => setAddOwner(e.target.value)} style={{ width: 200 }}
+                  onKeyDown={e => {
+                    if (e.key === '/' && addOwner) { e.preventDefault(); document.getElementById('add-repo-input')?.focus() }
+                  }}
+                />
+                <span style={{ fontSize: 18, color: '#999' }}>/</span>
+                <Input id="add-repo-input" placeholder="Repo (如 Hello-World)" value={addRepo} onChange={e => setAddRepo(e.target.value)} style={{ width: 250 }} />
+              </Space>
+            </div>
+            {addOwner && addRepo && (
+              <div style={{ padding: '8px 12px', background: '#f6f8fa', borderRadius: 6, fontSize: 13 }}>
+                <a href={`https://github.com/${addOwner}/${addRepo}`} target="_blank" rel="noopener noreferrer">
+                  https://github.com/{addOwner}/{addRepo}
+                </a>
+              </div>
+            )}
+            <div style={{ color: '#999', fontSize: 12 }}>
+              添加后进入项目管理页，可手动触发 PR / Issues / 评论 / Git Log 等数据获取
+            </div>
+          </Space>
+        </div>
+      </Modal>
     </div>
   )
 }
