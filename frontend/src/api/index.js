@@ -11,6 +11,18 @@ export const getProjectsOverview = () => api.get('/database/projects/overview')
 
 export const getRepoStats = (owner, repo) => api.get(`/github/repos/${owner}/${repo}/stats`)
 
+export const getGitRepoStatus = (owner, repo) => api.get(`/git/repos/${owner}/${repo}/status`)
+
+export const getGitLogSummary = (owner, repo) => api.get(`/git/repos/${owner}/${repo}/log/summary`)
+
+export const getGitLogCommits = (owner, repo, params) => api.get(`/git/repos/${owner}/${repo}/log/commits`, { params })
+
+export const asyncGitClone = (owner, repo) => api.post(`/git/tasks/clone/${owner}/${repo}`)
+
+export const asyncGitExtract = (owner, repo, maxCount) => api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params: { max_count: maxCount } })
+
+export const deleteGitRepo = (owner, repo) => api.delete(`/git/repos/${owner}/${repo}`)
+
 export const getPrList = (params) => api.get('/database/prs', { params })
 
 export const getPrData = (owner, repo) => api.get(`/database/prs/${owner}/${repo}`)

@@ -61,6 +61,7 @@ secrets/
 
 # Data
 backend/data/
+data/
 
 # Scripts 目录（与 backend 同级）
 scripts/

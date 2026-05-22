@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge } from 'antd'
-import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined } from '@ant-design/icons'
+import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge, Popconfirm, Descriptions } from 'antd'
+import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 const METRICS = [
@@ -22,6 +22,8 @@ const TASK_ACTIONS = [
   { key: 'update_prs', label: '增量更新 PR', desc: '对比 updated_at 增量更新已有 PR', apiFn: 'updatePrs', icon: '🔄' },
   { key: 'update_issues', label: '增量更新 Issues', desc: '对比 updated_at 增量更新已有 Issues', apiFn: 'updateIssues', icon: '🔄' },
   { key: 'update_comments', label: '增量更新评论', desc: '对比 updated_at 增量更新已有评论', apiFn: 'updateComments', icon: '🔄' },
+  { key: 'git_clone', label: '克隆仓库', desc: 'bare clone 仓库到本地（已克隆则跳过）', apiFn: 'asyncGitClone', icon: '📂' },
+  { key: 'git_extract', label: '提取 Git Log', desc: '自动克隆 + 提取全部 commit 历史 + 变更文件详情', apiFn: 'asyncGitExtract', icon: '📝' },
 ]
 
 const STATUS_MAP = {
@@ -151,6 +153,11 @@ function ProjectDetail({ owner, repo, onBack }) {
   const [loadingProject, setLoadingProject] = useState(true)
   const timerRef = useRef(null)
 
+  const [gitSummary, setGitSummary] = useState(null)
+  const [gitCommits, setGitCommits] = useState([])
+  const [gitCommitTotal, setGitCommitTotal] = useState(0)
+  const [gitCommitPage, setGitCommitPage] = useState(1)
+
   const refreshAll = useCallback(async () => {
     try {
       const [overviewRes, tasksRes] = await Promise.all([
@@ -178,12 +185,26 @@ function ProjectDetail({ owner, repo, onBack }) {
     } catch {}
   }, [owner, repo])
 
+  const fetchGitLog = useCallback(async (page = 1) => {
+    try {
+      const [sumRes, comRes] = await Promise.all([
+        api.getGitLogSummary(owner, repo).catch(() => ({ data: { summary: null } })),
+        api.getGitLogCommits(owner, repo, { page, size: 20, sort_by: 'author_date', sort_order: 'desc' }).catch(() => ({ data: { data: [], total: 0 } })),
+      ])
+      setGitSummary(sumRes.data.summary || null)
+      setGitCommits(comRes.data.data || [])
+      setGitCommitTotal(comRes.data.total || 0)
+      setGitCommitPage(page)
+    } catch {}
+  }, [owner, repo])
+
   useEffect(() => {
     refreshAll()
     fetchGithubStats()
+    fetchGitLog(1)
     timerRef.current = setInterval(refreshAll, 3000)
     return () => clearInterval(timerRef.current)
-  }, [refreshAll, fetchGithubStats])
+  }, [refreshAll, fetchGithubStats, fetchGitLog])
 
   if (loadingProject && !project) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
@@ -311,6 +332,74 @@ function ProjectDetail({ owner, repo, onBack }) {
           </Card>
         </Col>
       </Row>
+
+      {gitSummary && (
+        <Card
+          title={<span><BranchesOutlined style={{ marginRight: 8 }} />Git Log 数据</span>}
+          size="small"
+          style={{ marginTop: 16 }}
+          extra={
+            <Space size="small">
+              <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchGitLog(gitCommitPage)}>刷新</Button>
+              <Popconfirm title="删除本地克隆的仓库？" onConfirm={async () => { try { await api.deleteGitRepo(owner, repo); message.success('已删除'); fetchGitLog(1) } catch { message.error('删除失败') } }}>
+                <Button size="small" danger icon={<DeleteOutlined />}>删除仓库</Button>
+              </Popconfirm>
+            </Space>
+          }
+        >
+          <Descriptions size="small" bordered column={4} style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="总提交数">{gitSummary.commit_count?.toLocaleString()}</Descriptions.Item>
+            <Descriptions.Item label="分支数">{gitSummary.branches?.length}</Descriptions.Item>
+            <Descriptions.Item label="标签数">{gitSummary.tags?.length}</Descriptions.Item>
+            <Descriptions.Item label="贡献者">{gitSummary.contributors?.length}</Descriptions.Item>
+            <Descriptions.Item label="提取时间" span={4}>{gitSummary.extracted_at?.substring(0, 19).replace('T', ' ')}</Descriptions.Item>
+          </Descriptions>
+          {gitSummary.contributors?.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 500, marginBottom: 8 }}>Top 贡献者</div>
+              <Space wrap>
+                {gitSummary.contributors.slice(0, 10).map((c, i) => (
+                  <Tag key={i} color={i < 3 ? 'blue' : 'default'}>{c.name}: {c.commits} commits, +{c.additions?.toLocaleString()} / -{c.deletions?.toLocaleString()}</Tag>
+                ))}
+              </Space>
+            </div>
+          )}
+          {gitCommits.length > 0 && (
+            <Table
+              size="small"
+              dataSource={gitCommits.map((c, i) => ({ key: c.hash || i, ...c }))}
+              pagination={{
+                current: gitCommitPage, total: gitCommitTotal, pageSize: 20,
+                onChange: (p) => fetchGitLog(p), showTotal: (t) => `共 ${t} 条`,
+              }}
+              scroll={{ x: 900 }}
+              expandable={{
+                expandedRowRender: (r) => (
+                  <div style={{ margin: 0 }}>
+                    {r.files?.length > 0 ? (
+                      <Table size="small" dataSource={r.files.map((f, i) => ({ key: i, ...f }))} pagination={false}
+                        columns={[
+                          { title: '文件', dataIndex: 'file', key: 'file', ellipsis: true },
+                          { title: '增加', dataIndex: 'additions', width: 80, render: v => <Tag color="green">+{v}</Tag> },
+                          { title: '删除', dataIndex: 'deletions', width: 80, render: v => <Tag color="red">-{v}</Tag> },
+                        ]}
+                      />
+                    ) : <span style={{ color: '#999' }}>无文件变更（merge commit）</span>}
+                  </div>
+                ),
+              }}
+              columns={[
+                { title: 'Hash', dataIndex: 'abbrev_hash', width: 80, render: v => <code>{v}</code> },
+                { title: '提交信息', dataIndex: 'subject', ellipsis: true },
+                { title: '作者', dataIndex: 'author_name', width: 120 },
+                { title: '日期', dataIndex: 'author_date', width: 110, render: v => v?.substring(0, 10) },
+                { title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center' },
+                { title: '+/-', width: 100, render: (_, r) => <span><span style={{ color: '#52c41a' }}>+{r.total_additions}</span> / <span style={{ color: '#ff4d4f' }}>-{r.total_deletions}</span></span> },
+              ]}
+            />
+          )}
+        </Card>
+      )}
     </div>
   )
 }
