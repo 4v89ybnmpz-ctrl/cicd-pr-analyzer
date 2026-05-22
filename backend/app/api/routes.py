@@ -18,6 +18,7 @@ from app.api.routers import (
     register_analysis_routes,
 )
 from app.api.routers.async_tasks import register_async_task_routes
+from app.api.routers.git import register_git_routes
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
     register_analysis_routes(router, db, cache)
 
     register_async_task_routes(router, github_service, db)
+
+    register_git_routes(router, db, github_service)
 
     if gitcode_service:
         register_gitcode_routes(router, gitcode_service, db)

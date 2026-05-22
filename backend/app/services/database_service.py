@@ -1311,6 +1311,67 @@ class DatabaseService:
             logger.error(f"获取项目总览失败: {e}")
             return []
 
+    async def save_git_log_summary(self, owner: str, repo: str, data: Dict[str, Any]) -> bool:
+        """保存 git log 提取摘要（不含完整 commits）"""
+        if self.db is None:
+            return False
+        try:
+            commits = data.pop("commits", [])
+            summary = {**data, "commit_count": len(commits), "saved_at": datetime.now().isoformat()}
+            await self.db['git_log_summaries'].update_one(
+                {"owner": owner, "repo": repo},
+                {"$set": summary},
+                upsert=True,
+            )
+            collection = self.db['git_log_commits']
+            operations = []
+            for c in commits:
+                doc = {"owner": owner, "repo": repo, **c}
+                operations.append(
+                    collection.update_one(
+                        {"owner": owner, "repo": repo, "hash": c["hash"]},
+                        {"$set": doc},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                await asyncio.gather(*operations)
+            logger.info(f"git log 已保存: {owner}/{repo}, {len(commits)} commits")
+            return True
+        except Exception as e:
+            logger.error(f"保存 git log 失败: {e}")
+            return False
+
+    async def get_git_log_summary(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+        if self.db is None:
+            return None
+        try:
+            return await self.db['git_log_summaries'].find_one(
+                {"owner": owner, "repo": repo}, {"_id": 0}
+            )
+        except Exception as e:
+            logger.error(f"获取 git log 摘要失败: {e}")
+            return None
+
+    async def list_git_log_commits(self, owner: str, repo: str,
+                                    author: str = None, page: int = 1, size: int = 20,
+                                    sort_by: str = "author_date", sort_order: int = -1) -> Dict[str, Any]:
+        if self.db is None:
+            return {"data": [], "total": 0, "page": page, "size": size}
+        try:
+            query = {"owner": owner, "repo": repo}
+            if author:
+                query["author_name"] = {"$regex": author, "$options": "i"}
+            total = await self.db['git_log_commits'].count_documents(query)
+            skip = (page - 1) * size
+            cursor = self.db['git_log_commits'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            data = await cursor.to_list(length=size)
+            return {"data": data, "total": total, "page": page, "size": size,
+                    "total_pages": (total + size - 1) // size if size > 0 else 0}
+        except Exception as e:
+            logger.error(f"查询 git log commits 失败: {e}")
+            return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
+
     async def get_aggregate_stats(self, owner: str = None, repo: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"error": "数据库未连接"}
