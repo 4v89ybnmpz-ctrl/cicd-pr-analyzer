@@ -14,6 +14,7 @@ export default function GitLog() {
   const [summary, setSummary] = useState(null)
   const [expandedKeys, setExpandedKeys] = useState([])
   const [projects, setProjects] = useState([])
+  const [searchText, setSearchText] = useState('')
 
   useEffect(() => {
     api.getGitProjects().then(res => {
@@ -22,10 +23,15 @@ export default function GitLog() {
   }, [])
 
   const projectOptions = useMemo(() => {
-    const input = `${queryOwner}/${queryRepo}`.toLowerCase()
+    const q = searchText.toLowerCase().trim()
     return projects
-      .filter(p => `${p.owner}/${p.repo}`.toLowerCase().includes(input))
-      .slice(0, 10)
+      .filter(p => {
+        if (!q) return true
+        return p.owner.toLowerCase().startsWith(q) ||
+               p.repo.toLowerCase().startsWith(q) ||
+               `${p.owner}/${p.repo}`.toLowerCase().includes(q)
+      })
+      .slice(0, 15)
       .map(p => ({
         value: `${p.owner}/${p.repo}`,
         label: (
@@ -35,7 +41,7 @@ export default function GitLog() {
           </div>
         ),
       }))
-  }, [projects, queryOwner, queryRepo])
+  }, [projects, searchText])
 
   const fetchCommits = useCallback(async (p = 1, owner = queryOwner, repo = queryRepo) => {
     if (!owner || !repo) return
@@ -69,6 +75,7 @@ export default function GitLog() {
     if (!o || !r) { message.warning('请输入 owner 和 repo'); return }
     setQueryOwner(o)
     setQueryRepo(r)
+    setSearchText(`${o}/${r}`)
     fetchCommits(1, o, r)
     fetchSummary(o, r)
   }
@@ -77,6 +84,7 @@ export default function GitLog() {
     const [o, r] = value.split('/')
     setQueryOwner(o)
     setQueryRepo(r)
+    setSearchText(value)
     fetchCommits(1, o, r)
     fetchSummary(o, r)
   }
@@ -90,21 +98,27 @@ export default function GitLog() {
     { title: '作者', dataIndex: 'author_name', width: 120, render: v => <Tag>{v}</Tag> },
     { title: '作者邮箱', dataIndex: 'author_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
-      title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120,
+      title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 140,
       sorter: (a, b) => (a.author_date_utc || '').localeCompare(b.author_date_utc || ''),
       render: (v, r) => (
-        <Tooltip title={`原始: ${r.author_date}  时区: ${r.author_tz}`}>
-          <span>{v}</span>
+        <Tooltip title={`原始: ${r.author_date}`}>
+          <div>
+            <div>{v || r.author_date?.substring(0, 16)}</div>
+            {r.author_tz && <div style={{ fontSize: 11, color: '#999' }}>tz: {r.author_tz}</div>}
+          </div>
         </Tooltip>
       ),
     },
     { title: '提交者', dataIndex: 'committer_name', width: 120, render: v => <Tag color="geekblue">{v}</Tag> },
     { title: '提交者邮箱', dataIndex: 'committer_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
-      title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 120,
+      title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 140,
       render: (v, r) => (
-        <Tooltip title={`原始: ${r.committer_date}  时区: ${r.committer_tz}`}>
-          <span>{v}</span>
+        <Tooltip title={`原始: ${r.committer_date}`}>
+          <div>
+            <div>{v || r.committer_date?.substring(0, 16)}</div>
+            {r.committer_tz && <div style={{ fontSize: 11, color: '#999' }}>tz: {r.committer_tz}</div>}
+          </div>
         </Tooltip>
       ),
     },
@@ -133,16 +147,18 @@ export default function GitLog() {
         <AutoComplete
           options={projectOptions}
           onSelect={handleSelect}
-          value={queryOwner && queryRepo ? `${queryOwner}/${queryRepo}` : undefined}
+          value={searchText}
           onChange={(v) => {
+            setSearchText(v || '')
             if (!v) { setQueryOwner(''); setQueryRepo(''); return }
             const idx = v.indexOf('/')
             if (idx >= 0) { setQueryOwner(v.substring(0, idx)); setQueryRepo(v.substring(idx + 1)) }
             else { setQueryOwner(v); setQueryRepo('') }
           }}
           style={{ width: 300 }}
-          placeholder="输入项目名称 (owner/repo)"
+          placeholder="输入项目名称 (owner/repo)，如 oc→octocat"
           filterOption={false}
+          allowClear
         />
         <Button type="primary" icon={<SearchOutlined />} onClick={() => handleQuery()} loading={loading}>查询</Button>
         <Input placeholder="按作者筛选" prefix={<SearchOutlined />} value={authorFilter}
