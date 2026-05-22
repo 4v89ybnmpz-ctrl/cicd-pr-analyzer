@@ -98,30 +98,18 @@ export default function GitLog() {
     { title: '作者', dataIndex: 'author_name', width: 120, render: v => <Tag>{v}</Tag> },
     { title: '作者邮箱', dataIndex: 'author_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
-      title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 140,
+      title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120,
       sorter: (a, b) => (a.author_date_utc || '').localeCompare(b.author_date_utc || ''),
-      render: (v, r) => (
-        <Tooltip title={`原始: ${r.author_date}`}>
-          <div>
-            <div>{v || r.author_date?.substring(0, 16)}</div>
-            {r.author_tz && <div style={{ fontSize: 11, color: '#999' }}>tz: {r.author_tz}</div>}
-          </div>
-        </Tooltip>
-      ),
+      render: (v, r) => v || r.author_date?.substring(0, 16),
     },
+    { title: '作者时区', dataIndex: 'author_tz', width: 80, render: v => v ? <Tag color="orange">{v}</Tag> : <span style={{ color: '#d9d9d9' }}>-</span> },
     { title: '提交者', dataIndex: 'committer_name', width: 120, render: v => <Tag color="geekblue">{v}</Tag> },
     { title: '提交者邮箱', dataIndex: 'committer_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
-      title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 140,
-      render: (v, r) => (
-        <Tooltip title={`原始: ${r.committer_date}`}>
-          <div>
-            <div>{v || r.committer_date?.substring(0, 16)}</div>
-            {r.committer_tz && <div style={{ fontSize: 11, color: '#999' }}>tz: {r.committer_tz}</div>}
-          </div>
-        </Tooltip>
-      ),
+      title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 120,
+      render: (v, r) => v || r.committer_date?.substring(0, 16),
     },
+    { title: '提交者时区', dataIndex: 'committer_tz', width: 80, render: v => v ? <Tag color="purple">{v}</Tag> : <span style={{ color: '#d9d9d9' }}>-</span> },
     {
       title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center',
       sorter: (a, b) => (a.files_changed || 0) - (b.files_changed || 0),

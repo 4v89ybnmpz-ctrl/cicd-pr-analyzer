@@ -392,14 +392,8 @@ function ProjectDetail({ owner, repo, onBack }) {
                 { title: 'Hash', dataIndex: 'abbrev_hash', width: 80, render: v => <code>{v}</code> },
                 { title: '提交信息', dataIndex: 'subject', ellipsis: true },
                 { title: '作者', dataIndex: 'author_name', width: 110 },
-                { title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 130,
-                  render: (v, r) => (
-                    <div>
-                      <div>{v || r.author_date?.substring(0, 16)}</div>
-                      {r.author_tz && <div style={{ fontSize: 11, color: '#999' }}>tz: {r.author_tz}</div>}
-                    </div>
-                  )
-                },
+                { title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120, render: (v, r) => v || r.author_date?.substring(0, 16) },
+                { title: '作者时区', dataIndex: 'author_tz', width: 80, render: v => v ? <Tag color="orange">{v}</Tag> : '-' },
                 { title: '提交者', dataIndex: 'committer_name', width: 110 },
                 { title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center' },
                 { title: '+/-', width: 100, render: (_, r) => <span><span style={{ color: '#52c41a' }}>+{r.total_additions}</span> / <span style={{ color: '#ff4d4f' }}>-{r.total_deletions}</span></span> },
