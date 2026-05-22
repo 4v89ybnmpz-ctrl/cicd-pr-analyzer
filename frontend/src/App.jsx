@@ -11,6 +11,7 @@ import {
   ClockCircleOutlined,
   ThunderboltOutlined,
   AppstoreOutlined,
+  BranchesOutlined,
 } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import PrList from './pages/PrList'
@@ -24,6 +25,7 @@ import IssueTimelines from './pages/IssueTimelines'
 import Tasks from './pages/Tasks'
 import UserRepos from './pages/UserRepos'
 import ProjectsOverview from './pages/ProjectsOverview'
+import GitLog from './pages/GitLog'
 
 const { Header, Sider, Content } = Layout
 
@@ -36,6 +38,7 @@ const menuItems = [
   { key: 'profiles', icon: <UserOutlined />, label: '评论者 Profile' },
   { key: 'issues', icon: <AlertOutlined />, label: 'Issues' },
   { key: 'issue-timelines', icon: <ClockCircleOutlined />, label: 'Issue Timelines' },
+  { key: 'git-log', icon: <BranchesOutlined />, label: 'Git Log' },
   { key: 'aggregate', icon: <BarChartOutlined />, label: '聚合统计' },
   { key: 'tasks', icon: <ThunderboltOutlined />, label: '任务监控' },
 ]
@@ -62,6 +65,7 @@ function App() {
       case 'profiles': return <Profiles onNavigate={navigate} />
       case 'issues': return <Issues onNavigate={navigate} />
       case 'issue-timelines': return <IssueTimelines onNavigate={navigate} />
+      case 'git-log': return <GitLog />
       case 'tasks': return <Tasks />
       case 'user-repos': return <UserRepos username={userReposUsername} onBack={() => setPage('profiles')} />
       case 'aggregate': return <Aggregate />
