@@ -14,6 +14,26 @@ logger = logging.getLogger(__name__)
 def register_git_routes(router, db, github_service=None):
     """注册 Git 仓库相关路由"""
 
+    @router.get("/git/projects")
+    async def list_git_projects():
+        """获取已有 git log 数据的项目列表（用于自动补全）"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        try:
+            pipeline = [
+                {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "commit_count": {"$sum": 1}}},
+                {"$project": {"_id": 0, "owner": "$_id.owner", "repo": "$_id.repo", "commit_count": 1}},
+                {"$sort": {"commit_count": -1}},
+            ]
+            cursor = db.db['git_log_commits'].aggregate(pipeline)
+            projects = []
+            async for doc in cursor:
+                projects.append(doc)
+            return {"projects": projects}
+        except Exception as e:
+            logger.error(f"获取 git 项目列表失败: {e}")
+            return {"projects": []}
+
     @router.get("/git/repos/{owner}/{repo}/status")
     async def get_repo_status(owner: str, repo: str):
         """获取仓库克隆状态"""

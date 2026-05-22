@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, Descriptions } from 'antd'
-import { ReloadOutlined, SearchOutlined, BranchesOutlined, DeleteOutlined } from '@ant-design/icons'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, AutoComplete } from 'antd'
+import { ReloadOutlined, SearchOutlined, BranchesOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 export default function GitLog() {
@@ -13,6 +13,29 @@ export default function GitLog() {
   const [queryRepo, setQueryRepo] = useState('')
   const [summary, setSummary] = useState(null)
   const [expandedKeys, setExpandedKeys] = useState([])
+  const [projects, setProjects] = useState([])
+
+  useEffect(() => {
+    api.getGitProjects().then(res => {
+      setProjects(res.data.projects || [])
+    }).catch(() => {})
+  }, [])
+
+  const projectOptions = useMemo(() => {
+    const input = `${queryOwner}/${queryRepo}`.toLowerCase()
+    return projects
+      .filter(p => `${p.owner}/${p.repo}`.toLowerCase().includes(input))
+      .slice(0, 10)
+      .map(p => ({
+        value: `${p.owner}/${p.repo}`,
+        label: (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span><b>{p.owner}</b>/{p.repo}</span>
+            <Tag>{p.commit_count} commits</Tag>
+          </div>
+        ),
+      }))
+  }, [projects, queryOwner, queryRepo])
 
   const fetchCommits = useCallback(async (p = 1, owner = queryOwner, repo = queryRepo) => {
     if (!owner || !repo) return
@@ -40,10 +63,20 @@ export default function GitLog() {
 
   useEffect(() => { fetchCommits(1); fetchSummary() }, [fetchCommits, fetchSummary])
 
-  const handleQuery = () => {
-    const o = queryOwner.trim()
-    const r = queryRepo.trim()
+  const handleQuery = (owner, repo) => {
+    const o = (owner || queryOwner).trim()
+    const r = (repo || queryRepo).trim()
     if (!o || !r) { message.warning('请输入 owner 和 repo'); return }
+    setQueryOwner(o)
+    setQueryRepo(r)
+    fetchCommits(1, o, r)
+    fetchSummary(o, r)
+  }
+
+  const handleSelect = (value) => {
+    const [o, r] = value.split('/')
+    setQueryOwner(o)
+    setQueryRepo(r)
     fetchCommits(1, o, r)
     fetchSummary(o, r)
   }
@@ -79,9 +112,21 @@ export default function GitLog() {
       <h2 style={{ marginBottom: 24 }}><BranchesOutlined style={{ marginRight: 8 }} />Git Log 数据</h2>
 
       <Space style={{ marginBottom: 16 }} wrap>
-        <Input placeholder="Owner" value={queryOwner} onChange={e => setQueryOwner(e.target.value)} style={{ width: 150 }} />
-        <Input placeholder="Repo" value={queryRepo} onChange={e => setQueryRepo(e.target.value)} style={{ width: 200 }} />
-        <Button type="primary" icon={<SearchOutlined />} onClick={handleQuery} loading={loading}>查询</Button>
+        <AutoComplete
+          options={projectOptions}
+          onSelect={handleSelect}
+          value={queryOwner && queryRepo ? `${queryOwner}/${queryRepo}` : undefined}
+          onChange={(v) => {
+            if (!v) { setQueryOwner(''); setQueryRepo(''); return }
+            const idx = v.indexOf('/')
+            if (idx >= 0) { setQueryOwner(v.substring(0, idx)); setQueryRepo(v.substring(idx + 1)) }
+            else { setQueryOwner(v); setQueryRepo('') }
+          }}
+          style={{ width: 300 }}
+          placeholder="输入项目名称 (owner/repo)"
+          filterOption={false}
+        />
+        <Button type="primary" icon={<SearchOutlined />} onClick={() => handleQuery()} loading={loading}>查询</Button>
         <Input placeholder="按作者筛选" prefix={<SearchOutlined />} value={authorFilter}
           onChange={e => setAuthorFilter(e.target.value)}
           onPressEnter={() => fetchCommits(1)}

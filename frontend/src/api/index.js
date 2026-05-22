@@ -17,6 +17,8 @@ export const getGitLogSummary = (owner, repo) => api.get(`/git/repos/${owner}/${
 
 export const getGitLogCommits = (owner, repo, params) => api.get(`/git/repos/${owner}/${repo}/log/commits`, { params })
 
+export const getGitProjects = () => api.get('/git/projects')
+
 export const asyncGitClone = (owner, repo) => api.post(`/git/tasks/clone/${owner}/${repo}`)
 
 export const asyncGitExtract = (owner, repo, maxCount) => api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params: { max_count: maxCount } })
