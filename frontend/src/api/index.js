@@ -21,7 +21,10 @@ export const getGitProjects = () => api.get('/git/projects')
 
 export const asyncGitClone = (owner, repo) => api.post(`/git/tasks/clone/${owner}/${repo}`)
 
-export const asyncGitExtract = (owner, repo, maxCount) => api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params: { max_count: maxCount } })
+export const asyncGitExtract = (owner, repo, maxCount) => {
+  const mc = typeof maxCount === 'object' ? (maxCount.max_count || 0) : (maxCount || 0)
+  return api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params: { max_count: mc } })
+}
 
 export const deleteGitRepo = (owner, repo) => api.delete(`/git/repos/${owner}/${repo}`)
 
