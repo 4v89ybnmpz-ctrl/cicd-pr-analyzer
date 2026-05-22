@@ -88,8 +88,26 @@ export default function GitLog() {
     },
     { title: '提交信息', dataIndex: 'subject', ellipsis: true, render: v => <span style={{ fontWeight: 500 }}>{v}</span> },
     { title: '作者', dataIndex: 'author_name', width: 120, render: v => <Tag>{v}</Tag> },
-    { title: '邮箱', dataIndex: 'author_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
-    { title: '日期', dataIndex: 'author_date', width: 110, render: v => v?.substring(0, 10), sorter: (a, b) => (a.author_date || '').localeCompare(b.author_date || '') },
+    { title: '作者邮箱', dataIndex: 'author_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
+    {
+      title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120,
+      sorter: (a, b) => (a.author_date_utc || '').localeCompare(b.author_date_utc || ''),
+      render: (v, r) => (
+        <Tooltip title={`原始: ${r.author_date}  时区: ${r.author_tz}`}>
+          <span>{v}</span>
+        </Tooltip>
+      ),
+    },
+    { title: '提交者', dataIndex: 'committer_name', width: 120, render: v => <Tag color="geekblue">{v}</Tag> },
+    { title: '提交者邮箱', dataIndex: 'committer_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
+    {
+      title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 120,
+      render: (v, r) => (
+        <Tooltip title={`原始: ${r.committer_date}  时区: ${r.committer_tz}`}>
+          <span>{v}</span>
+        </Tooltip>
+      ),
+    },
     {
       title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center',
       sorter: (a, b) => (a.files_changed || 0) - (b.files_changed || 0),

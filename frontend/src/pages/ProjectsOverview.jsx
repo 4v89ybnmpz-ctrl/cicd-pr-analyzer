@@ -391,8 +391,9 @@ function ProjectDetail({ owner, repo, onBack }) {
               columns={[
                 { title: 'Hash', dataIndex: 'abbrev_hash', width: 80, render: v => <code>{v}</code> },
                 { title: '提交信息', dataIndex: 'subject', ellipsis: true },
-                { title: '作者', dataIndex: 'author_name', width: 120 },
-                { title: '日期', dataIndex: 'author_date', width: 110, render: v => v?.substring(0, 10) },
+                { title: '作者', dataIndex: 'author_name', width: 110 },
+                { title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120, render: (v, r) => <Tooltip title={`tz: ${r.author_tz}`}><span>{v}</span></Tooltip> },
+                { title: '提交者', dataIndex: 'committer_name', width: 110 },
                 { title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center' },
                 { title: '+/-', width: 100, render: (_, r) => <span><span style={{ color: '#52c41a' }}>+{r.total_additions}</span> / <span style={{ color: '#ff4d4f' }}>-{r.total_deletions}</span></span> },
               ]}

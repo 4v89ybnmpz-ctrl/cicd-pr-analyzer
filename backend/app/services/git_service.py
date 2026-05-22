@@ -173,6 +173,26 @@ class GitRepoService:
             "extracted_at": datetime.now().isoformat(),
         }
 
+    @staticmethod
+    def _extract_tz(iso_str: str) -> str:
+        if not iso_str:
+            return ""
+        import re
+        match = re.search(r'([+-]\d{2}:\d{2})$', iso_str)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _to_utc_minute(iso_str: str) -> str:
+        if not iso_str:
+            return ""
+        try:
+            from datetime import timezone
+            dt = datetime.fromisoformat(iso_str)
+            utc_dt = dt.astimezone(timezone.utc)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M")
+        except Exception:
+            return iso_str[:16] if len(iso_str) >= 16 else iso_str
+
     def _parse_git_log(self, raw: str) -> List[Dict[str, Any]]:
         sep = "---COMMIT_DELIMITER---"
         parts = raw.split(sep)
@@ -189,6 +209,11 @@ class GitRepoService:
                 commit = json.loads(lines[0])
             except (json.JSONDecodeError, IndexError):
                 continue
+
+            commit["author_date_utc"] = self._to_utc_minute(commit.get("author_date"))
+            commit["author_tz"] = self._extract_tz(commit.get("author_date"))
+            commit["committer_date_utc"] = self._to_utc_minute(commit.get("committer_date"))
+            commit["committer_tz"] = self._extract_tz(commit.get("committer_date"))
 
             files = []
             for line in lines[1:]:
