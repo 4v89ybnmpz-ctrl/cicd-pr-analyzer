@@ -471,3 +471,168 @@
 ### 27.7 测试用例
 - [ ] Response Model 序列化/反序列化测试
 - [ ] 字段缺失/类型错误的校验测试
+
+---
+
+## 28. 数据维度增强
+> 扩展 PR 数据的关联分析和深度挖掘能力，从单维数据获取升级为多维关联分析。
+
+### 28.1 PR 关联分析
+- [ ] PR 依赖关系提取 — 解析 PR body 中的 mentions、linked issues、related PR
+- [ ] 跨仓库 PR 关联 — 识别跨仓库引用（如 mono-repo 中子项目 PR 依赖）
+- [ ] 关联关系持久化 — pr_relations 集合，存储 PR 间的依赖/引用/阻塞关系
+- [ ] 关联关系查询 API — `GET /database/relations/{owner}/{repo}`
+
+### 28.2 代码变更深度分析
+- [ ] 逐文件 diff 解析 — 解析 PR 的 files changed，提取每个文件的增删行数、文件类型
+- [ ] 变更热点文件识别 — 统计高频变更文件/目录，识别项目热点模块
+- [ ] 代码复杂度趋势 — 基于变更规模（additions/deletions/changed_files）追踪复杂度变化
+- [ ] 变更分析 API — `GET /analysis/code-changes/{owner}/{repo}`
+
+### 28.3 贡献者画像
+- [ ] 贡献者活跃度统计 — PR 提交频率、review 参与频率、comment 频率
+- [ ] 贡献领域分析 — 按变更文件路径归类贡献者专注领域（前端/后端/CI/文档等）
+- [ ] Review 参与度统计 — review 数量、review 深度、review 响应时间
+- [ ] 协作网络图数据 — 基于同 PR 参与（author + reviewer + commenter）构建协作关系
+- [ ] 贡献者画像 API — `GET /analysis/contributors/{owner}/{repo}/profiles`
+
+### 28.4 Issue 与 PR 联动
+- [ ] Issue→PR 生命周期追踪 — 追踪 issue 从创建到关联 PR 合并的完整周期
+- [ ] Bug 修复周期统计 — 从 bug issue 创建到修复 PR 合并的平均时间
+- [ ] Issue 响应 SLA — 首次响应时间、关闭时间分布统计
+- [ ] 联动分析 API — `GET /analysis/issue-pr-lifecycle/{owner}/{repo}`
+
+---
+
+## 29. 分析能力拓展
+> 在现有 CI/CD 分析基础上，增加代码质量、Review 质量、项目健康度等分析维度。
+
+### 29.1 代码质量指标
+- [ ] 代码 churn 分析 — 基于 git log 计算文件级代码增删频率，识别高 churn 文件
+- [ ] 技术债评估 — 基于 PR 存活时间、reopen 率、大 PR 比例等指标评估技术债
+- [ ] 代码质量趋势 — 追踪项目代码质量指标随时间的变化趋势
+
+### 29.2 Review 质量评估
+- [ ] Review 深度分析 — 统计 review 评论行数、review 耗时、review 轮次
+- [ ] Review 覆盖率 — 有 review 的 PR 占比、reviewer 数量分布
+- [ ] Review 延迟统计 — 从 PR 创建到首次 review 的平均等待时间
+- [ ] Review 质量 API — `GET /analysis/review-quality/{owner}/{repo}`
+
+### 29.3 项目健康度评分
+- [ ] 健康度指标体系 — 综合评分维度:
+  - PR 存活时间（越短越好）
+  - Merge 率（适中为佳）
+  - Review 覆盖率（越高越好）
+  - CI 成功率（越高越好）
+  - 贡献者多样性（核心贡献者占比）
+  - Issue 响应速度
+- [ ] 健康度评级 — A-F 评级 + 各维度雷达图数据
+- [ ] 健康度趋势 — 按周/月追踪健康度变化
+- [ ] 健康度 API — `GET /analysis/health/{owner}/{repo}`
+
+### 29.4 趋势预警
+- [ ] CI 失败率突增预警 — 检测 CI 失败率环比异常上升
+- [ ] Review 响应变慢预警 — 检测 review 延迟环比异常增长
+- [ ] 贡献者流失预警 — 检测核心贡献者活跃度下降
+- [ ] 预警规则配置 — 支持自定义阈值和预警维度
+- [ ] 预警 API — `GET /analysis/alerts/{owner}/{repo}`
+
+---
+
+## 30. 平台与集成拓展
+> 增强平台集成能力，支持实时数据更新、通知推送和数据导出。
+
+### 30.1 Webhook 接收
+- [ ] GitHub Webhook 接收 — 监听 push/pull_request/pull_request_review 事件
+- [ ] GitCode Webhook 接收 — 监听 merge_request 事件
+- [ ] Webhook 签名验证 — 验证 payload 签名防止伪造
+- [ ] 实时增量更新 — Webhook 事件触发后自动增量拉取关联数据
+- [ ] Webhook 管理 API — `POST /webhooks/configure`, `GET /webhooks/events`
+
+### 30.2 通知推送
+- [ ] 邮件通知 — 分析报告完成后发送邮件摘要
+- [ ] 飞书/钉钉/Slack 通知 — 推送报告链接和关键指标到 IM
+- [ ] 通知规则配置 — 按项目/指标/阈值配置通知触发条件
+- [ ] 通知管理 API — `POST /notifications/config`, `GET /notifications/history`
+
+### 30.3 数据导出
+- [ ] 报告导出 PDF — 将 CI/CD 洞察报告导出为 PDF
+- [ ] 报告导出 Excel — 将统计数据导出为 Excel（多 Sheet）
+- [ ] 数据批量导出 CSV — 支持各数据集合的 CSV 导出
+- [ ] 导出 API — `GET /export/report/{owner}/{repo}?format=pdf|excel|csv`
+
+### 30.4 多仓库对比
+- [ ] 同组织多项目横向对比 — 按健康度/CI 成功率/Review 覆盖率等维度对比
+- [ ] 跨项目贡献者重叠分析 — 识别在多个项目间活跃的贡献者
+- [ ] 对比看板 API — `POST /analysis/compare`, `GET /analysis/compare/{compare_id}`
+
+---
+
+## 31. 前端可视化增强
+> 提升前端数据可视化能力，增加交互式图表和实时看板。
+
+### 31.1 PR 生命周期桑基图
+- [ ] 全链路可视化 — open→review→CI→merge 状态流转桑基图
+- [ ] 状态停留时间 — 各阶段平均停留时间标注
+- [ ] 筛选交互 — 按时间范围/作者/标签筛选后动态更新
+
+### 31.2 贡献者热力图
+- [ ] 贡献日历 — 类似 GitHub 贡献日历，按 PR/review/comment 维度着色
+- [ ] 维度切换 — PR 提交/Review/Comment 三种维度切换
+- [ ] 贡献者排行 — 按选定维度和时间段排行
+
+### 31.3 CI/CD 仪表盘
+- [ ] 实时构建状态墙 — 最新 PR 的 CI 状态一览（pass/fail/pending）
+- [ ] 失败率趋势图 — 按日/周展示 CI 失败率变化
+- [ ] MTTR 趋势图 — 平均修复时间变化趋势
+- [ ] 耗时分布图 — P50/P90/P95 构建耗时分布
+
+### 31.4 代码变更热力图
+- [ ] 文件/目录变更频率 — 热力图展示高频变更区域
+- [ ] 变更规模气泡图 — 按文件/目录展示 additions/deletions 气泡图
+- [ ] 热点模块识别 — 标记 churn 率最高的模块
+
+---
+
+## 32. 前端交互增强
+> 提升前端用户体验，增加个性化配置和交互能力。
+
+### 32.1 项目收藏与分组
+- [ ] 项目收藏功能 — 用户收藏常用项目，快速入口
+- [ ] 自定义分组 — 按组织/语言/业务线分组管理项目
+- [ ] 分组管理 API — `POST /user/favorites`, `GET /user/favorites`
+
+### 32.2 自定义看板
+- [ ] 拖拽式仪表盘 — 用户选择指标卡片和布局
+- [ ] 指标卡片库 — 提供可选指标卡片（健康度/CI 趋势/Review 统计等）
+- [ ] 布局持久化 — 保存用户自定义看板布局
+
+### 32.3 时间范围选择器
+- [ ] 全局时间筛选 — 全局时间范围选择器，所有页面联动
+- [ ] 快捷时间段 — 近7天/近30天/近90天/自定义
+- [ ] 时间范围持久化 — 记住用户上次选择的时间范围
+
+### 32.4 深色模式
+- [ ] 明暗主题切换 — 支持 Light/Dark 模式切换
+- [ ] 系统主题跟随 — 自动跟随操作系统主题设置
+- [ ] 主题偏好持久化 — 记住用户主题偏好
+
+---
+
+## 33. 前端协作增强
+> 增强团队协作能力，支持报告分享和对比分析。
+
+### 33.1 报告批注与分享
+- [ ] 报告批注 — 在报告特定位置添加批注/评论
+- [ ] 生成分享链接 — 生成报告的只读分享链接（含有效期）
+- [ ] 批注 API — `POST /reports/{report_id}/annotations`, `GET /reports/{report_id}/share-link`
+
+### 33.2 对比模式
+- [ ] 时间段对比 — 同项目两个时间段的指标对比视图
+- [ ] 项目对比 — 两个项目的横向对比视图（雷达图/表格）
+- [ ] 对比差异高亮 — 差异指标用颜色/箭头高亮
+
+### 33.3 Agent 对话增强
+- [ ] 思考过程展示 — Agent Studio 中展示 Agent 推理步骤和决策过程
+- [ ] 图表渲染 — Agent 回复中支持渲染 Mermaid/Recharts 图表
+- [ ] 工具调用可视化 — 展示 Agent 调用了哪些工具、参数和返回结果
