@@ -42,7 +42,7 @@ export default function ProjectHealth() {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    api.getCommentProjects()
+    api.getProjectsOverview()
       .then(res => {
         const list = res.data.projects || []
         setProjects(list)
