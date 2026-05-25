@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Card, Row, Col, Spin, Alert, Tag, Space, Select, InputNumber,
-  Table, Tooltip, Tabs, Statistic, Button, message,
+  Table, Tooltip, Tabs, Statistic, Button, message, DatePicker,
 } from 'antd'
 import {
   HeatMapOutlined, FileTextOutlined, FolderOutlined,
@@ -45,6 +45,7 @@ export default function CodeHeatmap() {
   const [projects, setProjects] = useState([])
   const [selected, setSelected] = useState(null)
   const [topN, setTopN] = useState(50)
+  const [dateRange, setDateRange] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [fetchingFiles, setFetchingFiles] = useState(false)
@@ -65,13 +66,17 @@ export default function CodeHeatmap() {
     setLoading(true)
     setError(null)
     try {
-      const res = await api.getCodeHeatmap(selected.owner, selected.repo, { top_n: topN })
+      const res = await api.getCodeHeatmap(selected.owner, selected.repo, {
+        top_n: topN,
+        ...(dateRange?.[0] ? { start_date: dateRange[0].format('YYYY-MM-DD') } : {}),
+        ...(dateRange?.[1] ? { end_date: dateRange[1].format('YYYY-MM-DD') } : {}),
+      })
       setData(res.data)
     } catch (e) {
       setError(e.message)
     }
     setLoading(false)
-  }, [selected, topN])
+  }, [selected, topN, dateRange])
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -181,6 +186,12 @@ export default function CodeHeatmap() {
               options={projects.map(p => ({ value: `${p.owner}/${p.repo}`, label: `${p.owner}/${p.repo}` }))}
             />
             <InputNumber min={10} max={200} value={topN} onChange={v => setTopN(v || 50)} style={{ width: 70 }} addonAfter="条" />
+            <DatePicker.RangePicker
+              value={dateRange}
+              onChange={setDateRange}
+              placeholder={['开始日期', '结束日期']}
+              style={{ width: 240 }}
+            />
             <Button icon={<ThunderboltOutlined />} onClick={fetchFiles} loading={fetchingFiles}>获取文件数据</Button>
           </Space>
         </Col>

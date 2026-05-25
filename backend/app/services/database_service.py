@@ -2570,8 +2570,27 @@ class DatabaseService:
         if self.db is None:
             return {"error": "数据库未连接"}
         try:
-            # 获取所有 pr_files 文档
+            # 获取所有 pr_files 文档，按时间过滤
             query = {"owner": owner, "repo": repo}
+
+            if start_date or end_date:
+                # 按关联 PR 的创建时间过滤
+                pr_query = {"owner": owner, "repo": repo}
+                if start_date:
+                    pr_query["data.created_at"] = {"$gte": start_date}
+                if end_date:
+                    time_cond = pr_query.get("data.created_at", {})
+                    if isinstance(time_cond, dict):
+                        time_cond["$lte"] = end_date
+                    else:
+                        time_cond = {"$gte": start_date, "$lte": end_date}
+                    pr_query["data.created_at"] = time_cond
+
+                valid_pr_numbers = set()
+                async for doc in self.db['pr_details'].find(pr_query, {"pr_number": 1, "_id": 0}):
+                    valid_pr_numbers.add(doc["pr_number"])
+                query["pr_number"] = {"$in": list(valid_pr_numbers)}
+
             docs = await self.db['pr_files'].find(query, {"_id": 0}).to_list(length=None)
 
             if not docs:
