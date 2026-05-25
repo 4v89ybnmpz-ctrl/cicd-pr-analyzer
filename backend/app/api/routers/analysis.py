@@ -12,6 +12,7 @@ from app.models.cicd_models import (
 )
 from app.models.responses import CICDAnalysisTriggerResponse, CICDTrendsResponse
 from app.models.responses import ReviewQualityReport, ReviewQualityTrendsResponse
+from app.models.responses import ProjectHealthReport, ProjectHealthTrendsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,39 @@ def register_analysis_routes(router: APIRouter, db, cache):
         if db is None or db.db is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
         trends = await db.get_review_quality_trends(owner, repo, granularity, start_date, end_date)
+        return {"owner": owner, "repo": repo, "granularity": granularity, "trends": trends}
+
+    # ====================
+    # 项目健康度评分
+    # ====================
+
+    @router.get("/analysis/health/{owner}/{repo}", tags=["项目健康度"], response_model=ProjectHealthReport)
+    async def get_project_health(
+        owner: str,
+        repo: str,
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    ):
+        """
+        获取项目健康度报告
+        综合评估 PR 存活时间、Merge 率、Review 覆盖率、CI 成功率、贡献者多样性、Issue 响应速度
+        """
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_project_health_report(owner, repo, start_date, end_date)
+
+    @router.get("/analysis/health/{owner}/{repo}/trends", tags=["项目健康度"], response_model=ProjectHealthTrendsResponse)
+    async def get_project_health_trends(
+        owner: str,
+        repo: str,
+        granularity: str = Query("month", description="时间粒度 day/week/month"),
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    ):
+        """获取项目健康度趋势数据"""
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        trends = await db.get_project_health_trends(owner, repo, granularity, start_date, end_date)
         return {"owner": owner, "repo": repo, "granularity": granularity, "trends": trends}
 
 

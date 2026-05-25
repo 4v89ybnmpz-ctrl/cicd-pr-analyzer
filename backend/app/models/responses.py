@@ -652,3 +652,41 @@ class ReviewQualityTrendsResponse(TimestampMixin):
     repo: str
     granularity: str
     trends: List[Dict[str, Any]]
+
+
+# ====================
+# 项目健康度 Response 模型
+# ====================
+
+class HealthDimensionScore(BaseModel):
+    """健康度单维度评分"""
+    name: str = Field(..., description="维度名称")
+    value: Any = Field(..., description="原始值")
+    score: float = Field(0, description="归一化分数 (0-100)")
+    weight: float = Field(0, description="权重")
+    weighted_score: float = Field(0, description="加权分数")
+    grade: Optional[str] = Field(None, description="评级 (A-F)")
+    description: Optional[str] = Field(None, description="说明")
+
+
+class ProjectHealthReport(BaseModel):
+    """项目健康度报告"""
+    owner: str = Field(..., description="仓库所有者")
+    repo: str = Field(..., description="仓库名")
+    start_date: Optional[str] = Field(None, description="开始日期")
+    end_date: Optional[str] = Field(None, description="结束日期")
+    overall_score: float = Field(0, description="综合健康度分数 (0-100)")
+    overall_grade: str = Field("N/A", description="综合评级 (A-F)")
+    dimensions: List[HealthDimensionScore] = Field(default_factory=list, description="各维度评分")
+    radar_data: List[Dict[str, Any]] = Field(default_factory=list, description="雷达图数据")
+    insights: List[Dict[str, Any]] = Field(default_factory=list, description="洞察项")
+    generated_at: Optional[str] = Field(None, description="报告生成时间")
+    data_available: bool = Field(True, description="是否有足够数据计算健康度")
+
+
+class ProjectHealthTrendsResponse(TimestampMixin):
+    """项目健康度趋势响应"""
+    owner: str
+    repo: str
+    granularity: str
+    trends: List[Dict[str, Any]]

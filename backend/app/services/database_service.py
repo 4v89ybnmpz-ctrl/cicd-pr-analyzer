@@ -1841,3 +1841,436 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"获取 Review 质量趋势失败: {e}")
             return []
+
+    # ====================
+    # 项目健康度评分
+    # ====================
+
+    async def get_project_health_report(self, owner: str, repo: str,
+                                         start_date: str = None, end_date: str = None) -> Dict[str, Any]:
+        """
+        生成项目健康度报告
+        综合多维度指标计算加权健康度分数
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            time_filter = {}
+            if start_date:
+                time_filter["$gte"] = start_date
+            if end_date:
+                time_filter["$lte"] = end_date
+
+            # 1. PR 存活时间维度
+            pr_lifetime = await self._compute_pr_lifetime_score(owner, repo, time_filter)
+
+            # 2. Merge 率维度
+            merge_rate = await self._compute_merge_rate_score(owner, repo, time_filter)
+
+            # 3. Review 覆盖率维度（复用 29.2）
+            review_coverage = await self._compute_review_coverage_score(owner, repo, time_filter)
+
+            # 4. CI 成功率维度
+            ci_success = await self._compute_ci_success_score(owner, repo, time_filter)
+
+            # 5. 贡献者多样性维度
+            contributor_diversity = await self._compute_contributor_diversity_score(owner, repo, time_filter)
+
+            # 6. Issue 响应速度维度
+            issue_response = await self._compute_issue_response_score(owner, repo, time_filter)
+
+            dimensions = [pr_lifetime, merge_rate, review_coverage, ci_success, contributor_diversity, issue_response]
+            # 过滤掉无数据的维度
+            valid_dims = [d for d in dimensions if d.get("score") is not None and d["score"] > 0]
+
+            if not valid_dims:
+                return {
+                    "owner": owner, "repo": repo,
+                    "start_date": start_date, "end_date": end_date,
+                    "overall_score": 0, "overall_grade": "N/A",
+                    "dimensions": dimensions, "radar_data": [],
+                    "insights": [], "generated_at": datetime.now().isoformat(),
+                    "data_available": False,
+                }
+
+            # 归一化权重（仅对有数据的维度）
+            total_weight = sum(d["weight"] for d in valid_dims)
+            overall_score = 0
+            for d in valid_dims:
+                normalized_weight = d["weight"] / total_weight
+                d["weighted_score"] = round(d["score"] * normalized_weight, 2)
+                overall_score += d["weighted_score"]
+            overall_score = round(overall_score, 2)
+
+            overall_grade = self._score_to_grade(overall_score)
+
+            # 雷达图数据
+            radar_data = [{"dimension": d["name"], "score": d["score"]} for d in valid_dims]
+
+            # 洞察项
+            insights = self._build_health_insights(dimensions, overall_score, overall_grade)
+
+            return {
+                "owner": owner, "repo": repo,
+                "start_date": start_date, "end_date": end_date,
+                "overall_score": overall_score,
+                "overall_grade": overall_grade,
+                "dimensions": dimensions,
+                "radar_data": radar_data,
+                "insights": insights,
+                "generated_at": datetime.now().isoformat(),
+                "data_available": True,
+            }
+        except Exception as e:
+            logger.error(f"生成项目健康度报告失败: {e}")
+            return {"error": str(e)}
+
+    async def _compute_pr_lifetime_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """PR 存活时间评分：越短越好"""
+        query = {"owner": owner, "repo": repo}
+        if time_filter:
+            query["data.created_at"] = time_filter
+
+        pipeline = [
+            {"$match": query},
+            {"$addFields": {
+                "created": {"$dateFromString": {"dateString": {"$ifNull": ["$data.created_at", "2000-01-01T00:00:00Z"]}}},
+                "closed": {"$dateFromString": {"dateString": {"$ifNull": [
+                    {"$ifNull": ["$data.merged_at", "$data.closed_at"]}, "2000-01-01T00:00:00Z"
+                ]}}},
+            }},
+            {"$addFields": {"lifetime_hours": {"$divide": [{"$subtract": ["$closed", "created"]}, 3600000]}}},
+            {"$match": {"lifetime_hours": {"$gte": 0, "$lt": 7200}}},
+            {"$group": {"_id": None, "avg_hours": {"$avg": "$lifetime_hours"}, "count": {"$sum": 1}}},
+        ]
+
+        try:
+            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=1)
+        except Exception:
+            result = []
+
+        if not result:
+            return {"name": "PR 存活时间", "value": None, "score": 0, "weight": 0.2, "weighted_score": 0, "grade": None, "description": "无数据"}
+
+        avg_hours = result[0]["avg_hours"]
+        count = result[0]["count"]
+        # 评分：24h 内=100, 72h=80, 168h(1周)=60, 336h(2周)=40, 720h(1月)=20, 更久=10
+        if avg_hours <= 24:
+            score = 100
+        elif avg_hours <= 72:
+            score = 80 + (72 - avg_hours) / (72 - 24) * 20
+        elif avg_hours <= 168:
+            score = 60 + (168 - avg_hours) / (168 - 72) * 20
+        elif avg_hours <= 336:
+            score = 40 + (336 - avg_hours) / (336 - 168) * 20
+        elif avg_hours <= 720:
+            score = 20 + (720 - avg_hours) / (720 - 336) * 20
+        else:
+            score = max(5, 20 - (avg_hours - 720) / 720 * 10)
+        score = round(score, 2)
+
+        grade = self._score_to_grade(score)
+        desc = f"平均存活 {avg_hours:.1f}h ({avg_hours/24:.1f}天), 共 {count} 个 PR"
+
+        return {"name": "PR 存活时间", "value": round(avg_hours, 1), "score": score, "weight": 0.2, "weighted_score": 0, "grade": grade, "description": desc}
+
+    async def _compute_merge_rate_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """Merge 率评分：适中为佳（60-85% 为最佳区间）"""
+        query = {"owner": owner, "repo": repo}
+        if time_filter:
+            query["data.created_at"] = time_filter
+
+        pipeline = [
+            {"$match": query},
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "merged": {"$sum": {"$cond": [{"$eq": ["$data.state", "closed"]}, 1, 0]}},
+                "open": {"$sum": {"$cond": [{"$eq": ["$data.state", "open"]}, 1, 0]}},
+            }},
+        ]
+
+        try:
+            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=1)
+        except Exception:
+            result = []
+
+        if not result:
+            return {"name": "Merge 率", "value": None, "score": 0, "weight": 0.15, "weighted_score": 0, "grade": None, "description": "无数据"}
+
+        total = result[0]["total"]
+        merged = result[0]["merged"]
+        open_count = result[0]["open"]
+        closed_count = total - open_count
+        merge_rate = round(merged / closed_count * 100, 2) if closed_count > 0 else None
+
+        if merge_rate is None:
+            return {"name": "Merge 率", "value": None, "score": 0, "weight": 0.15, "weighted_score": 0, "grade": None, "description": "无已关闭 PR"}
+
+        # 60-85% 最佳区间=100, 偏离越远分越低
+        if 60 <= merge_rate <= 85:
+            score = 100
+        elif merge_rate < 60:
+            score = max(10, merge_rate / 60 * 100)
+        else:
+            score = max(10, 100 - (merge_rate - 85) * 3)
+        score = round(score, 2)
+
+        grade = self._score_to_grade(score)
+        desc = f"Merge 率 {merge_rate}% ({merged}/{closed_count} 已关闭 PR)"
+
+        return {"name": "Merge 率", "value": merge_rate, "score": score, "weight": 0.15, "weighted_score": 0, "grade": grade, "description": desc}
+
+    async def _compute_review_coverage_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """Review 覆盖率评分（复用 29.2 的覆盖率计算）"""
+        coverage = await self._compute_review_coverage(owner, repo, time_filter)
+        coverage_rate = coverage.get("coverage_rate")
+
+        if coverage_rate is None:
+            return {"name": "Review 覆盖率", "value": None, "score": 0, "weight": 0.25, "weighted_score": 0, "grade": None, "description": "无数据"}
+
+        # 直接用覆盖率作为分数
+        score = round(coverage_rate, 2)
+        grade = self._score_to_grade(score)
+        desc = f"覆盖率 {coverage_rate}% ({coverage.get('prs_with_review', 0)}/{coverage.get('total_prs', 0)} PR)"
+
+        return {"name": "Review 覆盖率", "value": coverage_rate, "score": score, "weight": 0.25, "weighted_score": 0, "grade": grade, "description": desc}
+
+    async def _compute_ci_success_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """CI 成功率评分"""
+        summary = await self.get_cicd_summary_from_db(owner, repo,
+                                                       start_date=time_filter.get("$gte"),
+                                                       end_date=time_filter.get("$lte"))
+        if "error" in summary or summary.get("total", 0) == 0:
+            return {"name": "CI 成功率", "value": None, "score": 0, "weight": 0.2, "weighted_score": 0, "grade": None, "description": "无 CI/CD 数据"}
+
+        success_rate = summary.get("success_rate")
+        if success_rate is None:
+            return {"name": "CI 成功率", "value": None, "score": 0, "weight": 0.2, "weighted_score": 0, "grade": None, "description": "无数据"}
+
+        score = round(success_rate, 2)
+        grade = self._score_to_grade(score)
+        total = summary.get("total", 0)
+        desc = f"成功率 {success_rate}% (共 {total} 次构建)"
+
+        return {"name": "CI 成功率", "value": success_rate, "score": score, "weight": 0.2, "weighted_score": 0, "grade": grade, "description": desc}
+
+    async def _compute_contributor_diversity_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """贡献者多样性评分：核心贡献者占比越低越好（Bus Factor）"""
+        pipeline = [
+            {"$match": {"owner": owner, "repo": repo}},
+            {"$group": {"_id": "$data.user.login", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+
+        try:
+            contributors = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+        except Exception:
+            contributors = []
+
+        contributors = [c for c in contributors if c["_id"]]
+
+        if len(contributors) < 2:
+            return {"name": "贡献者多样性", "value": None, "score": 0, "weight": 0.1, "weighted_score": 0, "grade": None, "description": "贡献者不足 2 人"}
+
+        total_prs = sum(c["count"] for c in contributors)
+        top3_prs = sum(c["count"] for c in contributors[:3])
+        top3_ratio = round(top3_prs / total_prs * 100, 2) if total_prs > 0 else 100
+
+        # Top3 占比越低越好：<=30%=100, 50%=80, 70%=50, 90%=20
+        if top3_ratio <= 30:
+            score = 100
+        elif top3_ratio <= 50:
+            score = 80 + (50 - top3_ratio) / 20 * 20
+        elif top3_ratio <= 70:
+            score = 50 + (70 - top3_ratio) / 20 * 30
+        elif top3_ratio <= 90:
+            score = 20 + (90 - top3_ratio) / 20 * 30
+        else:
+            score = max(5, 20 - (top3_ratio - 90) * 1)
+        score = round(score, 2)
+
+        grade = self._score_to_grade(score)
+        desc = f"Top3 贡献者占比 {top3_ratio}% (共 {len(contributors)} 人)"
+
+        return {"name": "贡献者多样性", "value": top3_ratio, "score": score, "weight": 0.1, "weighted_score": 0, "grade": grade, "description": desc}
+
+    async def _compute_issue_response_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
+        """Issue 响应速度评分"""
+        query = {"owner": owner, "repo": repo, "state": "closed", "closed_at": {"$ne": None}}
+        if time_filter:
+            query["created_at"] = time_filter
+
+        pipeline = [
+            {"$match": query},
+            {"$addFields": {
+                "created": {"$dateFromString": {"dateString": "$created_at"}},
+                "closed": {"$dateFromString": {"dateString": "$closed_at"}},
+            }},
+            {"$addFields": {"lifetime_hours": {"$divide": [{"$subtract": ["$closed", "created"]}, 3600000]}}},
+            {"$match": {"lifetime_hours": {"$gte": 0, "$lt": 8760}}},
+            {"$group": {"_id": None, "avg_hours": {"$avg": "$lifetime_hours"}, "count": {"$sum": 1}}},
+        ]
+
+        try:
+            result = await self.db['issues'].aggregate(pipeline).to_list(length=1)
+        except Exception:
+            result = []
+
+        if not result:
+            return {"name": "Issue 响应速度", "value": None, "score": 0, "weight": 0.1, "weighted_score": 0, "grade": None, "description": "无已关闭 Issue 数据"}
+
+        avg_hours = result[0]["avg_hours"]
+        count = result[0]["count"]
+
+        # 24h=100, 72h=80, 168h=60, 336h=40, 720h=20
+        if avg_hours <= 24:
+            score = 100
+        elif avg_hours <= 72:
+            score = 80 + (72 - avg_hours) / 48 * 20
+        elif avg_hours <= 168:
+            score = 60 + (168 - avg_hours) / 96 * 20
+        elif avg_hours <= 336:
+            score = 40 + (336 - avg_hours) / 168 * 20
+        elif avg_hours <= 720:
+            score = 20 + (720 - avg_hours) / 384 * 20
+        else:
+            score = max(5, 20 - (avg_hours - 720) / 720 * 10)
+        score = round(score, 2)
+
+        grade = self._score_to_grade(score)
+        desc = f"平均关闭时间 {avg_hours:.1f}h ({avg_hours/24:.1f}天), 共 {count} 个 Issue"
+
+        return {"name": "Issue 响应速度", "value": round(avg_hours, 1), "score": score, "weight": 0.1, "weighted_score": 0, "grade": grade, "description": desc}
+
+    @staticmethod
+    def _score_to_grade(score: float) -> str:
+        """分数转评级"""
+        if score >= 90:
+            return "A"
+        elif score >= 75:
+            return "B"
+        elif score >= 60:
+            return "C"
+        elif score >= 40:
+            return "D"
+        else:
+            return "F"
+
+    def _build_health_insights(self, dimensions: list, overall_score: float, overall_grade: str) -> List[Dict[str, Any]]:
+        """构建健康度洞察项"""
+        insights = []
+
+        # 综合评级洞察
+        grade_desc = {
+            "A": "项目非常健康，各维度表现优秀",
+            "B": "项目整体健康，部分维度有提升空间",
+            "C": "项目健康状况一般，建议关注低分维度",
+            "D": "项目健康度较低，需要重点改进",
+            "F": "项目健康度很差，建议全面审视流程",
+        }
+        insights.append({
+            "name": "综合健康度",
+            "value": overall_score,
+            "grade": overall_grade,
+            "description": f"综合健康度 {overall_score} 分，评级 {overall_grade}",
+            "suggestion": grade_desc.get(overall_grade, ""),
+        })
+
+        # 找出最弱维度
+        valid_dims = [d for d in dimensions if d.get("score") and d["score"] > 0]
+        if valid_dims:
+            weakest = min(valid_dims, key=lambda d: d["score"])
+            if weakest["grade"] in ("D", "F"):
+                suggestions = {
+                    "PR 存活时间": "建议拆分大 PR、优化 review 流程以缩短 PR 存活时间",
+                    "Merge 率": "建议审视 PR 流程，过低说明大量 PR 未合并，过高可能缺乏审查",
+                    "Review 覆盖率": "建议强制要求 PR review，配置 CODEOWNERS",
+                    "CI 成功率": "建议优先修复 CI 失败，排查 flaky test",
+                    "贡献者多样性": "建议鼓励更多贡献者参与，降低贡献门槛",
+                    "Issue 响应速度": "建议增加维护者，或设置 Issue 自动分派",
+                }
+                insights.append({
+                    "name": "最弱维度",
+                    "value": weakest["score"],
+                    "grade": weakest["grade"],
+                    "description": f"{weakest['name']} 评分最低 ({weakest['score']} 分)",
+                    "suggestion": suggestions.get(weakest["name"], "建议重点关注该维度的改进"),
+                })
+
+        # 找出最强维度
+        if valid_dims:
+            strongest = max(valid_dims, key=lambda d: d["score"])
+            if strongest["grade"] == "A":
+                insights.append({
+                    "name": "最强维度",
+                    "value": strongest["score"],
+                    "grade": "A",
+                    "description": f"{strongest['name']} 表现优秀 ({strongest['score']} 分)",
+                    "suggestion": "保持当前水平",
+                })
+
+        return insights
+
+    async def get_project_health_trends(self, owner: str, repo: str,
+                                         granularity: str = "month",
+                                         start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """获取项目健康度趋势（按时间段分别计算健康度）"""
+        if self.db is None:
+            return []
+        try:
+            # 基于 pr_details 的 created_at 做时间分桶
+            if granularity == "month":
+                date_format = "%Y-%m"
+            elif granularity == "week":
+                date_format = "%Y-W%V"
+            else:
+                date_format = "%Y-%m-%d"
+
+            pipeline = [
+                {"$match": {"owner": owner, "repo": repo, "data.created_at": {"$ne": None}}},
+                {"$addFields": {
+                    "period": {"$dateToString": {
+                        "format": date_format,
+                        "date": {"$dateFromString": {"dateString": "$data.created_at"}}
+                    }},
+                }},
+                {"$group": {
+                    "_id": "$period",
+                    "total_prs": {"$sum": 1},
+                    "merged_prs": {"$sum": {"$cond": [{"$eq": ["$data.state", "closed"]}, 1, 0]}},
+                    "open_prs": {"$sum": {"$cond": [{"$eq": ["$data.state", "open"]}, 1, 0]}},
+                    "contributors": {"$addToSet": "$data.user.login"},
+                }},
+                {"$addFields": {"contributor_count": {"$size": "$contributors"}}},
+                {"$sort": {"_id": 1}},
+            ]
+
+            raw = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+
+            trends = []
+            for r in raw:
+                total = r["total_prs"]
+                merged = r["merged_prs"]
+                open_count = r["open_prs"]
+                closed = total - open_count
+                merge_rate = round(merged / closed * 100, 2) if closed > 0 else None
+                contributor_count = r["contributor_count"]
+
+                # 简化评分：merge_rate + contributor 多样性
+                merge_score = 100 if merge_rate and 60 <= merge_rate <= 85 else (merge_rate or 0) * 0.8
+                diversity_score = min(100, contributor_count * 10)
+
+                trends.append({
+                    "period": r["_id"],
+                    "total_prs": total,
+                    "merged_prs": merged,
+                    "merge_rate": merge_rate,
+                    "contributor_count": contributor_count,
+                    "merge_score": round(merge_score, 2),
+                    "diversity_score": round(diversity_score, 2),
+                })
+            return trends
+        except Exception as e:
+            logger.error(f"获取项目健康度趋势失败: {e}")
+            return []

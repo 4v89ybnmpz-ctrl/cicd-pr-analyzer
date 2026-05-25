@@ -519,16 +519,16 @@
 - [x] Review 质量 API — `GET /analysis/review-quality/{owner}/{repo}`
 
 ### 29.3 项目健康度评分
-- [ ] 健康度指标体系 — 综合评分维度:
+- [x] 健康度指标体系 — 综合评分维度:
   - PR 存活时间（越短越好）
   - Merge 率（适中为佳）
   - Review 覆盖率（越高越好）
   - CI 成功率（越高越好）
   - 贡献者多样性（核心贡献者占比）
   - Issue 响应速度
-- [ ] 健康度评级 — A-F 评级 + 各维度雷达图数据
-- [ ] 健康度趋势 — 按周/月追踪健康度变化
-- [ ] 健康度 API — `GET /analysis/health/{owner}/{repo}`
+- [x] 健康度评级 — A-F 评级 + 各维度雷达图数据
+- [x] 健康度趋势 — 按周/月追踪健康度变化
+- [x] 健康度 API — `GET /analysis/health/{owner}/{repo}`
 
 ### 29.4 趋势预警
 - [ ] CI 失败率突增预警 — 检测 CI 失败率环比异常上升

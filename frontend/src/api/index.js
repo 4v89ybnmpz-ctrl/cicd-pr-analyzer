@@ -66,6 +66,12 @@ export const getReviewQuality = (owner, repo, params) =>
 export const getReviewQualityTrends = (owner, repo, params) =>
   api.get(`/analysis/review-quality/${owner}/${repo}/trends`, { params })
 
+export const getProjectHealth = (owner, repo, params) =>
+  api.get(`/analysis/health/${owner}/${repo}`, { params })
+
+export const getProjectHealthTrends = (owner, repo, params) =>
+  api.get(`/analysis/health/${owner}/${repo}/trends`, { params })
+
 export const getCommenterProfiles = (owner, repo, limit = 20) =>
   api.get(`/github/prs/${owner}/${repo}/commenters/profiles?limit=${limit}`)
 
