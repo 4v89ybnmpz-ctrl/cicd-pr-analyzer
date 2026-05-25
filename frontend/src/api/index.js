@@ -78,6 +78,9 @@ export const getTrendAlerts = (owner, repo, params) =>
 export const getCodeHeatmap = (owner, repo, params) =>
   api.get(`/analysis/code-heatmap/${owner}/${repo}`, { params })
 
+export const getCodeInsight = (owner, repo, params) =>
+  api.get(`/analysis/code-insight/${owner}/${repo}`, { params })
+
 export const fetchPrFiles = (owner, repo, params) =>
   api.post(`/github/tasks/files/${owner}/${repo}`, null, { params })
 

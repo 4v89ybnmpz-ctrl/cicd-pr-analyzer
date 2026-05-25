@@ -289,6 +289,26 @@ def register_analysis_routes(router: APIRouter, db, cache):
             raise HTTPException(status_code=503, detail="数据库未连接")
         return await db.get_code_change_heatmap(owner, repo, start_date, end_date, top_n)
 
+    # ====================
+    # 代码变更深度洞察
+    # ====================
+
+    @router.get("/analysis/code-insight/{owner}/{repo}", tags=["代码变更洞察"])
+    async def get_code_change_insight(
+        owner: str,
+        repo: str,
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+        granularity: str = Query("week", description="时间粒度 day/week/month"),
+    ):
+        """
+        获取代码变更深度洞察报告
+        阶段性分析项目在一段时间内的变更内容，按类型分类，生成自然语言摘要
+        """
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_code_change_insight(owner, repo, start_date, end_date, granularity)
+
 
 def _build_insights(summary_data: dict, failure_analysis: dict) -> list:
     """根据统计数据构建洞察项"""

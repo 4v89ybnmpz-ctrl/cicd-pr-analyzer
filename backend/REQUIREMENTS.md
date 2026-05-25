@@ -484,10 +484,13 @@
 - [ ] 关联关系查询 API — `GET /database/relations/{owner}/{repo}`
 
 ### 28.2 代码变更深度分析
-- [ ] 逐文件 diff 解析 — 解析 PR 的 files changed，提取每个文件的增删行数、文件类型
-- [ ] 变更热点文件识别 — 统计高频变更文件/目录，识别项目热点模块
-- [ ] 代码复杂度趋势 — 基于变更规模（additions/deletions/changed_files）追踪复杂度变化
-- [ ] 变更分析 API — `GET /analysis/code-changes/{owner}/{repo}`
+- [x] 逐文件 diff 解析 — 解析 PR 的 files changed，提取每个文件的增删行数、文件类型
+- [x] 变更热点文件识别 — 统计高频变更文件/目录，识别项目热点模块
+- [x] 代码复杂度趋势 — 基于变更规模（additions/deletions/changed_files）追踪复杂度变化
+- [x] 变更分析 API — `GET /analysis/code-changes/{owner}/{repo}`
+- [x] 变更内容分类 — 基于 PR 标题/body/文件路径/标签自动分类（新功能/Bug修复/重构/文档/测试/CI/性能优化）
+- [x] 阶段性变更洞察 — 按周/月分桶，生成每个阶段的变更摘要和分类统计
+- [x] 变更洞察 API — `GET /analysis/code-insight/{owner}/{repo}`
 
 ### 28.3 贡献者画像
 - [ ] 贡献者活跃度统计 — PR 提交频率、review 参与频率、comment 频率

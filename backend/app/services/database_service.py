@@ -2682,3 +2682,292 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"生成代码变更热力图失败: {e}")
             return {"error": str(e)}
+
+    # ====================
+    # 代码变更深度分析 + 阶段性洞察
+    # ====================
+
+    @staticmethod
+    def _classify_change(pr_title: str, pr_body: str, filenames: List[str], labels: List[str]) -> str:
+        """
+        基于 PR 标题、body、文件路径和标签分类变更类型
+        返回: feature / bugfix / refactor / docs / test / ci / perf / other
+        """
+        text = f"{pr_title} {pr_body}".lower()
+        all_files = " ".join(filenames).lower()
+        all_labels = " ".join(labels).lower()
+
+        # CI/构建相关
+        ci_keywords = ["ci", "build", "pipeline", "workflow", "docker", "deploy", "makefile", "cmake", "jenkins", "github-actions", "gitlab-ci"]
+        ci_files = [".github/workflows/", "Dockerfile", "docker-compose", "Jenkinsfile", ".gitlab-ci.yml", "Makefile", "CMakeLists"]
+        if any(k in text for k in ci_keywords) or any(k in all_labels for k in ci_keywords) or any(f.startswith(tuple(ci_files)) or f in ci_files for f in filenames):
+            return "ci"
+
+        # 测试相关
+        test_keywords = ["test", "spec", "fixture", "mock", "coverage", "unittest", "pytest", "jest"]
+        test_files = ["test/", "tests/", "spec/", "__test__", "_test.", ".test.", ".spec.", ".test.ts", ".spec.ts"]
+        if any(k in text for k in test_keywords) or any(f.startswith(tuple(test_files)) or any(s in f for s in test_files) for f in filenames):
+            return "test"
+
+        # 文档相关
+        doc_keywords = ["doc", "readme", "changelog", "license", "contributing"]
+        doc_files = [".md", ".rst", ".txt", "docs/", "doc/", "README", "CHANGELOG", "LICENSE"]
+        if any(k in text for k in doc_keywords) or any(f.startswith(tuple(doc_files)) or any(f.endswith(s) for s in [".md", ".rst", ".txt"]) for f in filenames):
+            return "docs"
+
+        # Bug 修复
+        bug_keywords = ["fix", "bug", "issue", "patch", "hotfix", "revert", "crash", "error", "fault", "defect"]
+        bug_labels = ["bug", "type:bug", "kind/bug", "priority/critical"]
+        if any(k in text for k in bug_keywords) or any(k in all_labels for k in bug_labels):
+            return "bugfix"
+
+        # 性能优化
+        perf_keywords = ["perf", "optim", "speed", "memory", "alloc", "cache", "lazy", "async", "benchmark"]
+        if any(k in text for k in perf_keywords):
+            return "perf"
+
+        # 重构
+        refactor_keywords = ["refactor", "clean", "restructure", "reorg", "move", "rename", "deprecat", "remove dead", "simplify"]
+        refactor_labels = ["refactor", "type:refactor", "kind/refactor"]
+        if any(k in text for k in refactor_keywords) or any(k in all_labels for k in refactor_labels):
+            return "refactor"
+
+        # 新功能
+        feature_keywords = ["feat", "add", "new", "implement", "support", "introduc", "create", "enabl"]
+        feature_labels = ["feature", "enhancement", "type:feature", "kind/feature"]
+        if any(k in text for k in feature_keywords) or any(k in all_labels for k in feature_labels):
+            return "feature"
+
+        return "other"
+
+    @staticmethod
+    def _classify_file_type(filename: str) -> str:
+        """按文件扩展名分类文件类型"""
+        ext_map = {
+            ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
+            ".jsx": "javascript", ".java": "java", ".go": "go", ".rs": "rust",
+            ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
+            ".rb": "ruby", ".php": "php", ".swift": "swift", ".kt": "kotlin",
+            ".scala": "scala", ".cs": "csharp", ".m": "objc", ".mm": "objc",
+            ".css": "style", ".scss": "style", ".less": "style", ".html": "markup",
+            ".xml": "markup", ".yaml": "config", ".yml": "config", ".json": "config",
+            ".toml": "config", ".ini": "config", ".cfg": "config", ".conf": "config",
+            ".sh": "script", ".bash": "script", ".zsh": "script",
+            ".sql": "database", ".proto": "protobuf",
+            ".md": "docs", ".rst": "docs", ".txt": "docs",
+        }
+        for ext, lang in ext_map.items():
+            if filename.endswith(ext):
+                return lang
+        return "other"
+
+    async def get_code_change_insight(self, owner: str, repo: str,
+                                       start_date: str = None, end_date: str = None,
+                                       granularity: str = "week") -> Dict[str, Any]:
+        """
+        生成代码变更深度洞察报告
+        按时间分桶，对每个阶段分类变更内容，生成阶段性摘要
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            now = datetime.now()
+            if not end_date:
+                end_date = now.strftime("%Y-%m-%d")
+            if not start_date:
+                start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+
+            # 获取时间范围内的 PR 详情
+            pr_query = {"owner": owner, "repo": repo, "data.created_at": {"$gte": start_date, "$lte": end_date}}
+            pr_docs = await self.db['pr_details'].find(pr_query, {"_id": 0}).to_list(length=None)
+
+            # 获取对应的 pr_files
+            pr_numbers = [doc["pr_number"] for doc in pr_docs]
+            files_map = {}
+            if pr_numbers:
+                async for fdoc in self.db['pr_files'].find(
+                    {"owner": owner, "repo": repo, "pr_number": {"$in": pr_numbers}},
+                    {"pr_number": 1, "data": 1, "_id": 0}
+                ):
+                    files_map[fdoc["pr_number"]] = fdoc.get("data", [])
+
+            # 分类每个 PR
+            classified_prs = []
+            category_counts = {}
+            file_type_counts = {}
+            total_additions = 0
+            total_deletions = 0
+
+            for doc in pr_docs:
+                pr_num = doc.get("pr_number")
+                pr_data = doc.get("data", {})
+                title = pr_data.get("title", "")
+                body = pr_data.get("body", "") or ""
+                labels = [l.get("name", "") for l in pr_data.get("labels", []) if isinstance(l, dict)]
+                created_at = pr_data.get("created_at", "")
+                user = (pr_data.get("user") or {}).get("login", "")
+                state = pr_data.get("state", "")
+                additions = pr_data.get("additions", 0) or 0
+                deletions = pr_data.get("deletions", 0) or 0
+                merged = pr_data.get("merged", False)
+
+                # 获取文件列表
+                pr_files = files_map.get(pr_num, [])
+                filenames = [f.get("filename", "") for f in pr_files if isinstance(f, dict)]
+
+                # 分类
+                category = self._classify_change(title, body, filenames, labels)
+                file_types = [self._classify_file_type(fn) for fn in filenames]
+
+                total_additions += additions
+                total_deletions += deletions
+
+                # 统计分类
+                category_counts[category] = category_counts.get(category, 0) + 1
+                for ft in file_types:
+                    file_type_counts[ft] = file_type_counts.get(ft, 0) + 1
+
+                classified_prs.append({
+                    "pr_number": pr_num, "title": title, "category": category,
+                    "user": user, "state": state, "merged": merged,
+                    "created_at": created_at,
+                    "additions": additions, "deletions": deletions,
+                    "changed_files": len(filenames),
+                    "file_types": list(set(file_types)),
+                })
+
+            # 按时间分桶
+            periods = self._bucket_prs_by_time(classified_prs, granularity)
+
+            # 生成阶段性摘要
+            for period in periods:
+                period["summary"] = self._generate_period_summary(period)
+
+            # 整体摘要
+            overall_summary = self._generate_overall_summary(
+                classified_prs, category_counts, file_type_counts,
+                total_additions, total_deletions, start_date, end_date
+            )
+
+            return {
+                "owner": owner, "repo": repo,
+                "start_date": start_date, "end_date": end_date,
+                "granularity": granularity,
+                "total_prs": len(classified_prs),
+                "category_counts": category_counts,
+                "file_type_counts": dict(sorted(file_type_counts.items(), key=lambda x: x[1], reverse=True)[:15]),
+                "total_additions": total_additions,
+                "total_deletions": total_deletions,
+                "periods": periods,
+                "overall_summary": overall_summary,
+                "generated_at": now.isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"生成代码变更洞察失败: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
+    def _bucket_prs_by_time(classified_prs: List[Dict], granularity: str) -> List[Dict[str, Any]]:
+        """按时间分桶"""
+        buckets = {}
+        for pr in classified_prs:
+            created = pr.get("created_at", "")[:10]  # YYYY-MM-DD
+            if not created:
+                continue
+            try:
+                dt = datetime.fromisoformat(created)
+            except ValueError:
+                continue
+
+            if granularity == "month":
+                key = dt.strftime("%Y-%m")
+            elif granularity == "week":
+                key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
+            else:
+                key = created
+
+            if key not in buckets:
+                buckets[key] = {"period": key, "prs": [], "category_counts": {}, "additions": 0, "deletions": 0}
+            bucket = buckets[key]
+            bucket["prs"].append(pr)
+            bucket["additions"] += pr.get("additions", 0)
+            bucket["deletions"] += pr.get("deletions", 0)
+            cat = pr.get("category", "other")
+            bucket["category_counts"][cat] = bucket["category_counts"].get(cat, 0) + 1
+
+        return [buckets[k] for k in sorted(buckets.keys())]
+
+    @staticmethod
+    def _generate_period_summary(period: Dict) -> str:
+        """生成单个时间阶段的自然语言摘要"""
+        prs = period.get("prs", [])
+        cats = period.get("category_counts", {})
+        additions = period.get("additions", 0)
+        deletions = period.get("deletions", 0)
+        period_key = period.get("period", "")
+
+        if not prs:
+            return f"{period_key}: 无变更"
+
+        parts = [f"{len(prs)} 个 PR"]
+        cat_parts = []
+        cat_names = {
+            "feature": "新功能", "bugfix": "Bug修复", "refactor": "重构",
+            "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化", "other": "其他",
+        }
+        for cat, count in sorted(cats.items(), key=lambda x: x[1], reverse=True):
+            name = cat_names.get(cat, cat)
+            cat_parts.append(f"{name} {count}")
+
+        parts.append("（" + "、".join(cat_parts) + "）")
+        parts.append(f"+{additions}/-{deletions}")
+
+        # 列出关键 PR 标题（最多 3 个）
+        key_prs = []
+        for pr in prs[:5]:
+            title = pr.get("title", "")
+            if title:
+                key_prs.append(f"#{pr.get('pr_number', '?')} {title[:60]}")
+        if key_prs:
+            parts.append("\n  " + "; ".join(key_prs))
+
+        return f"{period_key}: " + " ".join(parts)
+
+    @staticmethod
+    def _generate_overall_summary(prs: List[Dict], category_counts: Dict,
+                                    file_type_counts: Dict, total_add: int, total_del: int,
+                                    start_date: str, end_date: str) -> str:
+        """生成整体自然语言摘要"""
+        cat_names = {
+            "feature": "新功能", "bugfix": "Bug修复", "refactor": "重构",
+            "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化", "other": "其他",
+        }
+
+        lines = [f"📊 {start_date} ~ {end_date} 项目变更洞察"]
+        lines.append(f"共 {len(prs)} 个 PR，+{total_add}/-{total_del} 行变更")
+
+        # 分类统计
+        cat_parts = []
+        for cat, count in sorted(category_counts.items(), key=lambda x: x[1], reverse=True):
+            name = cat_names.get(cat, cat)
+            pct = round(count / len(prs) * 100) if prs else 0
+            cat_parts.append(f"{name} {count}({pct}%)")
+        lines.append("变更类型：" + "、".join(cat_parts))
+
+        # Top 文件类型
+        top_types = sorted(file_type_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        type_parts = [f"{t} {c}" for t, c in top_types]
+        lines.append("涉及语言：" + "、".join(type_parts))
+
+        # Top 贡献者
+        user_counts = {}
+        for pr in prs:
+            user = pr.get("user", "")
+            if user:
+                user_counts[user] = user_counts.get(user, 0) + 1
+        top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        if top_users:
+            user_parts = [f"{u}({c})" for u, c in top_users]
+            lines.append("主要贡献者：" + "、".join(user_parts))
+
+        return "\n".join(lines)
