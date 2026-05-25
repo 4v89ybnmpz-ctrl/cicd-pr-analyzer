@@ -6,6 +6,7 @@ import {
   AlertOutlined, WarningOutlined, InfoCircleOutlined,
   ThunderboltOutlined, FieldTimeOutlined, TeamOutlined, HeartOutlined,
 } from '@ant-design/icons'
+import * as api from '../api'
 
 const SEVERITY_CONFIG = {
   critical: { color: '#ff4d4f', icon: <AlertOutlined />, label: '严重', tagColor: 'error' },
