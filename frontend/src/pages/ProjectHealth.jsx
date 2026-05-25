@@ -6,6 +6,7 @@ import {
 import {
   HeartOutlined, DashboardOutlined, FieldTimeOutlined,
   CheckCircleOutlined, TeamOutlined, AlertOutlined,
+  QuestionCircleOutlined,
 } from '@ant-design/icons'
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
@@ -25,6 +26,43 @@ const DIM_ICONS = {
   '贡献者多样性': <TeamOutlined />,
   'Issue 响应速度': <AlertOutlined />,
 }
+
+const HEALTH_RULES = (
+  <div style={{ maxWidth: 520, fontSize: 12, lineHeight: 1.8 }}>
+    <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>健康度评分规则</div>
+    <div style={{ color: '#999', marginBottom: 8 }}>6 个维度加权评分，仅对有数据的维度归一化权重后求和</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>① PR 存活时间（权重 0.20）</div>
+    <div>数据源：<code>pr_details</code>，计算 created_at → merged_at 的小时数</div>
+    <div>评分：≤24h=100, ≤72h=80, ≤168h(1周)=60, ≤336h(2周)=40, ≤720h(1月)=20, 更久≈5</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>② Merge 率（权重 0.15）</div>
+    <div>数据源：<code>pr_details</code>，merged数 / 已关闭数</div>
+    <div>评分：60%-85% 区间=100，&lt;60% 按比例递减，&gt;85% 按超出量递减</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>③ Review 覆盖率（权重 0.25）</div>
+    <div>数据源：<code>pr_reviews</code> + <code>pr_details</code>，有 review 的 PR / 总 PR</div>
+    <div>评分：覆盖率直接作为分数（85% → 85 分）</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>④ CI 成功率（权重 0.20）</div>
+    <div>数据源：<code>cicd_results</code>，success_count / total</div>
+    <div>评分：成功率直接作为分数（90% → 90 分）</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>⑤ 贡献者多样性（权重 0.10）</div>
+    <div>数据源：<code>pr_details</code>，Top3 贡献者 PR 数 / 总 PR 数</div>
+    <div>评分：≤30%=100, ≤50%=80, ≤70%=50, ≤90%=20, &gt;90%≈5（Bus Factor）</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>⑥ Issue 响应速度（权重 0.10）</div>
+    <div>数据源：<code>issues</code>，计算 created_at → closed_at 的小时数</div>
+    <div>评分：≤24h=100, ≤72h=80, ≤168h=60, ≤336h=40, ≤720h=20, 更久≈5</div>
+
+    <div style={{ borderTop: '1px solid #f0f0f0', marginTop: 10, paddingTop: 8 }}>
+      <div style={{ fontWeight: 600 }}>综合评分 = Σ(维度分数 × 归一化权重)</div>
+      <div style={{ color: '#999', marginTop: 4 }}>评级：≥90=A, ≥75=B, ≥60=C, ≥40=D, &lt;40=F</div>
+      <div style={{ color: '#999' }}>无数据的维度不参与计算，权重自动归一化</div>
+    </div>
+  </div>
+)
 
 function GradeTag({ grade }) {
   if (!grade) return null
@@ -88,6 +126,13 @@ export default function ProjectHealth() {
       <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 24 }}>
         <Col>
           <h2 style={{ margin: 0 }}><HeartOutlined style={{ marginRight: 8, color: '#ff4d4f' }} />项目健康度</h2>
+        </Col>
+        <Col>
+          <Tooltip title={HEALTH_RULES} placement="bottomLeft" overlayStyle={{ maxWidth: 560 }} color="#fff" overlayInnerStyle={{ color: '#333' }}>
+            <Tag style={{ cursor: 'pointer', fontSize: 13, padding: '2px 10px' }}>
+              <QuestionCircleOutlined /> 逻辑介绍
+            </Tag>
+          </Tooltip>
         </Col>
         <Col flex="auto" />
         <Col>

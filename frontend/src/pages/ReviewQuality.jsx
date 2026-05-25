@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import {
   CheckCircleOutlined, ClockCircleOutlined, AuditOutlined,
-  TeamOutlined, FileTextOutlined,
+  TeamOutlined, FileTextOutlined, QuestionCircleOutlined,
 } from '@ant-design/icons'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
@@ -17,6 +17,38 @@ const { RangePicker } = DatePicker
 
 const GRADE_COLORS = { A: '#52c41a', B: '#1890ff', C: '#faad14', D: '#fa541c', F: '#ff4d4f' }
 const PIE_COLORS = ['#52c41a', '#ff4d4f', '#1890ff', '#d9d9d9', '#faad14']
+
+const REVIEW_RULES = (
+  <div style={{ maxWidth: 520, fontSize: 12, lineHeight: 1.8 }}>
+    <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Review 质量评估规则</div>
+    <div style={{ color: '#999', marginBottom: 8 }}>从覆盖率、延迟、深度、状态分布四个维度评估 Review 质量</div>
+
+    <div style={{ fontWeight: 600, color: '#1890ff', marginTop: 8 }}>① 覆盖率</div>
+    <div>数据源：<code>pr_details</code> + <code>pr_reviews</code></div>
+    <div>计算：有 review 的 PR 数 / PR 总数 × 100%</div>
+    <div>评级：≥90%=A, ≥70%=B, ≥50%=C, ≥30%=D, &lt;30%=F</div>
+
+    <div style={{ fontWeight: 600, color: '#faad14', marginTop: 8 }}>② 首次 Review 延迟</div>
+    <div>数据源：<code>pr_reviews.submitted_at</code> − <code>pr_details.created_at</code></div>
+    <div>计算：每个 PR 最早 review 时间 − PR 创建时间，取平均/中位/P90</div>
+    <div>评级：≤4h=A, ≤12h=B, ≤24h=C, ≤48h=D, &gt;48h=F</div>
+
+    <div style={{ fontWeight: 600, color: '#52c41a', marginTop: 8 }}>③ Review 深度</div>
+    <div>数据源：<code>pr_reviews</code>，统计 body 长度</div>
+    <div>计算：有评论内容的 review 数 / 总 review 数 × 100%（排除仅 APPROVED/PENDING 的空 body）</div>
+    <div>评级：≥80%=A, ≥60%=B, ≥40%=C, ≥20%=D, &lt;20%=F</div>
+
+    <div style={{ fontWeight: 600, color: '#722ed1', marginTop: 8 }}>④ 状态分布</div>
+    <div>数据源：<code>pr_reviews</code>，按 state 字段分组</div>
+    <div>五种状态：APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING</div>
+    <div>额外洞察：CHANGES_REQUESTED 占比 &gt;30% 时触发 D 级预警</div>
+
+    <div style={{ borderTop: '1px solid #f0f0f0', marginTop: 10, paddingTop: 8, color: '#999' }}>
+      <div>Top Reviewer：按 review 数降序，展示 review 数、APPROVED/CHANGES_REQ 数、平均评论长度</div>
+      <div>趋势：按周/月聚合，追踪有 review 的 PR 数、review 总数、平均 review/PR</div>
+    </div>
+  </div>
+)
 
 function GradeBadge({ grade }) {
   if (!grade) return null
@@ -110,6 +142,13 @@ export default function ReviewQuality() {
       <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 24 }}>
         <Col>
           <h2 style={{ margin: 0 }}><AuditOutlined style={{ marginRight: 8, color: '#1890ff' }} />Review 质量评估</h2>
+        </Col>
+        <Col>
+          <Tooltip title={REVIEW_RULES} placement="bottomLeft" overlayStyle={{ maxWidth: 560 }} color="#fff" overlayInnerStyle={{ color: '#333' }}>
+            <Tag style={{ cursor: 'pointer', fontSize: 13, padding: '2px 10px' }}>
+              <QuestionCircleOutlined /> 逻辑介绍
+            </Tag>
+          </Tooltip>
         </Col>
         <Col flex="auto" />
         <Col>
