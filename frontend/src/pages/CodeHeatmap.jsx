@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Card, Row, Col, Spin, Alert, Tag, Space, Select, InputNumber,
-  Table, Tooltip, Tabs, Statistic, Button,
+  Table, Tooltip, Tabs, Statistic, Button, message,
 } from 'antd'
 import {
   HeatMapOutlined, FileTextOutlined, FolderOutlined,
@@ -47,6 +47,7 @@ export default function CodeHeatmap() {
   const [topN, setTopN] = useState(50)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [fetchingFiles, setFetchingFiles] = useState(false)
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -83,12 +84,18 @@ export default function CodeHeatmap() {
 
   const fetchFiles = async () => {
     if (!selected) return
+    setFetchingFiles(true)
+    message.loading({ content: `正在获取 ${selected.owner}/${selected.repo} 的 PR 变更文件...`, key: 'fetch', duration: 0 })
     try {
-      await api.fetchPrFiles(selected.owner, selected.repo, { limit: 30 })
+      const res = await api.fetchPrFiles(selected.owner, selected.repo, { limit: 30 })
+      const d = res.data
+      message.success({ content: `获取完成: ${d.success_count || 0} 成功, ${d.failed_count || 0} 失败`, key: 'fetch' })
       fetchData()
     } catch (e) {
+      message.error({ content: `获取失败: ${e.message}`, key: 'fetch' })
       setError(e.message)
     }
+    setFetchingFiles(false)
   }
 
   const fileColumns = [
@@ -153,7 +160,7 @@ export default function CodeHeatmap() {
               options={projects.map(p => ({ value: `${p.owner}/${p.repo}`, label: `${p.owner}/${p.repo}` }))}
             />
             <InputNumber min={10} max={200} value={topN} onChange={v => setTopN(v || 50)} style={{ width: 70 }} addonAfter="条" />
-            <Button icon={<ThunderboltOutlined />} onClick={fetchFiles} loading={loading}>获取文件数据</Button>
+            <Button icon={<ThunderboltOutlined />} onClick={fetchFiles} loading={fetchingFiles}>获取文件数据</Button>
           </Space>
         </Col>
       </Row>
