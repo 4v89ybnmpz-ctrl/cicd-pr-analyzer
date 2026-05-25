@@ -9,6 +9,8 @@ export const getDatabaseStats = () => api.get('/database/stats')
 
 export const getProjectsOverview = () => api.get('/database/projects/overview')
 
+export const registerProject = (owner, repo) => api.post('/database/projects/register', null, { params: { owner, repo } })
+
 export const getRepoStats = (owner, repo) => api.get(`/github/repos/${owner}/${repo}/stats`)
 
 export const getGitRepoStatus = (owner, repo) => api.get(`/git/repos/${owner}/${repo}/status`)
@@ -58,12 +60,27 @@ export const triggerCicdAnalysis = (owner, repo) =>
 export const getCicdReport = (owner, repo) =>
   api.get(`/analysis/cicd/report/${owner}/${repo}`)
 
+export const getReviewQuality = (owner, repo, params) =>
+  api.get(`/analysis/review-quality/${owner}/${repo}`, { params })
+
+export const getReviewQualityTrends = (owner, repo, params) =>
+  api.get(`/analysis/review-quality/${owner}/${repo}/trends`, { params })
+
 export const getCommenterProfiles = (owner, repo, limit = 20) =>
   api.get(`/github/prs/${owner}/${repo}/commenters/profiles?limit=${limit}`)
+
+export const getDeveloperRelations = (owner, repo) => api.get('/database/developer-relations', { params: { owner, repo } })
+
+export const getCommentProjects = () => {
+  // 复用 comments 的 aggregate 来获取有评论数据的项目
+  return api.get('/database/comments/projects')
+}
 
 export const getUserProfiles = (params) => api.get('/database/profiles', { params })
 
 export const getIssues = (params) => api.get('/database/issues', { params })
+
+export const getIssueProjects = () => api.get('/database/issues/projects')
 
 export const fetchGithubIssues = (owner, repo, params) =>
   api.get(`/github/issues/${owner}/${repo}`, { params })
@@ -84,6 +101,8 @@ export const updateComments = (owner, repo) =>
   api.post(`/github/prs/${owner}/${repo}/comments/update`)
 
 export const getIssueTimelines = (params) => api.get('/database/issue-timelines', { params })
+
+export const getIssueTimelineProjects = () => api.get('/database/issue-timelines/projects')
 
 export const fetchIssueTimelines = (owner, repo, limit) =>
   api.get(`/github/issues/${owner}/${repo}/timelines?limit=${limit}`)
@@ -110,5 +129,23 @@ export const asyncFetchTimelines = (owner, repo, params) =>
 
 export const asyncFetchProfiles = (owner, repo, params) =>
   api.post(`/github/tasks/profiles/${owner}/${repo}`, null, { params })
+
+// Agent API
+export const agentAnalyze = (params) => api.post('/agent/analyze', params, { timeout: 300000 })
+export const agentAnalyzeAsync = (params) => api.post('/agent/analyze/async', params, { timeout: 30000 })
+export const getAgentStatus = (taskId) => api.get(`/agent/status/${taskId}`)
+export const getAgentTasks = () => api.get('/agent/tasks')
+export const getAgentHealth = () => api.get('/health')
+export const getAgentsStatus = () => api.get('/agent/agents/status')
+export const getAgentBlackboard = () => api.get('/agent/blackboard')
+export const getAgentTraces = (params) => api.get('/agent/traces', { params })
+export const getAgentTrace = (traceId) => api.get(`/agent/traces/${traceId}`)
+export const getAgentProjectTraces = (owner, repo) => api.get(`/agent/traces/project/${owner}/${repo}`)
+export const getAgentCost = () => api.get('/agent/cost')
+export const getAgentArtifacts = (owner, repo) => api.get(`/agent/artifacts/${owner}/${repo}`)
+export const getAgentArtifactSnapshot = (owner, repo) => api.get(`/agent/artifacts/${owner}/${repo}/snapshot`)
+export const agentChat = (params) => api.post('/agent/chat', params, { timeout: 120000 })
+export const getLlmConfig = () => api.get('/agent/llm/config')
+export const updateLlmConfig = (params) => api.put('/agent/llm/config', null, { params })
 
 export default api
