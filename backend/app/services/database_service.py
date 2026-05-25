@@ -1926,52 +1926,57 @@ class DatabaseService:
             return {"error": str(e)}
 
     async def _compute_pr_lifetime_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
-        """PR 存活时间评分：越短越好"""
-        query = {"owner": owner, "repo": repo}
+        """PR 存活时间评分：越短越好，用 Python 计算避免 MongoDB 聚合管道兼容问题"""
+        query = {"owner": owner, "repo": repo, "data.merged_at": {"$ne": None}}
         if time_filter:
             query["data.created_at"] = time_filter
 
-        pipeline = [
-            {"$match": query},
-            {"$addFields": {
-                "created": {"$dateFromString": {"dateString": {"$ifNull": ["$data.created_at", "2000-01-01T00:00:00Z"]}}},
-                "closed": {"$dateFromString": {"dateString": {"$ifNull": [
-                    {"$ifNull": ["$data.merged_at", "$data.closed_at"]}, "2000-01-01T00:00:00Z"
-                ]}}},
-            }},
-            {"$addFields": {"lifetime_hours": {"$divide": [{"$subtract": ["$closed", "created"]}, 3600000]}}},
-            {"$match": {"lifetime_hours": {"$gte": 0, "$lt": 7200}}},
-            {"$group": {"_id": None, "avg_hours": {"$avg": "$lifetime_hours"}, "count": {"$sum": 1}}},
-        ]
-
         try:
-            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=1)
+            docs = await self.db['pr_details'].find(
+                query, {"data.created_at": 1, "data.merged_at": 1, "_id": 0}
+            ).to_list(length=None)
         except Exception:
-            result = []
+            docs = []
 
-        if not result:
+        if not docs:
             return {"name": "PR 存活时间", "value": None, "score": 0, "weight": 0.2, "weighted_score": 0, "grade": None, "description": "无数据"}
 
-        avg_hours = result[0]["avg_hours"]
-        count = result[0]["count"]
-        # 评分：24h 内=100, 72h=80, 168h(1周)=60, 336h(2周)=40, 720h(1月)=20, 更久=10
+        lifetimes = []
+        for doc in docs:
+            try:
+                created_str = doc.get("data", {}).get("created_at", "")[:19]
+                merged_str = doc.get("data", {}).get("merged_at", "")[:19]
+                if not created_str or not merged_str:
+                    continue
+                created_dt = datetime.fromisoformat(created_str)
+                merged_dt = datetime.fromisoformat(merged_str)
+                hours = (merged_dt - created_dt).total_seconds() / 3600
+                if 0 <= hours < 7200:
+                    lifetimes.append(hours)
+            except (ValueError, TypeError):
+                continue
+
+        if not lifetimes:
+            return {"name": "PR 存活时间", "value": None, "score": 0, "weight": 0.2, "weighted_score": 0, "grade": None, "description": "无有效数据"}
+
+        avg_hours = sum(lifetimes) / len(lifetimes)
+        count = len(lifetimes)
         if avg_hours <= 24:
             score = 100
         elif avg_hours <= 72:
-            score = 80 + (72 - avg_hours) / (72 - 24) * 20
+            score = 80 + (72 - avg_hours) / 48 * 20
         elif avg_hours <= 168:
-            score = 60 + (168 - avg_hours) / (168 - 72) * 20
+            score = 60 + (168 - avg_hours) / 96 * 20
         elif avg_hours <= 336:
-            score = 40 + (336 - avg_hours) / (336 - 168) * 20
+            score = 40 + (336 - avg_hours) / 168 * 20
         elif avg_hours <= 720:
-            score = 20 + (720 - avg_hours) / (720 - 336) * 20
+            score = 20 + (720 - avg_hours) / 384 * 20
         else:
             score = max(5, 20 - (avg_hours - 720) / 720 * 10)
         score = round(score, 2)
 
         grade = self._score_to_grade(score)
         desc = f"平均存活 {avg_hours:.1f}h ({avg_hours/24:.1f}天), 共 {count} 个 PR"
-
         return {"name": "PR 存活时间", "value": round(avg_hours, 1), "score": score, "weight": 0.2, "weighted_score": 0, "grade": grade, "description": desc}
 
     async def _compute_merge_rate_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
@@ -2096,34 +2101,42 @@ class DatabaseService:
         return {"name": "贡献者多样性", "value": top3_ratio, "score": score, "weight": 0.1, "weighted_score": 0, "grade": grade, "description": desc}
 
     async def _compute_issue_response_score(self, owner: str, repo: str, time_filter: dict) -> Dict[str, Any]:
-        """Issue 响应速度评分"""
+        """Issue 响应速度评分，用 Python 计算"""
         query = {"owner": owner, "repo": repo, "state": "closed", "closed_at": {"$ne": None}}
         if time_filter:
             query["created_at"] = time_filter
 
-        pipeline = [
-            {"$match": query},
-            {"$addFields": {
-                "created": {"$dateFromString": {"dateString": "$created_at"}},
-                "closed": {"$dateFromString": {"dateString": "$closed_at"}},
-            }},
-            {"$addFields": {"lifetime_hours": {"$divide": [{"$subtract": ["$closed", "created"]}, 3600000]}}},
-            {"$match": {"lifetime_hours": {"$gte": 0, "$lt": 8760}}},
-            {"$group": {"_id": None, "avg_hours": {"$avg": "$lifetime_hours"}, "count": {"$sum": 1}}},
-        ]
-
         try:
-            result = await self.db['issues'].aggregate(pipeline).to_list(length=1)
+            docs = await self.db['issues'].find(
+                query, {"created_at": 1, "closed_at": 1, "_id": 0}
+            ).to_list(length=None)
         except Exception:
-            result = []
+            docs = []
 
-        if not result:
+        if not docs:
             return {"name": "Issue 响应速度", "value": None, "score": 0, "weight": 0.1, "weighted_score": 0, "grade": None, "description": "无已关闭 Issue 数据"}
 
-        avg_hours = result[0]["avg_hours"]
-        count = result[0]["count"]
+        lifetimes = []
+        for doc in docs:
+            try:
+                created_str = (doc.get("created_at") or "")[:19]
+                closed_str = (doc.get("closed_at") or "")[:19]
+                if not created_str or not closed_str:
+                    continue
+                created_dt = datetime.fromisoformat(created_str)
+                closed_dt = datetime.fromisoformat(closed_str)
+                hours = (closed_dt - created_dt).total_seconds() / 3600
+                if 0 <= hours < 8760:
+                    lifetimes.append(hours)
+            except (ValueError, TypeError):
+                continue
 
-        # 24h=100, 72h=80, 168h=60, 336h=40, 720h=20
+        if not lifetimes:
+            return {"name": "Issue 响应速度", "value": None, "score": 0, "weight": 0.1, "weighted_score": 0, "grade": None, "description": "无有效数据"}
+
+        avg_hours = sum(lifetimes) / len(lifetimes)
+        count = len(lifetimes)
+
         if avg_hours <= 24:
             score = 100
         elif avg_hours <= 72:
@@ -2140,7 +2153,6 @@ class DatabaseService:
 
         grade = self._score_to_grade(score)
         desc = f"平均关闭时间 {avg_hours:.1f}h ({avg_hours/24:.1f}天), 共 {count} 个 Issue"
-
         return {"name": "Issue 响应速度", "value": round(avg_hours, 1), "score": score, "weight": 0.1, "weighted_score": 0, "grade": grade, "description": desc}
 
     @staticmethod
