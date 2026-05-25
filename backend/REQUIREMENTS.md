@@ -513,10 +513,10 @@
 - [ ] 代码质量趋势 — 追踪项目代码质量指标随时间的变化趋势
 
 ### 29.2 Review 质量评估
-- [ ] Review 深度分析 — 统计 review 评论行数、review 耗时、review 轮次
-- [ ] Review 覆盖率 — 有 review 的 PR 占比、reviewer 数量分布
-- [ ] Review 延迟统计 — 从 PR 创建到首次 review 的平均等待时间
-- [ ] Review 质量 API — `GET /analysis/review-quality/{owner}/{repo}`
+- [x] Review 深度分析 — 统计 review 评论行数、review 耗时、review 轮次
+- [x] Review 覆盖率 — 有 review 的 PR 占比、reviewer 数量分布
+- [x] Review 延迟统计 — 从 PR 创建到首次 review 的平均等待时间
+- [x] Review 质量 API — `GET /analysis/review-quality/{owner}/{repo}`
 
 ### 29.3 项目健康度评分
 - [ ] 健康度指标体系 — 综合评分维度:

@@ -1251,7 +1251,7 @@ class DatabaseService:
                     result[key] = doc["count"]
                 return result
 
-            pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, commits_counts = await asyncio.gather(
+            pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, pr_commits_counts, git_log_counts = await asyncio.gather(
                 _group_count("pr_data"),
                 _group_count("pr_comments"),
                 _group_count("issues"),
@@ -1259,11 +1259,15 @@ class DatabaseService:
                 _group_count("pr_details"),
                 _group_count("pr_reviews"),
                 _group_count("pr_commits"),
+                _group_count("git_log_commits"),
             )
 
             all_projects = set()
-            for m in [pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, commits_counts]:
+            for m in [pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, pr_commits_counts, git_log_counts]:
                 all_projects.update(m.keys())
+
+            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+                all_projects.add(f"{doc['owner']}/{doc['repo']}")
 
             overview = []
             for project_key in sorted(all_projects):
@@ -1276,10 +1280,11 @@ class DatabaseService:
                 timeline_count = timeline_counts.get(project_key, 0)
                 details_count = details_counts.get(project_key, 0)
                 reviews_count = reviews_counts.get(project_key, 0)
-                commits_count = commits_counts.get(project_key, 0)
+                git_log_total = git_log_counts.get(project_key, 0)
+                commits_count = git_log_total or pr_commits_counts.get(project_key, 0)
 
                 last_updated = None
-                for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details"]:
+                for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details", "git_log_summaries", "git_log_commits"]:
                     if coll_name not in collection_names:
                         continue
                     doc = await self.db[coll_name].find_one(
@@ -1302,6 +1307,7 @@ class DatabaseService:
                     "details_count": details_count,
                     "reviews_count": reviews_count,
                     "commits_count": commits_count,
+                    "git_log_total": git_log_total,
                     "last_updated": last_updated,
                 })
 
@@ -1407,3 +1413,431 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"聚合统计失败: {e}")
             return {"error": str(e)}
+
+    # ====================
+    # Review 质量评估
+    # ====================
+
+    async def get_review_quality_report(self, owner: str, repo: str,
+                                         start_date: str = None, end_date: str = None,
+                                         top_n: int = 10) -> Dict[str, Any]:
+        """
+        生成 Review 质量评估报告
+        聚合 pr_reviews + pr_details 数据，计算覆盖率/延迟/深度/分布
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            # 构建时间过滤条件
+            time_filter = {}
+            if start_date:
+                time_filter["$gte"] = start_date
+            if end_date:
+                time_filter["$lte"] = end_date
+
+            # 1. Review 覆盖率
+            coverage = await self._compute_review_coverage(owner, repo, time_filter)
+
+            # 2. Review 延迟
+            delay = await self._compute_review_delay(owner, repo, time_filter)
+
+            # 3. Review 深度
+            depth = await self._compute_review_depth(owner, repo, time_filter)
+
+            # 4. Review 状态分布
+            state_dist = await self._compute_review_state_distribution(owner, repo, time_filter)
+
+            # 5. Top Reviewer
+            top_reviewers = await self._compute_top_reviewers(owner, repo, time_filter, top_n)
+
+            # 6. 洞察项
+            insights = self._build_review_quality_insights(coverage, delay, depth, state_dist)
+
+            return {
+                "owner": owner, "repo": repo,
+                "start_date": start_date, "end_date": end_date,
+                "coverage": coverage,
+                "delay": delay,
+                "depth": depth,
+                "state_distribution": state_dist,
+                "top_reviewers": top_reviewers,
+                "insights": insights,
+                "generated_at": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"生成 Review 质量报告失败: {e}")
+            return {"error": str(e)}
+
+    async def _compute_review_coverage(self, owner: str, repo: str,
+                                        time_filter: dict) -> Dict[str, Any]:
+        """计算 Review 覆盖率: 有 review 的 PR 占比"""
+        # 从 pr_details 获取 PR 总数（代表已获取详情的 PR）
+        details_query = {"owner": owner, "repo": repo}
+        if time_filter:
+            details_query["data.created_at"] = time_filter
+
+        total_prs = await self.db['pr_details'].count_documents(details_query)
+
+        # 从 pr_reviews 获取有 review 的 PR 数
+        reviews_query = {"owner": owner, "repo": repo}
+        prs_with_review = await self.db['pr_reviews'].count_documents(reviews_query)
+
+        # 计算平均 reviewer 数
+        if prs_with_review > 0:
+            reviewer_pipeline = [
+                {"$match": reviews_query},
+                {"$project": {"reviewer_count": {"$size": "$data"}}},
+                {"$group": {"_id": None, "avg": {"$avg": "$reviewer_count"}}},
+            ]
+            reviewer_stats = await self.db['pr_reviews'].aggregate(reviewer_pipeline).to_list(length=1)
+            avg_reviewers = round(reviewer_stats[0]["avg"], 2) if reviewer_stats else None
+        else:
+            avg_reviewers = None
+
+        prs_without_review = max(0, total_prs - prs_with_review)
+        coverage_rate = round(prs_with_review / total_prs * 100, 2) if total_prs > 0 else None
+
+        return {
+            "total_prs": total_prs,
+            "prs_with_review": prs_with_review,
+            "prs_without_review": prs_without_review,
+            "coverage_rate": coverage_rate,
+            "avg_reviewers_per_pr": avg_reviewers,
+        }
+
+    async def _compute_review_delay(self, owner: str, repo: str,
+                                     time_filter: dict) -> Dict[str, Any]:
+        """计算 Review 延迟: 首次 review 响应时间"""
+        reviews_query = {"owner": owner, "repo": repo}
+
+        # 获取所有 review 文档
+        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+
+        if not review_docs:
+            return {
+                "total_reviews": 0,
+                "avg_first_review_delay_hours": None,
+                "median_first_review_delay_hours": None,
+                "p90_first_review_delay_hours": None,
+                "avg_review_delay_hours": None,
+            }
+
+        # 获取对应 PR 的创建时间
+        pr_numbers = [doc["pr_number"] for doc in review_docs]
+        pr_created_map = {}
+        async for detail in self.db['pr_details'].find(
+            {"owner": owner, "repo": repo, "pr_number": {"$in": pr_numbers}},
+            {"pr_number": 1, "data.created_at": 1, "_id": 0}
+        ):
+            pr_created_map[detail["pr_number"]] = detail.get("data", {}).get("created_at")
+
+        # 计算每个 PR 的首次 review 延迟和所有 review 延迟
+        first_review_delays = []
+        all_review_delays = []
+        total_reviews = 0
+
+        for doc in review_docs:
+            pr_number = doc["pr_number"]
+            pr_created = pr_created_map.get(pr_number)
+            if not pr_created:
+                continue
+
+            try:
+                pr_created_dt = datetime.fromisoformat(pr_created.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+
+            reviews_data = doc.get("data", [])
+            if not isinstance(reviews_data, list):
+                continue
+
+            # 找到最早的 submitted_at
+            pr_first_delay = None
+            for review in reviews_data:
+                submitted_at = review.get("submitted_at")
+                if not submitted_at:
+                    continue
+                try:
+                    submitted_dt = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+
+                delay_hours = (submitted_dt - pr_created_dt).total_seconds() / 3600
+                if delay_hours >= 0:
+                    all_review_delays.append(delay_hours)
+                    total_reviews += 1
+                    if pr_first_delay is None or delay_hours < pr_first_delay:
+                        pr_first_delay = delay_hours
+
+            if pr_first_delay is not None:
+                first_review_delays.append(pr_first_delay)
+
+        # 计算统计量
+        def _percentile(data: list, p: float) -> Optional[float]:
+            if not data:
+                return None
+            sorted_data = sorted(data)
+            idx = int(len(sorted_data) * p / 100)
+            return round(sorted_data[min(idx, len(sorted_data) - 1)], 2)
+
+        return {
+            "total_reviews": total_reviews,
+            "avg_first_review_delay_hours": round(sum(first_review_delays) / len(first_review_delays), 2) if first_review_delays else None,
+            "median_first_review_delay_hours": _percentile(first_review_delays, 50),
+            "p90_first_review_delay_hours": _percentile(first_review_delays, 90),
+            "avg_review_delay_hours": round(sum(all_review_delays) / len(all_review_delays), 2) if all_review_delays else None,
+        }
+
+    async def _compute_review_depth(self, owner: str, repo: str,
+                                     time_filter: dict) -> Dict[str, Any]:
+        """计算 Review 深度: 评论长度、有内容占比"""
+        reviews_query = {"owner": owner, "repo": repo}
+
+        pipeline = [
+            {"$match": reviews_query},
+            {"$unwind": "$data"},
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "with_body": {"$sum": {"$cond": [{"$gt": [{"$strLenCP": {"$ifNull": ["$data.body", ""]}}, 0]}, 1, 0]}},
+                "avg_body_length": {"$avg": {"$strLenCP": {"$ifNull": ["$data.body", ""]}}},
+            }},
+        ]
+
+        try:
+            stats = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=1)
+        except Exception:
+            stats = []
+
+        if not stats:
+            return {
+                "total_reviews": 0,
+                "avg_body_length": None,
+                "reviews_with_body": 0,
+                "reviews_without_body": 0,
+                "body_rate": None,
+            }
+
+        s = stats[0]
+        total = s["total"]
+        with_body = s["with_body"]
+        without_body = total - with_body
+
+        return {
+            "total_reviews": total,
+            "avg_body_length": round(s["avg_body_length"], 2) if s.get("avg_body_length") else None,
+            "reviews_with_body": with_body,
+            "reviews_without_body": without_body,
+            "body_rate": round(with_body / total * 100, 2) if total > 0 else None,
+        }
+
+    async def _compute_review_state_distribution(self, owner: str, repo: str,
+                                                   time_filter: dict) -> Dict[str, Any]:
+        """计算 Review 状态分布"""
+        reviews_query = {"owner": owner, "repo": repo}
+
+        pipeline = [
+            {"$match": reviews_query},
+            {"$unwind": "$data"},
+            {"$group": {"_id": "$data.state", "count": {"$sum": 1}}},
+        ]
+
+        try:
+            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=None)
+        except Exception:
+            raw = []
+
+        by_state = {item["_id"]: item["count"] for item in raw if item["_id"]}
+
+        return {
+            "approved": by_state.get("APPROVED", 0),
+            "changes_requested": by_state.get("CHANGES_REQUESTED", 0),
+            "commented": by_state.get("COMMENTED", 0),
+            "dismissed": by_state.get("DISMISSED", 0),
+            "pending": by_state.get("PENDING", 0),
+        }
+
+    async def _compute_top_reviewers(self, owner: str, repo: str,
+                                       time_filter: dict, top_n: int = 10) -> List[Dict[str, Any]]:
+        """计算 Top Reviewer 统计"""
+        reviews_query = {"owner": owner, "repo": repo}
+
+        pipeline = [
+            {"$match": reviews_query},
+            {"$unwind": "$data"},
+            {"$group": {
+                "_id": "$data.user.login",
+                "review_count": {"$sum": 1},
+                "approved_count": {"$sum": {"$cond": [{"$eq": ["$data.state", "APPROVED"]}, 1, 0]}},
+                "changes_requested_count": {"$sum": {"$cond": [{"$eq": ["$data.state", "CHANGES_REQUESTED"]}, 1, 0]}},
+                "avg_body_length": {"$avg": {"$strLenCP": {"$ifNull": ["$data.body", ""]}}},
+            }},
+            {"$sort": {"review_count": -1}},
+            {"$limit": top_n},
+        ]
+
+        try:
+            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=top_n)
+        except Exception:
+            raw = []
+
+        return [
+            {
+                "user": item["_id"],
+                "review_count": item["review_count"],
+                "approved_count": item["approved_count"],
+                "changes_requested_count": item["changes_requested_count"],
+                "avg_body_length": round(item["avg_body_length"], 2) if item.get("avg_body_length") else None,
+                "avg_delay_hours": None,
+            }
+            for item in raw if item["_id"]
+        ]
+
+    def _build_review_quality_insights(self, coverage: dict, delay: dict,
+                                        depth: dict, state_dist: dict) -> List[Dict[str, Any]]:
+        """根据统计数据构建 Review 质量洞察项"""
+        insights = []
+
+        # 覆盖率洞察
+        coverage_rate = coverage.get("coverage_rate")
+        if coverage_rate is not None:
+            grade, suggestion = self._grade_review_coverage(coverage_rate)
+            insights.append({
+                "name": "Review 覆盖率",
+                "value": coverage_rate,
+                "grade": grade,
+                "description": f"共 {coverage.get('total_prs', 0)} 个 PR，{coverage.get('prs_with_review', 0)} 个有 review，覆盖率 {coverage_rate}%",
+                "suggestion": suggestion,
+            })
+
+        # 首次 review 延迟洞察
+        avg_delay = delay.get("avg_first_review_delay_hours")
+        if avg_delay is not None:
+            grade, suggestion = self._grade_review_delay(avg_delay)
+            insights.append({
+                "name": "首次 Review 延迟",
+                "value": avg_delay,
+                "grade": grade,
+                "description": f"首次 review 平均延迟 {avg_delay} 小时",
+                "suggestion": suggestion,
+            })
+
+        # Review 深度洞察
+        body_rate = depth.get("body_rate")
+        if body_rate is not None:
+            grade, suggestion = self._grade_review_depth(body_rate)
+            insights.append({
+                "name": "Review 深度",
+                "value": body_rate,
+                "grade": grade,
+                "description": f"有评论内容的 review 占比 {body_rate}%",
+                "suggestion": suggestion,
+            })
+
+        # 状态分布洞察
+        approved = state_dist.get("approved", 0)
+        changes_req = state_dist.get("changes_requested", 0)
+        total_states = approved + changes_req + state_dist.get("commented", 0)
+        if total_states > 0:
+            changes_rate = round(changes_req / total_states * 100, 2)
+            if changes_rate > 30:
+                insights.append({
+                    "name": "变更请求率",
+                    "value": changes_rate,
+                    "grade": "D",
+                    "description": f"CHANGES_REQUESTED 占比 {changes_rate}%，PR 质量可能需要提升",
+                    "suggestion": "建议加强 PR 提交前的自审，或拆分大 PR 为小 PR",
+                })
+
+        return insights
+
+    @staticmethod
+    def _grade_review_coverage(rate: float) -> tuple:
+        """Review 覆盖率评级"""
+        if rate >= 90:
+            return "A", "Review 覆盖率优秀，几乎所有 PR 都经过 review"
+        elif rate >= 70:
+            return "B", "Review 覆盖率良好，建议关注无 review 的 PR"
+        elif rate >= 50:
+            return "C", "近半数 PR 缺少 review，建议加强 review 流程"
+        elif rate >= 30:
+            return "D", "多数 PR 缺少 review，代码质量风险较高"
+        else:
+            return "F", "Review 覆盖率极低，建议强制要求 PR review"
+
+    @staticmethod
+    def _grade_review_delay(hours: float) -> tuple:
+        """首次 Review 延迟评级"""
+        if hours <= 4:
+            return "A", "Review 响应迅速"
+        elif hours <= 12:
+            return "B", "Review 响应及时"
+        elif hours <= 24:
+            return "C", "Review 响应偏慢，建议优化 review 流程"
+        elif hours <= 48:
+            return "D", "Review 响应很慢，影响开发效率"
+        else:
+            return "F", "Review 严重滞后，建议分配更多 reviewer 或拆分 PR"
+
+    @staticmethod
+    def _grade_review_depth(body_rate: float) -> tuple:
+        """Review 深度评级（有评论内容的 review 占比）"""
+        if body_rate >= 80:
+            return "A", "Review 质量优秀，大部分 review 有实质性评论"
+        elif body_rate >= 60:
+            return "B", "Review 质量良好，部分 review 仅为通过/拒绝"
+        elif body_rate >= 40:
+            return "C", "Review 深度一般，建议鼓励 reviewer 提供详细反馈"
+        elif body_rate >= 20:
+            return "D", "Review 深度较浅，多数 review 无实质内容"
+        else:
+            return "F", "Review 流于形式，建议加强 review 文化"
+
+    async def get_review_quality_trends(self, owner: str, repo: str,
+                                         granularity: str = "week",
+                                         start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """获取 Review 质量趋势数据"""
+        if self.db is None:
+            return []
+        try:
+            reviews_query = {"owner": owner, "repo": repo}
+
+            if granularity == "month":
+                date_format = "%Y-%m"
+            elif granularity == "week":
+                date_format = "%Y-W%V"
+            else:
+                date_format = "%Y-%m-%d"
+
+            # 基于 pr_reviews 的 updated_at 做时间聚合
+            pipeline = [
+                {"$match": reviews_query},
+                {"$addFields": {
+                    "period": {"$dateToString": {
+                        "format": date_format,
+                        "date": {"$dateFromString": {"dateString": "$updated_at"}}
+                    }},
+                    "review_count": {"$size": {"$ifNull": ["$data", []]}},
+                }},
+                {"$group": {
+                    "_id": "$period",
+                    "pr_count": {"$sum": 1},
+                    "total_reviews": {"$sum": "$review_count"},
+                }},
+                {"$sort": {"_id": 1}},
+            ]
+
+            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=None)
+
+            trends = []
+            for r in raw:
+                trends.append({
+                    "period": r["_id"],
+                    "pr_count": r["pr_count"],
+                    "total_reviews": r["total_reviews"],
+                    "avg_reviews_per_pr": round(r["total_reviews"] / r["pr_count"], 2) if r["pr_count"] > 0 else 0,
+                })
+            return trends
+        except Exception as e:
+            logger.error(f"获取 Review 质量趋势失败: {e}")
+            return []

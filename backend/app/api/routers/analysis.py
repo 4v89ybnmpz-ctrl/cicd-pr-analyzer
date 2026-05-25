@@ -11,6 +11,7 @@ from app.models.cicd_models import (
     CICDReport, CICDResultSummary, CICDInsight, TimeGranularity,
 )
 from app.models.responses import CICDAnalysisTriggerResponse, CICDTrendsResponse
+from app.models.responses import ReviewQualityReport, ReviewQualityTrendsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,40 @@ def register_analysis_routes(router: APIRouter, db, cache):
             start_date=start_date, end_date=end_date,
             page=page, size=size,
         )
+
+    # ====================
+    # Review 质量评估
+    # ====================
+
+    @router.get("/analysis/review-quality/{owner}/{repo}", tags=["Review 质量评估"], response_model=ReviewQualityReport)
+    async def get_review_quality_report(
+        owner: str,
+        repo: str,
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+        top_n: int = Query(10, ge=1, le=50, description="Top Reviewer 数量"),
+    ):
+        """
+        获取 Review 质量评估报告
+        包含覆盖率、延迟、深度、状态分布、Top Reviewer 和洞察项
+        """
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_review_quality_report(owner, repo, start_date, end_date, top_n)
+
+    @router.get("/analysis/review-quality/{owner}/{repo}/trends", tags=["Review 质量评估"], response_model=ReviewQualityTrendsResponse)
+    async def get_review_quality_trends(
+        owner: str,
+        repo: str,
+        granularity: str = Query("week", description="时间粒度 day/week/month"),
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    ):
+        """获取 Review 质量趋势数据"""
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        trends = await db.get_review_quality_trends(owner, repo, granularity, start_date, end_date)
+        return {"owner": owner, "repo": repo, "granularity": granularity, "trends": trends}
 
 
 def _build_insights(summary_data: dict, failure_analysis: dict) -> list:

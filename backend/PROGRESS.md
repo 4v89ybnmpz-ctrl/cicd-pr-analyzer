@@ -329,7 +329,10 @@ app/
 ## 待开发功能
 
 - [ ] 28. 数据维度增强 — PR 关联分析、代码变更深度分析、贡献者画像、Issue 与 PR 联动
-- [ ] 29. 分析能力拓展 — 代码质量指标、Review 质量评估、项目健康度评分、趋势预警
+- [x] 29.2 Review 质量评估 — 覆盖率/延迟/深度/状态分布/Top Reviewer/洞察 (2026-05-25)
+- [ ] 29.1 代码质量指标 — 代码 churn 分析、技术债评估
+- [ ] 29.3 项目健康度评分 — 综合指标评级
+- [ ] 29.4 趋势预警 — CI 失败率/Review 延迟/贡献者流失预警
 - [ ] 30. 平台与集成拓展 — Webhook 接收、通知推送、数据导出、多仓库对比
 - [ ] 31. 前端可视化增强 — PR 生命周期桑基图、贡献者热力图、CI/CD 仪表盘、代码变更热力图
 - [ ] 32. 前端交互增强 — 项目收藏与分组、自定义看板、时间范围选择器、深色模式
@@ -614,10 +617,6 @@ app/
 
 2026-05-20 (异步改造 + 安全加固完成)
 
----
-
-### 26. 异步改造 ✅ (2026-05-20 新增)
-
 > 将全量同步 I/O 改造为原生异步，充分利用 FastAPI 异步特性
 
 #### 26.1 核心变更
@@ -728,4 +727,40 @@ app/
   - 请求限流: 9 项（关闭/正常/超限/剩余计数/不同IP/严格路径/429响应/清理/代理IP）
   - 安全响应头: 4 项（默认/关闭/自定义/覆盖）
   - Git 安全检查: 1 项
-  - 集成测试: 5 项（认证拒绝/通过/组合/公共路径/文档资源）
+   - 集成测试: 5 项（认证拒绝/通过/组合/公共路径/文档资源）
+
+---
+
+### 29.2 Review 质量评估 ✅ (2026-05-25 新增)
+
+#### 29.2.1 Response 模型 [responses.py](app/models/responses.py)
+- `ReviewCoverageMetrics` — 覆盖率指标（total_prs/prs_with_review/coverage_rate/avg_reviewers_per_pr）
+- `ReviewDelayMetrics` — 延迟指标（avg/median/p90 首次 review 延迟）
+- `ReviewDepthMetrics` — 深度指标（avg_body_length/reviews_with_body/body_rate）
+- `ReviewStateDistribution` — 状态分布（APPROVED/CHANGES_REQUESTED/COMMENTED/DISMISSED/PENDING）
+- `ReviewerStats` — 单个 Reviewer 统计（review_count/approved_count/avg_body_length/avg_delay_hours）
+- `ReviewQualityReport` — 完整报告模型
+- `ReviewQualityTrendsResponse` — 趋势响应模型
+
+#### 29.2.2 数据库服务层 [database_service.py](app/services/database_service.py)
+- `get_review_quality_report()` — 生成完整 Review 质量评估报告
+- `_compute_review_coverage()` — Review 覆盖率聚合（pr_details + pr_reviews 跨集合）
+- `_compute_review_delay()` — Review 延迟统计（首次/中位/P90/平均延迟）
+- `_compute_review_depth()` — Review 深度统计（body 长度/有内容占比）
+- `_compute_review_state_distribution()` — Review 状态分布（APPROVED/CHANGES_REQUESTED 等）
+- `_compute_top_reviewers()` — Top Reviewer 统计（review 数/approved 数/changes_requested 数）
+- `_build_review_quality_insights()` — 洞察项构建（覆盖率/延迟/深度/变更请求率）
+- `_grade_review_coverage()` / `_grade_review_delay()` / `_grade_review_depth()` — A-F 评级函数
+- `get_review_quality_trends()` — Review 质量趋势数据（按日/周/月聚合）
+
+#### 29.2.3 API 路由 [analysis.py](app/api/routers/analysis.py)
+- `GET /analysis/review-quality/{owner}/{repo}` — Review 质量评估报告
+  - 参数: start_date, end_date, top_n
+  - 返回: 覆盖率 + 延迟 + 深度 + 状态分布 + Top Reviewer + 洞察项
+- `GET /analysis/review-quality/{owner}/{repo}/trends` — Review 质量趋势
+  - 参数: granularity (day/week/month), start_date, end_date
+
+#### 29.2.4 测试用例 [test_review_quality.py](app/test/test_review_quality.py)
+- 14 项测试（100% 通过）:
+  - API 集成: 11 项（报告端点/日期范围/top_n/覆盖率/延迟/深度/状态分布/洞察/趋势/粒度/503）
+  - 评级函数: 3 项（覆盖率/延迟/深度 A-F 评级）

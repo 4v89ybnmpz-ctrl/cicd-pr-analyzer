@@ -579,3 +579,76 @@ class APIResponsesResponse(TimestampMixin):
     """API 响应列表"""
     total: int
     responses: List[CapturedRequest]
+
+
+# ====================
+# Review 质量评估 Response 模型
+# ====================
+
+class ReviewCoverageMetrics(BaseModel):
+    """Review 覆盖率指标"""
+    total_prs: int = Field(0, description="PR 总数")
+    prs_with_review: int = Field(0, description="有 review 的 PR 数")
+    prs_without_review: int = Field(0, description="无 review 的 PR 数")
+    coverage_rate: Optional[float] = Field(None, description="Review 覆盖率 (0-100)")
+    avg_reviewers_per_pr: Optional[float] = Field(None, description="平均每个 PR 的 reviewer 数")
+
+
+class ReviewDelayMetrics(BaseModel):
+    """Review 延迟指标"""
+    total_reviews: int = Field(0, description="Review 总数")
+    avg_first_review_delay_hours: Optional[float] = Field(None, description="首次 review 平均延迟（小时）")
+    median_first_review_delay_hours: Optional[float] = Field(None, description="首次 review 中位延迟（小时）")
+    p90_first_review_delay_hours: Optional[float] = Field(None, description="首次 review P90 延迟（小时）")
+    avg_review_delay_hours: Optional[float] = Field(None, description="所有 review 平均延迟（小时）")
+
+
+class ReviewDepthMetrics(BaseModel):
+    """Review 深度指标"""
+    total_reviews: int = Field(0, description="Review 总数")
+    avg_body_length: Optional[float] = Field(None, description="Review body 平均字符数")
+    reviews_with_body: int = Field(0, description="有评论内容的 review 数")
+    reviews_without_body: int = Field(0, description="无评论内容的 review 数（仅 APPROVED/PENDING）")
+    body_rate: Optional[float] = Field(None, description="有评论内容的 review 占比 (0-100)")
+
+
+class ReviewStateDistribution(BaseModel):
+    """Review 状态分布"""
+    approved: int = Field(0, description="APPROVED 数")
+    changes_requested: int = Field(0, description="CHANGES_REQUESTED 数")
+    commented: int = Field(0, description="COMMENTED 数")
+    dismissed: int = Field(0, description="DISMISSED 数")
+    pending: int = Field(0, description="PENDING 数")
+
+
+class ReviewerStats(BaseModel):
+    """单个 Reviewer 统计"""
+    user: str = Field(..., description="Reviewer 用户名")
+    review_count: int = Field(0, description="Review 总数")
+    approved_count: int = Field(0, description="APPROVED 数")
+    changes_requested_count: int = Field(0, description="CHANGES_REQUESTED 数")
+    avg_body_length: Optional[float] = Field(None, description="平均评论长度")
+    avg_delay_hours: Optional[float] = Field(None, description="平均响应延迟（小时）")
+
+
+class ReviewQualityReport(BaseModel):
+    """Review 质量评估报告"""
+    owner: str = Field(..., description="仓库所有者")
+    repo: str = Field(..., description="仓库名")
+    start_date: Optional[str] = Field(None, description="开始日期")
+    end_date: Optional[str] = Field(None, description="结束日期")
+    coverage: Optional[ReviewCoverageMetrics] = Field(None, description="覆盖率指标")
+    delay: Optional[ReviewDelayMetrics] = Field(None, description="延迟指标")
+    depth: Optional[ReviewDepthMetrics] = Field(None, description="深度指标")
+    state_distribution: Optional[ReviewStateDistribution] = Field(None, description="状态分布")
+    top_reviewers: List[ReviewerStats] = Field(default_factory=list, description="Top Reviewer 列表")
+    insights: List[Dict[str, Any]] = Field(default_factory=list, description="洞察项")
+    generated_at: Optional[str] = Field(None, description="报告生成时间")
+
+
+class ReviewQualityTrendsResponse(TimestampMixin):
+    """Review 质量趋势响应"""
+    owner: str
+    repo: str
+    granularity: str
+    trends: List[Dict[str, Any]]
