@@ -16,6 +16,7 @@ import {
   RobotOutlined,
   AuditOutlined,
   HeartOutlined,
+  BellOutlined,
 } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import PrList from './pages/PrList'
@@ -34,6 +35,7 @@ import DeveloperRelations from './pages/DeveloperRelations'
 import AgentStudio from './pages/AgentStudio'
 import ReviewQuality from './pages/ReviewQuality'
 import ProjectHealth from './pages/ProjectHealth'
+import TrendAlerts from './pages/TrendAlerts'
 
 const { Header, Sider, Content } = Layout
 
@@ -50,6 +52,7 @@ const menuItems = [
   { key: 'dev-relations', icon: <TeamOutlined />, label: '开发者关系' },
   { key: 'review-quality', icon: <AuditOutlined />, label: 'Review 质量' },
   { key: 'project-health', icon: <HeartOutlined />, label: '项目健康度' },
+  { key: 'trend-alerts', icon: <BellOutlined />, label: '趋势预警' },
   { key: 'agent-studio', icon: <RobotOutlined />, label: 'Agent 工作室' },
   { key: 'aggregate', icon: <BarChartOutlined />, label: '聚合统计' },
   { key: 'tasks', icon: <ThunderboltOutlined />, label: '任务监控' },
@@ -81,6 +84,7 @@ function App() {
       case 'dev-relations': return <DeveloperRelations />
       case 'review-quality': return <ReviewQuality />
       case 'project-health': return <ProjectHealth />
+      case 'trend-alerts': return <TrendAlerts />
       case 'agent-studio': return <AgentStudio />
       case 'tasks': return <Tasks />
       case 'user-repos': return <UserRepos username={userReposUsername} onBack={() => setPage('profiles')} />

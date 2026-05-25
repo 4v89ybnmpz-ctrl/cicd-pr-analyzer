@@ -13,6 +13,7 @@ from app.models.cicd_models import (
 from app.models.responses import CICDAnalysisTriggerResponse, CICDTrendsResponse
 from app.models.responses import ReviewQualityReport, ReviewQualityTrendsResponse
 from app.models.responses import ProjectHealthReport, ProjectHealthTrendsResponse
+from app.models.responses import TrendAlertsReport
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,24 @@ def register_analysis_routes(router: APIRouter, db, cache):
             raise HTTPException(status_code=503, detail="数据库未连接")
         trends = await db.get_project_health_trends(owner, repo, granularity, start_date, end_date)
         return {"owner": owner, "repo": repo, "granularity": granularity, "trends": trends}
+
+    # ====================
+    # 趋势预警
+    # ====================
+
+    @router.get("/analysis/alerts/{owner}/{repo}", tags=["趋势预警"], response_model=TrendAlertsReport)
+    async def get_trend_alerts(
+        owner: str,
+        repo: str,
+        period_days: int = Query(7, ge=1, le=90, description="对比周期（天）"),
+    ):
+        """
+        获取趋势预警报告
+        对比本期和上期指标，检测 CI 失败率/Review 延迟/贡献者流失/PR 存活时间异常变化
+        """
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_trend_alerts(owner, repo, period_days)
 
 
 def _build_insights(summary_data: dict, failure_analysis: dict) -> list:

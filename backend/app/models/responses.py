@@ -690,3 +690,31 @@ class ProjectHealthTrendsResponse(TimestampMixin):
     repo: str
     granularity: str
     trends: List[Dict[str, Any]]
+
+
+# ====================
+# 趋势预警 Response 模型
+# ====================
+
+class AlertItem(BaseModel):
+    """单条预警项"""
+    alert_type: str = Field(..., description="预警类型 (ci_failure/review_delay/contributor_loss)")
+    severity: str = Field(..., description="严重程度 (critical/warning/info)")
+    title: str = Field(..., description="预警标题")
+    description: str = Field(..., description="预警描述")
+    current_value: Any = Field(None, description="当前值")
+    previous_value: Any = Field(None, description="上期值")
+    change_rate: Optional[float] = Field(None, description="变化率 (百分比)")
+    threshold: Optional[float] = Field(None, description="触发阈值")
+    dimension: Optional[str] = Field(None, description="关联维度")
+    suggestion: Optional[str] = Field(None, description="改进建议")
+
+
+class TrendAlertsReport(BaseModel):
+    """趋势预警报告"""
+    owner: str = Field(..., description="仓库所有者")
+    repo: str = Field(..., description="仓库名")
+    period_days: int = Field(7, description="对比周期（天）")
+    alerts: List[AlertItem] = Field(default_factory=list, description="预警列表")
+    summary: Dict[str, Any] = Field(default_factory=dict, description="预警摘要")
+    generated_at: Optional[str] = Field(None, description="报告生成时间")

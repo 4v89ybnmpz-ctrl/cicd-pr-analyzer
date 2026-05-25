@@ -2288,3 +2288,237 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"获取项目健康度趋势失败: {e}")
             return []
+
+    # ====================
+    # 趋势预警
+    # ====================
+
+    async def get_trend_alerts(self, owner: str, repo: str,
+                                period_days: int = 7) -> Dict[str, Any]:
+        """
+        生成趋势预警报告
+        对比本期和上期指标，检测异常变化
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            now = datetime.now()
+            period_start = (now - timedelta(days=period_days)).strftime("%Y-%m-%d")
+            prev_start = (now - timedelta(days=period_days * 2)).strftime("%Y-%m-%d")
+            today = now.strftime("%Y-%m-%d")
+
+            alerts = []
+
+            # 1. CI 失败率突增预警
+            ci_alert = await self._check_ci_failure_alert(owner, repo, period_start, today, prev_start, period_start)
+            if ci_alert:
+                alerts.append(ci_alert)
+
+            # 2. Review 延迟增长预警
+            review_alert = await self._check_review_delay_alert(owner, repo, period_start, today, prev_start, period_start)
+            if review_alert:
+                alerts.append(review_alert)
+
+            # 3. 贡献者流失预警
+            contrib_alert = await self._check_contributor_loss_alert(owner, repo, period_start, today, prev_start, period_start)
+            if contrib_alert:
+                alerts.append(contrib_alert)
+
+            # 4. PR 存活时间增长预警
+            lifetime_alert = await self._check_pr_lifetime_alert(owner, repo, period_start, today, prev_start, period_start)
+            if lifetime_alert:
+                alerts.append(lifetime_alert)
+
+            # 摘要
+            critical = sum(1 for a in alerts if a["severity"] == "critical")
+            warning = sum(1 for a in alerts if a["severity"] == "warning")
+            info = sum(1 for a in alerts if a["severity"] == "info")
+
+            return {
+                "owner": owner, "repo": repo,
+                "period_days": period_days,
+                "alerts": alerts,
+                "summary": {
+                    "total": len(alerts),
+                    "critical": critical,
+                    "warning": warning,
+                    "info": info,
+                },
+                "generated_at": now.isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"生成趋势预警失败: {e}")
+            return {"error": str(e)}
+
+    async def _check_ci_failure_alert(self, owner: str, repo: str,
+                                       cur_start: str, cur_end: str,
+                                       prev_start: str, prev_end: str) -> Optional[Dict[str, Any]]:
+        """CI 失败率环比预警"""
+        cur = await self.get_cicd_summary_from_db(owner, repo, cur_start, cur_end)
+        prev = await self.get_cicd_summary_from_db(owner, repo, prev_start, prev_end)
+
+        cur_rate = cur.get("failure_rate")
+        prev_rate = prev.get("failure_rate")
+
+        if cur_rate is None or prev_rate is None:
+            return None
+
+        change = cur_rate - prev_rate
+        change_pct = round(change / prev_rate * 100, 2) if prev_rate > 0 else None
+
+        if change > 20:
+            severity = "critical"
+        elif change > 10:
+            severity = "warning"
+        elif change > 5:
+            severity = "info"
+        else:
+            return None
+
+        return {
+            "alert_type": "ci_failure",
+            "severity": severity,
+            "title": "CI 失败率上升",
+            "description": f"CI 失败率从 {prev_rate}% 上升到 {cur_rate}%（+{change:.1f}%）",
+            "current_value": cur_rate,
+            "previous_value": prev_rate,
+            "change_rate": change_pct,
+            "threshold": 10.0,
+            "dimension": "CI 成功率",
+            "suggestion": "建议排查近期 CI 失败原因，关注 flaky test 和环境变更",
+        }
+
+    async def _check_review_delay_alert(self, owner: str, repo: str,
+                                          cur_start: str, cur_end: str,
+                                          prev_start: str, prev_end: str) -> Optional[Dict[str, Any]]:
+        """Review 延迟环比预警"""
+        cur_report = await self.get_review_quality_report(owner, repo, cur_start, cur_end)
+        prev_report = await self.get_review_quality_report(owner, repo, prev_start, prev_end)
+
+        if "error" in cur_report or "error" in prev_report:
+            return None
+
+        cur_delay = cur_report.get("delay", {}).get("avg_first_review_delay_hours")
+        prev_delay = prev_report.get("delay", {}).get("avg_first_review_delay_hours")
+
+        if cur_delay is None or prev_delay is None or prev_delay == 0:
+            return None
+
+        change = cur_delay - prev_delay
+        change_pct = round(change / prev_delay * 100, 2)
+
+        if change_pct > 50:
+            severity = "critical"
+        elif change_pct > 30:
+            severity = "warning"
+        elif change_pct > 15:
+            severity = "info"
+        else:
+            return None
+
+        return {
+            "alert_type": "review_delay",
+            "severity": severity,
+            "title": "Review 响应变慢",
+            "description": f"首次 Review 延迟从 {prev_delay}h 增加到 {cur_delay}h（+{change_pct}%）",
+            "current_value": cur_delay,
+            "previous_value": prev_delay,
+            "change_rate": change_pct,
+            "threshold": 30.0,
+            "dimension": "Review 延迟",
+            "suggestion": "建议分配更多 reviewer，或拆分大 PR 缩短 review 时间",
+        }
+
+    async def _check_contributor_loss_alert(self, owner: str, repo: str,
+                                              cur_start: str, cur_end: str,
+                                              prev_start: str, prev_end: str) -> Optional[Dict[str, Any]]:
+        """贡献者流失预警"""
+        cur_contribs = await self._count_active_contributors(owner, repo, cur_start, cur_end)
+        prev_contribs = await self._count_active_contributors(owner, repo, prev_start, prev_end)
+
+        if prev_contribs == 0:
+            return None
+
+        loss = prev_contribs - cur_contribs
+        loss_pct = round(loss / prev_contribs * 100, 2)
+
+        if loss_pct > 40:
+            severity = "critical"
+        elif loss_pct > 25:
+            severity = "warning"
+        elif loss_pct > 10:
+            severity = "info"
+        else:
+            return None
+
+        return {
+            "alert_type": "contributor_loss",
+            "severity": severity,
+            "title": "活跃贡献者减少",
+            "description": f"活跃贡献者从 {prev_contribs} 人减少到 {cur_contribs} 人（-{loss_pct}%）",
+            "current_value": cur_contribs,
+            "previous_value": prev_contribs,
+            "change_rate": -loss_pct,
+            "threshold": 25.0,
+            "dimension": "贡献者多样性",
+            "suggestion": "建议关注核心贡献者状态，降低贡献门槛，鼓励新贡献者参与",
+        }
+
+    async def _count_active_contributors(self, owner: str, repo: str,
+                                           start_date: str, end_date: str) -> int:
+        """统计时间段内活跃贡献者数"""
+        query = {"owner": owner, "repo": repo}
+        if start_date:
+            query["data.created_at"] = {"$gte": start_date}
+        if end_date:
+            time_cond = query.get("data.created_at", {})
+            if isinstance(time_cond, dict):
+                time_cond["$lte"] = end_date
+            query["data.created_at"] = time_cond
+
+        pipeline = [
+            {"$match": query},
+            {"$group": {"_id": "$data.user.login"}},
+        ]
+        try:
+            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+            return len([r for r in result if r["_id"]])
+        except Exception:
+            return 0
+
+    async def _check_pr_lifetime_alert(self, owner: str, repo: str,
+                                         cur_start: str, cur_end: str,
+                                         prev_start: str, prev_end: str) -> Optional[Dict[str, Any]]:
+        """PR 存活时间增长预警"""
+        cur_score = await self._compute_pr_lifetime_score(owner, repo, {"$gte": cur_start, "$lte": cur_end})
+        prev_score = await self._compute_pr_lifetime_score(owner, repo, {"$gte": prev_start, "$lte": prev_end})
+
+        cur_val = cur_score.get("value")
+        prev_val = prev_score.get("value")
+
+        if cur_val is None or prev_val is None or prev_val == 0:
+            return None
+
+        change_pct = round((cur_val - prev_val) / prev_val * 100, 2)
+
+        if change_pct > 50:
+            severity = "critical"
+        elif change_pct > 30:
+            severity = "warning"
+        elif change_pct > 15:
+            severity = "info"
+        else:
+            return None
+
+        return {
+            "alert_type": "pr_lifetime",
+            "severity": severity,
+            "title": "PR 存活时间增长",
+            "description": f"PR 平均存活时间从 {prev_val}h 增加到 {cur_val}h（+{change_pct}%）",
+            "current_value": cur_val,
+            "previous_value": prev_val,
+            "change_rate": change_pct,
+            "threshold": 30.0,
+            "dimension": "PR 存活时间",
+            "suggestion": "建议拆分大 PR、优化 review 流程、设置 PR 自动分派",
+        }

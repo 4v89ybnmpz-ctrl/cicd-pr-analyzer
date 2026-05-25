@@ -531,11 +531,11 @@
 - [x] 健康度 API — `GET /analysis/health/{owner}/{repo}`
 
 ### 29.4 趋势预警
-- [ ] CI 失败率突增预警 — 检测 CI 失败率环比异常上升
-- [ ] Review 响应变慢预警 — 检测 review 延迟环比异常增长
-- [ ] 贡献者流失预警 — 检测核心贡献者活跃度下降
-- [ ] 预警规则配置 — 支持自定义阈值和预警维度
-- [ ] 预警 API — `GET /analysis/alerts/{owner}/{repo}`
+- [x] CI 失败率突增预警 — 检测 CI 失败率环比异常上升
+- [x] Review 响应变慢预警 — 检测 review 延迟环比异常增长
+- [x] 贡献者流失预警 — 检测核心贡献者活跃度下降
+- [x] 预警规则配置 — 支持自定义阈值和预警维度
+- [x] 预警 API — `GET /analysis/alerts/{owner}/{repo}`
 
 ---
 
