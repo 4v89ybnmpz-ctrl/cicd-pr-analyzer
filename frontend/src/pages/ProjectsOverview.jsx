@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge, Modal, Popconfirm, Descriptions } from 'antd'
-import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined, PlusOutlined } from '@ant-design/icons'
+import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined, PlusOutlined, FileTextOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 const METRICS = [
@@ -24,6 +24,7 @@ const TASK_ACTIONS = [
   { key: 'update_comments', label: '增量更新评论', desc: '对比 updated_at 增量更新已有评论', apiFn: 'updateComments', icon: '🔄' },
   { key: 'git_clone', label: '克隆仓库', desc: 'bare clone 仓库到本地（已克隆则跳过）', apiFn: 'asyncGitClone', icon: '📂' },
   { key: 'git_extract', label: '提取 Git Log', desc: '自动克隆 + 提取全部 commit 历史 + 变更文件详情', apiFn: 'asyncGitExtract', icon: '📝' },
+  { key: 'files', label: '获取 PR 文件', desc: '获取 PR 的变更文件列表（热力图数据源）', apiFn: 'fetchPrFiles', defaultParam: 30, paramName: 'limit', icon: '📄' },
 ]
 
 const STATUS_MAP = {
@@ -157,6 +158,7 @@ function ProjectDetail({ owner, repo, onBack }) {
   const [gitCommits, setGitCommits] = useState([])
   const [gitCommitTotal, setGitCommitTotal] = useState(0)
   const [gitCommitPage, setGitCommitPage] = useState(1)
+  const [commitFilesModal, setCommitFilesModal] = useState({ open: false, commit: null })
 
   const refreshAll = useCallback(async () => {
     try {
@@ -372,22 +374,7 @@ function ProjectDetail({ owner, repo, onBack }) {
                 current: gitCommitPage, total: gitCommitTotal, pageSize: 20,
                 onChange: (p) => fetchGitLog(p), showTotal: (t) => `共 ${t} 条`,
               }}
-              scroll={{ x: 900 }}
-              expandable={{
-                expandedRowRender: (r) => (
-                  <div style={{ margin: 0 }}>
-                    {r.files?.length > 0 ? (
-                      <Table size="small" dataSource={r.files.map((f, i) => ({ key: i, ...f }))} pagination={false}
-                        columns={[
-                          { title: '文件', dataIndex: 'file', key: 'file', ellipsis: true },
-                          { title: '增加', dataIndex: 'additions', width: 80, render: v => <Tag color="green">+{v}</Tag> },
-                          { title: '删除', dataIndex: 'deletions', width: 80, render: v => <Tag color="red">-{v}</Tag> },
-                        ]}
-                      />
-                    ) : <span style={{ color: '#999' }}>无文件变更（merge commit）</span>}
-                  </div>
-                ),
-              }}
+              scroll={{ x: 1100 }}
               columns={[
                 { title: 'Hash', dataIndex: 'abbrev_hash', width: 80, render: v => <code>{v}</code> },
                 { title: '提交信息', dataIndex: 'subject', ellipsis: true },
@@ -397,11 +384,49 @@ function ProjectDetail({ owner, repo, onBack }) {
                 { title: '提交者', dataIndex: 'committer_name', width: 110 },
                 { title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center' },
                 { title: '+/-', width: 100, render: (_, r) => <span><span style={{ color: '#52c41a' }}>+{r.total_additions}</span> / <span style={{ color: '#ff4d4f' }}>-{r.total_deletions}</span></span> },
+                {
+                  title: '文件详情', key: 'files_detail', width: 100, align: 'center',
+                  render: (_, r) => (
+                    r.files?.length > 0 ? (
+                      <Button type="link" size="small" icon={<FileTextOutlined />}
+                        onClick={() => setCommitFilesModal({ open: true, commit: r })}>
+                        {r.files.length} 个文件
+                      </Button>
+                    ) : <span style={{ color: '#d9d9d9' }}>-</span>
+                  ),
+                },
               ]}
             />
           )}
         </Card>
       )}
+
+      <Modal
+        title={
+          commitFilesModal.commit
+            ? <span><FileTextOutlined style={{ marginRight: 8 }} />文件变更详情 — <code>{commitFilesModal.commit.abbrev_hash}</code> {commitFilesModal.commit.subject}</span>
+            : '文件变更详情'
+        }
+        open={commitFilesModal.open}
+        onCancel={() => setCommitFilesModal({ open: false, commit: null })}
+        footer={null}
+        width={800}
+      >
+        {commitFilesModal.commit?.files?.length > 0 ? (
+          <Table
+            size="small"
+            dataSource={commitFilesModal.commit.files.map((f, i) => ({ key: i, ...f }))}
+            pagination={commitFilesModal.commit.files.length > 20 ? { pageSize: 20 } : false}
+            columns={[
+              { title: '文件', dataIndex: 'file', key: 'file', ellipsis: true },
+              { title: '增加', dataIndex: 'additions', width: 100, render: v => <Tag color="green">+{v}</Tag> },
+              { title: '删除', dataIndex: 'deletions', width: 100, render: v => <Tag color="red">-{v}</Tag> },
+            ]}
+          />
+        ) : (
+          <div style={{ textAlign: 'center', color: '#999', padding: 24 }}>无文件变更</div>
+        )}
+      </Modal>
     </div>
   )
 }
@@ -431,7 +456,7 @@ export default function ProjectsOverview() {
   useEffect(() => { fetchData() }, [fetchData])
 
   if (selected) {
-    return <ProjectDetail owner={selected.owner} repo={selected.repo} onBack={() => setSelected(null)} />
+    return <ProjectDetail owner={selected.owner} repo={selected.repo} onBack={() => { setSelected(null); fetchData() }} />
   }
 
   const filtered = search
@@ -532,12 +557,16 @@ export default function ProjectsOverview() {
         title="添加项目"
         open={addModalOpen}
         onCancel={() => { setAddModalOpen(false); setAddOwner(''); setAddRepo('') }}
-        onOk={() => {
+        onOk={async () => {
           const o = addOwner.trim()
           const r = addRepo.trim()
           if (!o || !r) { message.warning('请输入 owner 和 repo'); return }
-          const exists = data.find(p => p.owner === o && p.repo === r)
-          if (exists) { message.info('项目已在列表中'); setSelected(exists); setAddModalOpen(false); return }
+          try {
+            await api.registerProject(o, r)
+          } catch (e) {
+            message.error(`添加失败: ${e.response?.data?.detail || e.message}`)
+            return
+          }
           setSelected({ owner: o, repo: r, pr_count: 0, comments_count: 0, issues_count: 0, timeline_count: 0, details_count: 0, reviews_count: 0, commits_count: 0 })
           setAddModalOpen(false)
           setAddOwner('')

@@ -85,17 +85,38 @@ export default function CodeHeatmap() {
   const fetchFiles = async () => {
     if (!selected) return
     setFetchingFiles(true)
-    message.loading({ content: `正在获取 ${selected.owner}/${selected.repo} 的 PR 变更文件...`, key: 'fetch', duration: 0 })
     try {
       const res = await api.fetchPrFiles(selected.owner, selected.repo, { limit: 30 })
       const d = res.data
-      message.success({ content: `获取完成: ${d.success_count || 0} 成功, ${d.failed_count || 0} 失败`, key: 'fetch' })
-      fetchData()
+      if (d.task) {
+        message.success({ content: `任务已创建，请在「任务监控」中查看进度`, key: 'fetch' })
+        // 轮询等待任务完成
+        const taskId = d.task.task_id
+        const poll = setInterval(async () => {
+          try {
+            const taskRes = await api.getTask(taskId)
+            const status = taskRes.data.status
+            if (status === 'completed') {
+              clearInterval(poll)
+              message.success({ content: `文件获取完成`, key: 'fetch' })
+              setFetchingFiles(false)
+              fetchData()
+            } else if (status === 'failed') {
+              clearInterval(poll)
+              message.error({ content: `文件获取失败`, key: 'fetch' })
+              setFetchingFiles(false)
+            }
+          } catch { clearInterval(poll); setFetchingFiles(false) }
+        }, 3000)
+      } else {
+        message.info({ content: d.message || '任务已存在', key: 'fetch' })
+        setFetchingFiles(false)
+      }
     } catch (e) {
-      message.error({ content: `获取失败: ${e.message}`, key: 'fetch' })
+      message.error({ content: `创建任务失败: ${e.message}`, key: 'fetch' })
       setError(e.message)
+      setFetchingFiles(false)
     }
-    setFetchingFiles(false)
   }
 
   const fileColumns = [

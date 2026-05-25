@@ -181,8 +181,44 @@ def register_async_task_routes(router, github_service, db):
         asyncio.create_task(task_queue.run_task(task, _do, key))
         return {"task": task.to_dict(), "message": "任务已创建", "timestamp": datetime.now().isoformat()}
 
+    @router.post("/github/tasks/files/{owner}/{repo}")
+    async def async_fetch_pr_files(owner: str, repo: str, limit: int = 30):
+        """异步获取 PR 变更文件列表"""
+        key = f"{owner}/{repo}"
+        running = task_queue.is_running("fetch_files", key)
+        if running:
+            return {"task": running.to_dict(), "message": "该项目的文件获取任务正在进行中", "timestamp": datetime.now().isoformat()}
 
-async def _get_pr_numbers(owner, repo, limit, db, github_service):
+        task = await task_queue._create_task("fetch_files", f"获取 {owner}/{repo} PR 变更文件 (limit={limit})", {"owner": owner, "repo": repo, "limit": limit})
+        task.total = limit
+
+        async def _do(t):
+            pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
+            t.log("INFO", f"找到 {len(pr_numbers)} 个 PR 需要获取变更文件")
+            semaphore = asyncio.Semaphore(github_service.max_workers)
+            total_saved = 0
+            total_failed = 0
+
+            async def _fetch(pr_num):
+                nonlocal total_saved, total_failed
+                async with semaphore:
+                    result = await github_service.fetch_pr_files(owner, repo, pr_num)
+                    if result.get("error") is None and db is not None:
+                        await db.save_pr_files(owner, repo, pr_num, result["files"])
+                        total_saved += 1
+                        t.progress = total_saved
+                        t.log("INFO", f"PR#{pr_num}: {result.get('total', 0)} 个变更文件")
+                    else:
+                        total_failed += 1
+                        t.log("WARN", f"PR#{pr_num}: 获取失败 - {result.get('error', 'unknown')}")
+                    await asyncio.sleep(github_service.request_delay)
+
+            await asyncio.gather(*[_fetch(n) for n in pr_numbers])
+            t.log("INFO", f"完成: {total_saved} 成功, {total_failed} 失败")
+            return {"fetched": total_saved, "failed": total_failed}
+
+        asyncio.create_task(task_queue.run_task(task, _do, key))
+        return {"task": task.to_dict(), "message": "任务已创建", "timestamp": datetime.now().isoformat()}
     if db is not None:
         pr_data = await db.get_pr_data(owner, repo)
         if pr_data:
