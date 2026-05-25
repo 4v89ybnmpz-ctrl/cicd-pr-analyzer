@@ -257,6 +257,29 @@ def register_github_routes(router, cache, github_service, db):
             "failed_count": result["failed_count"], "timestamp": datetime.now().isoformat()
         }
 
+    @router.get("/github/prs/{owner}/{repo}/{pr_number}/files")
+    async def get_pr_files(owner: str, repo: str, pr_number: int):
+        """获取单个 PR 的变更文件列表"""
+        result = await github_service.fetch_pr_files(owner, repo, pr_number)
+        if db is not None and result["error"] is None:
+            await db.save_pr_files(owner, repo, pr_number, result["files"])
+        return {"data": result, "timestamp": datetime.now().isoformat()}
+
+    @router.get("/github/prs/{owner}/{repo}/files", response_model=MultiPRCollectionResponse)
+    async def get_all_pr_files(owner: str, repo: str, limit: int = 10):
+        """并发获取所有 PR 的变更文件列表"""
+        pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
+        result = await github_service.fetch_all_pr_files(owner, repo, pr_numbers)
+        if db is not None:
+            for item in result["results"]:
+                if item["error"] is None:
+                    await db.save_pr_files(owner, repo, item["pr_number"], item["files"])
+        return {
+            "owner": owner, "repo": repo, "results": result["results"],
+            "total_prs": len(pr_numbers), "success_count": result["success_count"],
+            "failed_count": result["failed_count"], "timestamp": datetime.now().isoformat()
+        }
+
     @router.get("/github/token-pool", response_model=TokenPoolResponse)
     async def get_token_pool():
         """获取 Token 池信息"""

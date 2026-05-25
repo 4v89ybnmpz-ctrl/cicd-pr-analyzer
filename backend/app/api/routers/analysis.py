@@ -269,6 +269,26 @@ def register_analysis_routes(router: APIRouter, db, cache):
             raise HTTPException(status_code=503, detail="数据库未连接")
         return await db.get_trend_alerts(owner, repo, period_days)
 
+    # ====================
+    # 代码变更热力图
+    # ====================
+
+    @router.get("/analysis/code-heatmap/{owner}/{repo}", tags=["代码变更热力图"])
+    async def get_code_change_heatmap(
+        owner: str,
+        repo: str,
+        start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+        end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+        top_n: int = Query(50, ge=1, le=200, description="Top N 文件/目录"),
+    ):
+        """
+        获取代码变更热力图数据
+        聚合 PR 变更文件，按文件/目录统计变更频率和规模
+        """
+        if db is None or db.db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_code_change_heatmap(owner, repo, start_date, end_date, top_n)
+
 
 def _build_insights(summary_data: dict, failure_analysis: dict) -> list:
     """根据统计数据构建洞察项"""

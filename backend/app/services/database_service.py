@@ -2522,3 +2522,144 @@ class DatabaseService:
             "dimension": "PR 存活时间",
             "suggestion": "建议拆分大 PR、优化 review 流程、设置 PR 自动分派",
         }
+
+    # ====================
+    # PR 变更文件 + 代码变更热力图
+    # ====================
+
+    async def save_pr_files(self, owner: str, repo: str, pr_number: int, files_data: List[Dict[str, Any]]) -> bool:
+        """保存 PR 变更文件数据"""
+        if self.db is None:
+            return False
+        try:
+            collection = self.db['pr_files']
+            document = {
+                "owner": owner, "repo": repo, "pr_number": pr_number,
+                "data": files_data,
+                "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat(),
+            }
+            await collection.update_one(
+                {"owner": owner, "repo": repo, "pr_number": pr_number},
+                {"$set": document}, upsert=True
+            )
+            logger.info(f"PR 变更文件已保存: {owner}/{repo} PR#{pr_number} ({len(files_data)} files)")
+            return True
+        except Exception as e:
+            logger.error(f"保存 PR 变更文件失败: {e}")
+            return False
+
+    async def get_pr_files(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+        """获取 PR 变更文件数据"""
+        if self.db is None:
+            return None
+        try:
+            return await self.db['pr_files'].find_one(
+                {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
+            )
+        except Exception as e:
+            logger.error(f"获取 PR 变更文件失败: {e}")
+            return None
+
+    async def get_code_change_heatmap(self, owner: str, repo: str,
+                                       start_date: str = None, end_date: str = None,
+                                       top_n: int = 50) -> Dict[str, Any]:
+        """
+        生成代码变更热力图数据
+        聚合 pr_files 中的文件变更频率和规模
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            # 获取所有 pr_files 文档
+            query = {"owner": owner, "repo": repo}
+            docs = await self.db['pr_files'].find(query, {"_id": 0}).to_list(length=None)
+
+            if not docs:
+                return {
+                    "owner": owner, "repo": repo,
+                    "files": [], "directories": [], "total_prs": 0,
+                    "generated_at": datetime.now().isoformat(),
+                }
+
+            # 按文件聚合变更统计
+            file_stats = {}
+            dir_stats = {}
+            pr_numbers = set()
+
+            for doc in docs:
+                pr_num = doc.get("pr_number")
+                pr_numbers.add(pr_num)
+                for f in doc.get("data", []):
+                    filename = f.get("filename", "")
+                    if not filename:
+                        continue
+                    additions = f.get("additions", 0)
+                    deletions = f.get("deletions", 0)
+                    changes = f.get("changes", 0)
+
+                    # 文件级聚合
+                    if filename not in file_stats:
+                        file_stats[filename] = {
+                            "filename": filename,
+                            "change_count": 0, "total_additions": 0, "total_deletions": 0,
+                            "total_changes": 0, "pr_numbers": [],
+                        }
+                    entry = file_stats[filename]
+                    entry["change_count"] += 1
+                    entry["total_additions"] += additions
+                    entry["total_deletions"] += deletions
+                    entry["total_changes"] += changes
+                    if pr_num not in entry["pr_numbers"]:
+                        entry["pr_numbers"].append(pr_num)
+
+                    # 目录级聚合
+                    parts = filename.split("/")
+                    for depth in range(1, len(parts)):
+                        dir_path = "/".join(parts[:depth]) + "/"
+                        if dir_path not in dir_stats:
+                            dir_stats[dir_path] = {
+                                "directory": dir_path,
+                                "change_count": 0, "total_additions": 0, "total_deletions": 0,
+                                "total_changes": 0, "file_count": 0,
+                            }
+                            d_entry = dir_stats[dir_path]
+                        else:
+                            d_entry = dir_stats[dir_path]
+                        d_entry["change_count"] += 1
+                        d_entry["total_additions"] += additions
+                        d_entry["total_deletions"] += deletions
+                        d_entry["total_changes"] += changes
+
+            # 去重目录文件计数
+            for d, entry in dir_stats.items():
+                unique_files = set()
+                for doc2 in docs:
+                    for f2 in doc2.get("data", []):
+                        fn = f2.get("filename", "")
+                        if fn.startswith(d):
+                            unique_files.add(fn)
+                entry["file_count"] = len(unique_files)
+
+            # 排序取 top
+            sorted_files = sorted(file_stats.values(), key=lambda x: x["change_count"], reverse=True)[:top_n]
+            sorted_dirs = sorted(dir_stats.values(), key=lambda x: x["change_count"], reverse=True)[:top_n]
+
+            # 计算热度值（归一化到 0-100）
+            max_file_changes = sorted_files[0]["change_count"] if sorted_files else 1
+            max_dir_changes = sorted_dirs[0]["change_count"] if sorted_dirs else 1
+
+            for f in sorted_files:
+                f["heat"] = round(f["change_count"] / max_file_changes * 100, 1)
+            for d in sorted_dirs:
+                d["heat"] = round(d["change_count"] / max_dir_changes * 100, 1)
+
+            return {
+                "owner": owner, "repo": repo,
+                "files": sorted_files, "directories": sorted_dirs,
+                "total_prs": len(pr_numbers),
+                "total_files": len(file_stats), "total_dirs": len(dir_stats),
+                "generated_at": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"生成代码变更热力图失败: {e}")
+            return {"error": str(e)}

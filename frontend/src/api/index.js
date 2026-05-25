@@ -75,6 +75,12 @@ export const getProjectHealthTrends = (owner, repo, params) =>
 export const getTrendAlerts = (owner, repo, params) =>
   api.get(`/analysis/alerts/${owner}/${repo}`, { params })
 
+export const getCodeHeatmap = (owner, repo, params) =>
+  api.get(`/analysis/code-heatmap/${owner}/${repo}`, { params })
+
+export const fetchPrFiles = (owner, repo, params) =>
+  api.get(`/github/prs/${owner}/${repo}/files`, { params })
+
 export const getCommenterProfiles = (owner, repo, limit = 20) =>
   api.get(`/github/prs/${owner}/${repo}/commenters/profiles?limit=${limit}`)
 

@@ -989,6 +989,81 @@ class GitHubPRService:
 
         return result
 
+    async def fetch_pr_files(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
+        """获取指定 PR 的变更文件列表"""
+        logger.info(f"开始获取 {owner}/{repo} PR#{pr_number} 的变更文件")
+        all_files = []
+        page = 1
+        error = None
+
+        try:
+            while True:
+                headers = await self._get_headers()
+                url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}/files"
+                params = {"per_page": 100, "page": page}
+
+                response = await self._make_request(url, headers, params, 30)
+                if response.status_code == 404:
+                    error = "PR不存在"
+                    break
+                if response.status_code != 200:
+                    error = f"API请求失败: {response.status_code}"
+                    break
+
+                files = response.json()
+                if not files:
+                    break
+
+                for f in files:
+                    all_files.append({
+                        "filename": f.get("filename", ""),
+                        "status": f.get("status", ""),
+                        "additions": f.get("additions", 0),
+                        "deletions": f.get("deletions", 0),
+                        "changes": f.get("changes", 0),
+                        "patch": f.get("patch", ""),
+                        "sha": f.get("sha", ""),
+                    })
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            logger.info(f"获取 {owner}/{repo} PR#{pr_number} 变更文件完成，共 {len(all_files)} 个")
+        except Exception as e:
+            error = str(e)
+            logger.error(f"获取 {owner}/{repo} PR#{pr_number} 变更文件异常: {e}")
+
+        return {"owner": owner, "repo": repo, "pr_number": pr_number,
+                "files": all_files, "total": len(all_files), "error": error}
+
+    async def fetch_all_pr_files(self, owner: str, repo: str, pr_numbers: List[int]) -> Dict[str, Any]:
+        """异步并发获取多个 PR 的变更文件"""
+        logger.info(f"开始并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 的变更文件")
+        semaphore = asyncio.Semaphore(self.max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                return await self.fetch_pr_files(owner, repo, pr_num)
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        success_count = sum(1 for r in results if not isinstance(r, Exception) and r["error"] is None)
+        failed_count = len(results) - success_count
+        final_results = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                final_results.append({"owner": owner, "repo": repo, "pr_number": pr_numbers[i],
+                                      "files": [], "total": 0, "error": str(r)})
+            else:
+                final_results.append(r)
+
+        result = {
+            "owner": owner, "repo": repo,
+            "results": final_results, "total_prs": len(pr_numbers),
+            "success_count": success_count, "failed_count": failed_count,
+        }
+        logger.info(f"并发获取 {owner}/{repo} 变更文件完成: {success_count} 成功, {failed_count} 失败")
+        return result
+
 
 # 全局任务进度管理器
 task_progress_manager = TaskProgress()
