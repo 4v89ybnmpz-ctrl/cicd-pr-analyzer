@@ -1482,15 +1482,15 @@ class DatabaseService:
         reviews_query = {"owner": owner, "repo": repo}
         prs_with_review = await self.db['pr_reviews'].count_documents(reviews_query)
 
-        # 计算平均 reviewer 数
+        # 计算平均 reviewer 数（兼容 data 为 array 或 dict 两种格式）
         if prs_with_review > 0:
-            reviewer_pipeline = [
-                {"$match": reviews_query},
-                {"$project": {"reviewer_count": {"$size": "$data"}}},
-                {"$group": {"_id": None, "avg": {"$avg": "$reviewer_count"}}},
-            ]
-            reviewer_stats = await self.db['pr_reviews'].aggregate(reviewer_pipeline).to_list(length=1)
-            avg_reviewers = round(reviewer_stats[0]["avg"], 2) if reviewer_stats else None
+            review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+            review_counts = []
+            for doc in review_docs:
+                reviews_list = self._extract_reviews_list(doc.get("data"))
+                if reviews_list:
+                    review_counts.append(len(reviews_list))
+            avg_reviewers = round(sum(review_counts) / len(review_counts), 2) if review_counts else None
         else:
             avg_reviewers = None
 
@@ -1543,12 +1543,12 @@ class DatabaseService:
                 continue
 
             try:
-                pr_created_dt = datetime.fromisoformat(pr_created.replace("Z", "+00:00"))
+                pr_created_dt = datetime.fromisoformat(pr_created[:19])
             except (ValueError, AttributeError):
                 continue
 
-            reviews_data = doc.get("data", [])
-            if not isinstance(reviews_data, list):
+            reviews_data = self._extract_reviews_list(doc.get("data"))
+            if not reviews_data:
                 continue
 
             # 找到最早的 submitted_at
@@ -1558,7 +1558,7 @@ class DatabaseService:
                 if not submitted_at:
                     continue
                 try:
-                    submitted_dt = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                    submitted_dt = datetime.fromisoformat(submitted_at[:19])
                 except (ValueError, AttributeError):
                     continue
 
@@ -1588,47 +1588,50 @@ class DatabaseService:
             "avg_review_delay_hours": round(sum(all_review_delays) / len(all_review_delays), 2) if all_review_delays else None,
         }
 
+    @staticmethod
+    def _extract_reviews_list(data) -> list:
+        """从 pr_reviews.data 提取 reviews 列表，兼容 array 和 dict 两种格式"""
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # dict 格式：{"owner":..., "reviews": [...], "total": N}
+            if "reviews" in data and isinstance(data["reviews"], list):
+                return data["reviews"]
+            # 其他 dict 格式尝试取 values
+            for v in data.values():
+                if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                    return v
+        return []
+
     async def _compute_review_depth(self, owner: str, repo: str,
                                      time_filter: dict) -> Dict[str, Any]:
         """计算 Review 深度: 评论长度、有内容占比"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        pipeline = [
-            {"$match": reviews_query},
-            {"$unwind": "$data"},
-            {"$group": {
-                "_id": None,
-                "total": {"$sum": 1},
-                "with_body": {"$sum": {"$cond": [{"$gt": [{"$strLenCP": {"$ifNull": ["$data.body", ""]}}, 0]}, 1, 0]}},
-                "avg_body_length": {"$avg": {"$strLenCP": {"$ifNull": ["$data.body", ""]}}},
-            }},
-        ]
+        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
 
-        try:
-            stats = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=1)
-        except Exception:
-            stats = []
+        all_reviews = []
+        for doc in review_docs:
+            all_reviews.extend(self._extract_reviews_list(doc.get("data")))
 
-        if not stats:
+        total = len(all_reviews)
+        if total == 0:
             return {
-                "total_reviews": 0,
-                "avg_body_length": None,
-                "reviews_with_body": 0,
-                "reviews_without_body": 0,
-                "body_rate": None,
+                "total_reviews": 0, "avg_body_length": None,
+                "reviews_with_body": 0, "reviews_without_body": 0, "body_rate": None,
             }
 
-        s = stats[0]
-        total = s["total"]
-        with_body = s["with_body"]
+        body_lengths = [len(r.get("body", "") or "") for r in all_reviews]
+        with_body = sum(1 for bl in body_lengths if bl > 0)
         without_body = total - with_body
+        avg_body_length = round(sum(body_lengths) / total, 2)
 
         return {
             "total_reviews": total,
-            "avg_body_length": round(s["avg_body_length"], 2) if s.get("avg_body_length") else None,
+            "avg_body_length": avg_body_length,
             "reviews_with_body": with_body,
             "reviews_without_body": without_body,
-            "body_rate": round(with_body / total * 100, 2) if total > 0 else None,
+            "body_rate": round(with_body / total * 100, 2),
         }
 
     async def _compute_review_state_distribution(self, owner: str, repo: str,
@@ -1636,18 +1639,14 @@ class DatabaseService:
         """计算 Review 状态分布"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        pipeline = [
-            {"$match": reviews_query},
-            {"$unwind": "$data"},
-            {"$group": {"_id": "$data.state", "count": {"$sum": 1}}},
-        ]
+        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
 
-        try:
-            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=None)
-        except Exception:
-            raw = []
-
-        by_state = {item["_id"]: item["count"] for item in raw if item["_id"]}
+        by_state = {}
+        for doc in review_docs:
+            for r in self._extract_reviews_list(doc.get("data")):
+                state = r.get("state")
+                if state:
+                    by_state[state] = by_state.get(state, 0) + 1
 
         return {
             "approved": by_state.get("APPROVED", 0),
@@ -1662,35 +1661,38 @@ class DatabaseService:
         """计算 Top Reviewer 统计"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        pipeline = [
-            {"$match": reviews_query},
-            {"$unwind": "$data"},
-            {"$group": {
-                "_id": "$data.user.login",
-                "review_count": {"$sum": 1},
-                "approved_count": {"$sum": {"$cond": [{"$eq": ["$data.state", "APPROVED"]}, 1, 0]}},
-                "changes_requested_count": {"$sum": {"$cond": [{"$eq": ["$data.state", "CHANGES_REQUESTED"]}, 1, 0]}},
-                "avg_body_length": {"$avg": {"$strLenCP": {"$ifNull": ["$data.body", ""]}}},
-            }},
-            {"$sort": {"review_count": -1}},
-            {"$limit": top_n},
-        ]
+        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
 
-        try:
-            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=top_n)
-        except Exception:
-            raw = []
+        reviewer_map = {}
+        for doc in review_docs:
+            for r in self._extract_reviews_list(doc.get("data")):
+                user = (r.get("user") or {})
+                login = user.get("login") if isinstance(user, dict) else str(user)
+                if not login:
+                    continue
+                if login not in reviewer_map:
+                    reviewer_map[login] = {"review_count": 0, "approved_count": 0, "changes_requested_count": 0, "body_lengths": []}
+                entry = reviewer_map[login]
+                entry["review_count"] += 1
+                if r.get("state") == "APPROVED":
+                    entry["approved_count"] += 1
+                if r.get("state") == "CHANGES_REQUESTED":
+                    entry["changes_requested_count"] += 1
+                body = r.get("body", "") or ""
+                entry["body_lengths"].append(len(body))
+
+        sorted_reviewers = sorted(reviewer_map.items(), key=lambda x: x[1]["review_count"], reverse=True)[:top_n]
 
         return [
             {
-                "user": item["_id"],
-                "review_count": item["review_count"],
-                "approved_count": item["approved_count"],
-                "changes_requested_count": item["changes_requested_count"],
-                "avg_body_length": round(item["avg_body_length"], 2) if item.get("avg_body_length") else None,
+                "user": login,
+                "review_count": stats["review_count"],
+                "approved_count": stats["approved_count"],
+                "changes_requested_count": stats["changes_requested_count"],
+                "avg_body_length": round(sum(stats["body_lengths"]) / len(stats["body_lengths"]), 2) if stats["body_lengths"] else None,
                 "avg_delay_hours": None,
             }
-            for item in raw if item["_id"]
+            for login, stats in sorted_reviewers
         ]
 
     def _build_review_quality_insights(self, coverage: dict, delay: dict,
