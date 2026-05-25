@@ -219,6 +219,9 @@ def register_async_task_routes(router, github_service, db):
 
         asyncio.create_task(task_queue.run_task(task, _do, key))
         return {"task": task.to_dict(), "message": "任务已创建", "timestamp": datetime.now().isoformat()}
+
+
+async def _get_pr_numbers(owner, repo, limit, db, github_service):
     if db is not None:
         pr_data = await db.get_pr_data(owner, repo)
         if pr_data:
