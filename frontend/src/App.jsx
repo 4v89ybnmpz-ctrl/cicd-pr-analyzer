@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Layout, Menu, theme, ConfigProvider } from 'antd'
 import {
   DashboardOutlined,
@@ -19,6 +19,7 @@ import {
   BellOutlined,
   HeatMapOutlined,
   CodeOutlined,
+  SettingOutlined,
 } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import PrList from './pages/PrList'
@@ -40,6 +41,7 @@ import ProjectHealth from './pages/ProjectHealth'
 import TrendAlerts from './pages/TrendAlerts'
 import CodeHeatmap from './pages/CodeHeatmap'
 import CodeInsight from './pages/CodeInsight'
+import LlmConfig from './pages/LlmConfig'
 
 const { Header, Sider, Content } = Layout
 
@@ -60,45 +62,54 @@ const menuItems = [
   { key: 'code-heatmap', icon: <HeatMapOutlined />, label: '变更热力图' },
   { key: 'code-insight', icon: <CodeOutlined />, label: '变更洞察' },
   { key: 'agent-studio', icon: <RobotOutlined />, label: 'Agent 工作室' },
+  { key: 'llm-config', icon: <SettingOutlined />, label: 'AI 配置' },
   { key: 'aggregate', icon: <BarChartOutlined />, label: '聚合统计' },
   { key: 'tasks', icon: <ThunderboltOutlined />, label: '任务监控' },
 ]
 
 function App() {
-  const [page, setPage] = useState('dashboard')
+  const [page, setPage] = useState(() => localStorage.getItem('currentPage') || 'dashboard')
   const [prDataFilter, setPrDataFilter] = useState(null)
   const [userReposUsername, setUserReposUsername] = useState('')
+  const visitedRef = useRef(new Set([localStorage.getItem('currentPage') || 'dashboard']))
 
   const navigate = (key, username, extra) => {
     setPage(key)
+    localStorage.setItem('currentPage', key)
+    visitedRef.current.add(key)
     if (username) setUserReposUsername(username)
     if (extra && extra.owner && extra.repo) setPrDataFilter({ owner: extra.owner, repo: extra.repo })
   }
 
-  const renderPage = () => {
-    switch (page) {
-      case 'dashboard': return <Dashboard onNavigate={navigate} />
-      case 'projects-overview': return <ProjectsOverview />
-      case 'prs': return <PrList onNavigate={navigate} setFilter={setPrDataFilter} />
-      case 'prdata': return <PrData filter={prDataFilter} onBack={() => setPage('prs')} />
-      case 'details': return <PrDetails />
-      case 'comments': return <Comments />
-      case 'profiles': return <Profiles onNavigate={navigate} />
-      case 'issues': return <Issues onNavigate={navigate} />
-      case 'issue-timelines': return <IssueTimelines onNavigate={navigate} />
-      case 'git-log': return <GitLog />
-      case 'dev-relations': return <DeveloperRelations />
-      case 'review-quality': return <ReviewQuality />
-      case 'project-health': return <ProjectHealth />
-      case 'trend-alerts': return <TrendAlerts />
-      case 'code-heatmap': return <CodeHeatmap />
-      case 'code-insight': return <CodeInsight />
-      case 'agent-studio': return <AgentStudio />
-      case 'tasks': return <Tasks />
-      case 'user-repos': return <UserRepos username={userReposUsername} onBack={() => setPage('profiles')} />
-      case 'aggregate': return <Aggregate />
-      default: return <Dashboard onNavigate={navigate} />
-    }
+  const handlePageChange = (key) => {
+    setPage(key)
+    localStorage.setItem('currentPage', key)
+    visitedRef.current.add(key)
+  }
+
+  // 所有页面组件
+  const pages = {
+    'dashboard': <Dashboard onNavigate={navigate} />,
+    'projects-overview': <ProjectsOverview />,
+    'prs': <PrList onNavigate={navigate} setFilter={setPrDataFilter} />,
+    'prdata': <PrData filter={prDataFilter} onBack={() => setPage('prs')} />,
+    'details': <PrDetails />,
+    'comments': <Comments />,
+    'profiles': <Profiles onNavigate={navigate} />,
+    'issues': <Issues onNavigate={navigate} />,
+    'issue-timelines': <IssueTimelines onNavigate={navigate} />,
+    'git-log': <GitLog />,
+    'dev-relations': <DeveloperRelations />,
+    'review-quality': <ReviewQuality />,
+    'project-health': <ProjectHealth />,
+    'trend-alerts': <TrendAlerts />,
+    'code-heatmap': <CodeHeatmap />,
+    'code-insight': <CodeInsight onNavigate={navigate} />,
+    'agent-studio': <AgentStudio onNavigate={navigate} />,
+    'llm-config': <LlmConfig />,
+    'tasks': <Tasks />,
+    'user-repos': <UserRepos username={userReposUsername} onBack={() => setPage('profiles')} />,
+    'aggregate': <Aggregate />,
   }
 
   return (
@@ -112,7 +123,7 @@ function App() {
             mode="inline"
             selectedKeys={[page]}
             items={menuItems}
-            onClick={({ key }) => setPage(key)}
+            onClick={({ key }) => handlePageChange(key)}
             style={{ borderRight: 0 }}
           />
         </Sider>
@@ -121,7 +132,11 @@ function App() {
             <h2 style={{ margin: 0 }}>GitHub PR 数据分析平台</h2>
           </Header>
           <Content style={{ margin: 24, padding: 24, background: '#fff', borderRadius: 8, minHeight: 280 }}>
-            {renderPage()}
+            {Object.entries(pages).map(([key, component]) => (
+              <div key={key} style={{ display: key === page ? 'block' : 'none' }}>
+                {visitedRef.current.has(key) ? component : null}
+              </div>
+            ))}
           </Content>
         </Layout>
       </Layout>

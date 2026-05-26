@@ -5,6 +5,27 @@ const api = axios.create({
   timeout: 60000,
 })
 
+// 全局错误拦截器
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error.response?.status
+    const msg = error.response?.data?.detail || error.message
+    if (status === 429) {
+      error._friendlyMsg = '请求频率超限，请稍后重试'
+    } else if (status === 503) {
+      error._friendlyMsg = '服务暂不可用，请稍后重试'
+    } else if (status === 401) {
+      error._friendlyMsg = '认证失败，请检查配置'
+    } else if (!error.response && error.code === 'ECONNABORTED') {
+      error._friendlyMsg = '请求超时，请稍后重试'
+    } else if (!error.response) {
+      error._friendlyMsg = '网络错误，请检查连接'
+    }
+    return Promise.reject(error)
+  }
+)
+
 export const getDatabaseStats = () => api.get('/database/stats')
 
 export const getProjectsOverview = () => api.get('/database/projects/overview')
@@ -80,6 +101,15 @@ export const getCodeHeatmap = (owner, repo, params) =>
 
 export const getCodeInsight = (owner, repo, params) =>
   api.get(`/analysis/code-insight/${owner}/${repo}`, { params })
+
+export const aiAnalyzeCodeChanges = (owner, repo, params) =>
+  api.post(`/analysis/code-insight/${owner}/${repo}/ai-analyze`, null, { params, timeout: 120000 })
+
+export const fetchPrDetails = (owner, repo, params) =>
+  api.get(`/github/prs/${owner}/${repo}/details`, { params })
+
+export const fetchAllPrFiles = (owner, repo, params) =>
+  api.get(`/github/prs/${owner}/${repo}/files`, { params })
 
 export const fetchPrFiles = (owner, repo, params) =>
   api.post(`/github/tasks/files/${owner}/${repo}`, null, { params })
@@ -164,6 +194,10 @@ export const getAgentArtifacts = (owner, repo) => api.get(`/agent/artifacts/${ow
 export const getAgentArtifactSnapshot = (owner, repo) => api.get(`/agent/artifacts/${owner}/${repo}/snapshot`)
 export const agentChat = (params) => api.post('/agent/chat', params, { timeout: 120000 })
 export const getLlmConfig = () => api.get('/agent/llm/config')
-export const updateLlmConfig = (params) => api.put('/agent/llm/config', null, { params })
+export const updateLlmConfig = (params) =>
+  api.put('/agent/llm/config', null, { params })
+
+export const testLlmConnection = () =>
+  api.post('/agent/llm/test', null, { timeout: 30000 })
 
 export default api
