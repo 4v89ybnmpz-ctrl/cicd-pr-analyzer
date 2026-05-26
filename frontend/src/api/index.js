@@ -200,4 +200,14 @@ export const updateLlmConfig = (params) =>
 export const testLlmConnection = () =>
   api.post('/agent/llm/test', null, { timeout: 30000 })
 
+// Dashboard 概览接口
+export const getRecentActivities = (params) =>
+  api.get('/database/recent-activities', { params })
+
+export const getTopContributors = (params) =>
+  api.get('/database/contributors/top', { params })
+
+export const getBatchHealth = () =>
+  api.get('/analysis/health/batch', { timeout: 60000 })
+
 export default api
