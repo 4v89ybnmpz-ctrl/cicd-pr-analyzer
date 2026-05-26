@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, AutoComplete } from 'antd'
-import { ReloadOutlined, SearchOutlined, BranchesOutlined } from '@ant-design/icons'
+import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, AutoComplete, Modal } from 'antd'
+import { ReloadOutlined, SearchOutlined, BranchesOutlined, FileTextOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 export default function GitLog() {
@@ -12,9 +12,9 @@ export default function GitLog() {
   const [queryOwner, setQueryOwner] = useState('')
   const [queryRepo, setQueryRepo] = useState('')
   const [summary, setSummary] = useState(null)
-  const [expandedKeys, setExpandedKeys] = useState([])
   const [projects, setProjects] = useState([])
   const [searchText, setSearchText] = useState('')
+  const [filesModal, setFilesModal] = useState({ open: false, commit: null })
 
   useEffect(() => {
     api.getGitProjects().then(res => {
@@ -125,6 +125,19 @@ export default function GitLog() {
         </Space>
       ),
     },
+    {
+      title: '文件详情', key: 'files_detail', width: 90, align: 'center',
+      render: (_, r) => (
+        r.files?.length > 0 ? (
+          <Button type="link" size="small" icon={<FileTextOutlined />}
+            onClick={() => setFilesModal({ open: true, commit: r })}>
+            {r.files.length} 个文件
+          </Button>
+        ) : (
+          <span style={{ color: '#d9d9d9' }}>-</span>
+        )
+      ),
+    },
   ]
 
   return (
@@ -188,24 +201,7 @@ export default function GitLog() {
         dataSource={data}
         loading={loading}
         size="middle"
-        scroll={{ x: 900 }}
-        expandedRowKeys={expandedKeys}
-        onExpandedRowsChange={setExpandedKeys}
-        expandable={{
-          expandedRowRender: (r) => (
-            <div style={{ margin: 0 }}>
-              {r.files?.length > 0 ? (
-                <Table size="small" dataSource={r.files.map((f, i) => ({ key: i, ...f }))} pagination={false}
-                  columns={[
-                    { title: '文件', dataIndex: 'file', key: 'file', ellipsis: true, width: '60%' },
-                    { title: '增加', dataIndex: 'additions', width: 100, render: v => <Tag color="green">+{v}</Tag> },
-                    { title: '删除', dataIndex: 'deletions', width: 100, render: v => <Tag color="red">-{v}</Tag> },
-                  ]}
-                />
-              ) : <span style={{ color: '#999', padding: 8, display: 'inline-block' }}>无文件变更（merge commit）</span>}
-            </div>
-          ),
-        }}
+        scroll={{ x: 1100 }}
         pagination={{
           current: page, total, pageSize: 20,
           onChange: (p) => fetchCommits(p),
@@ -213,6 +209,41 @@ export default function GitLog() {
           showSizeChanger: false,
         }}
       />
+
+      <Modal
+        title={
+          filesModal.commit
+            ? <span><FileTextOutlined style={{ marginRight: 8 }} />文件变更详情 — <code>{filesModal.commit.abbrev_hash}</code> {filesModal.commit.subject}</span>
+            : '文件变更详情'
+        }
+        open={filesModal.open}
+        onCancel={() => setFilesModal({ open: false, commit: null })}
+        footer={null}
+        width={800}
+      >
+        {filesModal.commit?.files?.length > 0 ? (
+          <Table
+            size="small"
+            dataSource={filesModal.commit.files.map((f, i) => ({ key: i, ...f }))}
+            pagination={filesModal.commit.files.length > 20 ? { pageSize: 20 } : false}
+            columns={[
+              { title: '文件', dataIndex: 'file', key: 'file', ellipsis: true },
+              {
+                title: '增加', dataIndex: 'additions', width: 100,
+                render: v => <Tag color="green">+{v}</Tag>,
+                sorter: (a, b) => (a.additions || 0) - (b.additions || 0),
+              },
+              {
+                title: '删除', dataIndex: 'deletions', width: 100,
+                render: v => <Tag color="red">-{v}</Tag>,
+                sorter: (a, b) => (a.deletions || 0) - (b.deletions || 0),
+              },
+            ]}
+          />
+        ) : (
+          <div style={{ textAlign: 'center', color: '#999', padding: 24 }}>无文件变更（merge commit）</div>
+        )}
+      </Modal>
     </div>
   )
 }

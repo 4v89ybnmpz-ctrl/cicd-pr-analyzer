@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import { Table, Input, Tag, Space, Button, message, Tooltip } from 'antd'
-import { ReloadOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { Table, Input, Tag, Space, Button, message, Tooltip, AutoComplete } from 'antd'
+import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 const EVENT_COLORS = {
@@ -17,14 +17,40 @@ export default function IssueTimelines({ onNavigate }) {
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [owner, setOwner] = useState('')
-  const [repo, setRepo] = useState('')
   const [issueNumber, setIssueNumber] = useState('')
-  const [fetchOwner, setFetchOwner] = useState('rust-lang')
-  const [fetchRepo, setFetchRepo] = useState('rust')
-  const [fetchLimit, setFetchLimit] = useState(5)
+  const [projects, setProjects] = useState([])
+  const [searchText, setSearchText] = useState('')
+  const [queryOwner, setQueryOwner] = useState('')
+  const [queryRepo, setQueryRepo] = useState('')
 
-  const fetchFromDB = async (p = page) => {
+  useEffect(() => {
+    api.getIssueTimelineProjects().then(res => {
+      setProjects(res.data.projects || [])
+    }).catch(() => {})
+  }, [])
+
+  const projectOptions = useMemo(() => {
+    const q = searchText.toLowerCase().trim()
+    return projects
+      .filter(p => {
+        if (!q) return true
+        return p.owner.toLowerCase().startsWith(q) ||
+               p.repo.toLowerCase().startsWith(q) ||
+               `${p.owner}/${p.repo}`.toLowerCase().includes(q)
+      })
+      .slice(0, 15)
+      .map(p => ({
+        value: `${p.owner}/${p.repo}`,
+        label: (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span><b>{p.owner}</b>/{p.repo}</span>
+            <Tag>{p.count} events</Tag>
+          </div>
+        ),
+      }))
+  }, [projects, searchText])
+
+  const fetchFromDB = useCallback(async (p = page, owner = queryOwner, repo = queryRepo) => {
     setLoading(true)
     try {
       const params = { page: p, size: 20, sort_by: 'created_at', sort_order: 'desc' }
@@ -39,32 +65,37 @@ export default function IssueTimelines({ onNavigate }) {
       message.error('获取数据失败: ' + e.message)
     }
     setLoading(false)
+  }, [page, issueNumber, queryOwner, queryRepo])
+
+  useEffect(() => { fetchFromDB(1) }, [fetchFromDB])
+
+  const handleSelect = (value) => {
+    const [o, r] = value.split('/')
+    setQueryOwner(o)
+    setQueryRepo(r)
+    setSearchText(value)
+    setPage(1)
+    fetchFromDB(1, o, r)
   }
 
-  useEffect(() => { fetchFromDB(1) }, [])
-
-  const fetchFromGithub = async () => {
-    if (!fetchOwner || !fetchRepo) {
-      message.warning('请输入 owner 和 repo')
-      return
-    }
-    try {
-      const res = await api.asyncFetchTimelines(fetchOwner, fetchRepo, { limit: fetchLimit })
-      const task = res.data.task
-      if (task.status === 'running' || task.status === 'pending') {
-        message.success('任务已创建，正在跳转到任务监控...')
-        if (onNavigate) onNavigate('tasks')
-      } else {
-        message.warning(res.data.message || '任务已存在')
-        if (onNavigate) onNavigate('tasks')
-      }
-    } catch (e) {
-      message.error('创建任务失败: ' + e.message)
-    }
+  const handleSearch = () => {
+    setPage(1)
+    fetchFromDB(1)
   }
 
   const columns = [
-    { title: 'Issue#', dataIndex: 'issue_number', key: 'issue_number', width: 70, fixed: 'left' },
+    {
+      title: '项目', key: 'project', width: 180, fixed: 'left',
+      render: (_, r) => (
+        <a href={`https://github.com/${r.owner}/${r.repo}`} target="_blank" rel="noreferrer" style={{ fontWeight: 500 }}>
+          {r.owner}/{r.repo}
+        </a>
+      ),
+    },
+    {
+      title: 'Issue#', dataIndex: 'issue_number', key: 'issue_number', width: 70,
+      render: (v, r) => <a href={`https://github.com/${r.owner}/${r.repo}/issues/${v}`} target="_blank" rel="noreferrer">#{v}</a>,
+    },
     {
       title: '类型', dataIndex: 'is_pr', key: 'is_pr', width: 65,
       render: v => v ? <Tag color="purple">PR</Tag> : <Tag color="blue">Issue</Tag>,
@@ -113,19 +144,25 @@ export default function IssueTimelines({ onNavigate }) {
       <h2 style={{ marginBottom: 24 }}>Issue Timelines</h2>
 
       <Space style={{ marginBottom: 12 }} wrap>
-        <Input placeholder="Owner (获取)" value={fetchOwner} onChange={e => setFetchOwner(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Repo (获取)" value={fetchRepo} onChange={e => setFetchRepo(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Issue数量" type="number" value={fetchLimit} onChange={e => setFetchLimit(Number(e.target.value))} style={{ width: 80 }} />
-        <Button type="primary" icon={<DownloadOutlined />} onClick={fetchFromGithub} loading={loading}>
-          从 GitHub 获取
-        </Button>
-      </Space>
-
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Input placeholder="Owner (筛选)" value={owner} onChange={e => setOwner(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Repo (筛选)" value={repo} onChange={e => setRepo(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Issue# (筛选)" value={issueNumber} onChange={e => setIssueNumber(e.target.value)} style={{ width: 80 }} />
-        <Button type="primary" icon={<SearchOutlined />} onClick={() => { setPage(1); fetchFromDB(1) }}>搜索</Button>
+        <AutoComplete
+          options={projectOptions}
+          onSelect={handleSelect}
+          value={searchText}
+          onChange={(v) => {
+            setSearchText(v || '')
+            if (!v) { setQueryOwner(''); setQueryRepo(''); return }
+            const idx = v.indexOf('/')
+            if (idx >= 0) { setQueryOwner(v.substring(0, idx)); setQueryRepo(v.substring(idx + 1)) }
+            else { setQueryOwner(v); setQueryRepo('') }
+          }}
+          style={{ width: 300 }}
+          placeholder="输入项目名称 (owner/repo)"
+          filterOption={false}
+          allowClear
+        />
+        <Input placeholder="Issue# 筛选" value={issueNumber} onChange={e => setIssueNumber(e.target.value)}
+          onPressEnter={handleSearch} style={{ width: 100 }} allowClear />
+        <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch} loading={loading}>搜索</Button>
         <Button icon={<ReloadOutlined />} onClick={() => fetchFromDB()}>刷新</Button>
       </Space>
 
@@ -138,7 +175,7 @@ export default function IssueTimelines({ onNavigate }) {
           onChange: (p) => { setPage(p); fetchFromDB(p) },
           showTotal: (t) => `共 ${t} 条`,
         }}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1400 }}
       />
     </div>
   )

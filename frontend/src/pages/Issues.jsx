@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import { Table, Input, Tag, Space, Button, message } from 'antd'
-import { ReloadOutlined, SearchOutlined, DownloadOutlined, SyncOutlined } from '@ant-design/icons'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { Table, Input, Tag, Space, Button, message, AutoComplete, Select } from 'antd'
+import { ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
 export default function Issues({ onNavigate }) {
@@ -8,14 +8,40 @@ export default function Issues({ onNavigate }) {
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [owner, setOwner] = useState('')
-  const [repo, setRepo] = useState('')
   const [stateFilter, setStateFilter] = useState('')
-  const [fetchOwner, setFetchOwner] = useState('rust-lang')
-  const [fetchRepo, setFetchRepo] = useState('rust')
-  const [fetchCount, setFetchCount] = useState(50)
+  const [projects, setProjects] = useState([])
+  const [searchText, setSearchText] = useState('')
+  const [queryOwner, setQueryOwner] = useState('')
+  const [queryRepo, setQueryRepo] = useState('')
 
-  const fetchFromDB = async (p = page) => {
+  useEffect(() => {
+    api.getIssueProjects().then(res => {
+      setProjects(res.data.projects || [])
+    }).catch(() => {})
+  }, [])
+
+  const projectOptions = useMemo(() => {
+    const q = searchText.toLowerCase().trim()
+    return projects
+      .filter(p => {
+        if (!q) return true
+        return p.owner.toLowerCase().startsWith(q) ||
+               p.repo.toLowerCase().startsWith(q) ||
+               `${p.owner}/${p.repo}`.toLowerCase().includes(q)
+      })
+      .slice(0, 15)
+      .map(p => ({
+        value: `${p.owner}/${p.repo}`,
+        label: (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span><b>{p.owner}</b>/{p.repo}</span>
+            <Tag>{p.count} issues</Tag>
+          </div>
+        ),
+      }))
+  }, [projects, searchText])
+
+  const fetchFromDB = useCallback(async (p = page, owner = queryOwner, repo = queryRepo) => {
     setLoading(true)
     try {
       const params = { page: p, size: 20, sort_by: 'created_at', sort_order: 'desc' }
@@ -30,38 +56,32 @@ export default function Issues({ onNavigate }) {
       message.error('获取数据失败: ' + e.message)
     }
     setLoading(false)
+  }, [page, stateFilter, queryOwner, queryRepo])
+
+  useEffect(() => { fetchFromDB(1) }, [fetchFromDB])
+
+  const handleSelect = (value) => {
+    const [o, r] = value.split('/')
+    setQueryOwner(o)
+    setQueryRepo(r)
+    setSearchText(value)
+    setPage(1)
+    fetchFromDB(1, o, r)
   }
 
-  useEffect(() => { fetchFromDB(1) }, [])
-
-  const fetchFromGithub = async () => {
-    if (!fetchOwner || !fetchRepo) {
-      message.warning('请输入 owner 和 repo')
-      return
-    }
-    try {
-      const res = await api.asyncFetchIssues(fetchOwner, fetchRepo, { max_count: fetchCount })
-      const task = res.data.task
-      if (task.status === 'running' || task.status === 'pending') {
-        message.success('任务已创建，正在跳转到任务监控...')
-        if (onNavigate) onNavigate('tasks')
-      } else {
-        message.warning(res.data.message || '任务已存在')
-        if (onNavigate) onNavigate('tasks')
-      }
-    } catch (e) {
-      message.error('创建任务失败: ' + e.message)
-    }
+  const handleSearch = () => {
+    setPage(1)
+    fetchFromDB(1)
   }
 
   const handleUpdate = async () => {
-    if (!owner || !repo) {
-      message.warning('请先筛选指定仓库')
+    if (!queryOwner || !queryRepo) {
+      message.warning('请先选择一个项目')
       return
     }
     setLoading(true)
     try {
-      const res = await api.updateIssues(owner, repo)
+      const res = await api.updateIssues(queryOwner, queryRepo)
       message.success(`更新完成: 更新=${res.data.updated}, 新增=${res.data.added}, 未变=${res.data.unchanged}`)
       fetchFromDB(1)
     } catch (e) {
@@ -71,6 +91,14 @@ export default function Issues({ onNavigate }) {
   }
 
   const columns = [
+    {
+      title: '项目', key: 'project', width: 180, fixed: 'left',
+      render: (_, r) => (
+        <a href={`https://github.com/${r.owner}/${r.repo}`} target="_blank" rel="noreferrer" style={{ fontWeight: 500 }}>
+          {r.owner}/{r.repo}
+        </a>
+      ),
+    },
     {
       title: 'Issue#', dataIndex: 'number', key: 'number', width: 80,
       render: (v, r) => <a href={r.url} target="_blank" rel="noreferrer">#{v}</a>,
@@ -96,20 +124,35 @@ export default function Issues({ onNavigate }) {
     <div>
       <h2 style={{ marginBottom: 24 }}>Issues</h2>
 
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Input placeholder="Owner (获取)" value={fetchOwner} onChange={e => setFetchOwner(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Repo (获取)" value={fetchRepo} onChange={e => setFetchRepo(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="数量" type="number" value={fetchCount} onChange={e => setFetchCount(Number(e.target.value))} style={{ width: 70 }} />
-        <Button type="primary" icon={<DownloadOutlined />} onClick={fetchFromGithub} loading={loading}>
-          从 GitHub 获取
-        </Button>
-      </Space>
-
       <Space style={{ marginBottom: 16 }} wrap>
-        <Input placeholder="Owner (筛选)" value={owner} onChange={e => setOwner(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="Repo (筛选)" value={repo} onChange={e => setRepo(e.target.value)} style={{ width: 130 }} />
-        <Input placeholder="状态 (open/closed)" value={stateFilter} onChange={e => setStateFilter(e.target.value)} style={{ width: 120 }} />
-        <Button type="primary" icon={<SearchOutlined />} onClick={() => { setPage(1); fetchFromDB(1) }}>搜索</Button>
+        <AutoComplete
+          options={projectOptions}
+          onSelect={handleSelect}
+          value={searchText}
+          onChange={(v) => {
+            setSearchText(v || '')
+            if (!v) { setQueryOwner(''); setQueryRepo(''); return }
+            const idx = v.indexOf('/')
+            if (idx >= 0) { setQueryOwner(v.substring(0, idx)); setQueryRepo(v.substring(idx + 1)) }
+            else { setQueryOwner(v); setQueryRepo('') }
+          }}
+          style={{ width: 300 }}
+          placeholder="输入项目名称 (owner/repo)"
+          filterOption={false}
+          allowClear
+        />
+        <Select
+          placeholder="状态"
+          value={stateFilter || undefined}
+          onChange={v => { setStateFilter(v || '') }}
+          allowClear
+          style={{ width: 120 }}
+          options={[
+            { value: 'open', label: 'Open' },
+            { value: 'closed', label: 'Closed' },
+          ]}
+        />
+        <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch} loading={loading}>搜索</Button>
         <Button icon={<SyncOutlined />} onClick={handleUpdate} loading={loading}>更新数据</Button>
         <Button icon={<ReloadOutlined />} onClick={() => fetchFromDB()}>刷新</Button>
       </Space>
@@ -123,7 +166,7 @@ export default function Issues({ onNavigate }) {
           onChange: (p) => { setPage(p); fetchFromDB(p) },
           showTotal: (t) => `共 ${t} 条`,
         }}
-        scroll={{ x: 900 }}
+        scroll={{ x: 1100 }}
       />
     </div>
   )

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Table, Tag, Space, Button, message, Popconfirm, Badge, Modal, Typography } from 'antd'
+import { Table, Tag, Space, Button, message, Popconfirm, Badge, Modal, Typography, Tooltip } from 'antd'
 import { ReloadOutlined, DeleteOutlined, ClearOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
@@ -106,10 +106,10 @@ export default function Tasks() {
           if (res.fetched !== undefined) parts.push(`获取 ${res.fetched}`)
           if (res.saved !== undefined) parts.push(`保存 ${res.saved}`)
           if (res.failed) parts.push(`失败 ${res.failed}`)
-          if (res.error) return <Tag color="error">{res.error}</Tag>
+          if (res.error) return <Tooltip title={res.error}><Tag color="error" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{res.error.length > 30 ? res.error.substring(0, 30) + '...' : res.error}</Tag></Tooltip>
           return <Tag color="success">{parts.join('，')}</Tag>
         }
-        if (r.status === 'failed') return <Tag color="error">{r.error || '失败'}</Tag>
+        if (r.status === 'failed') return <Tooltip title={r.error}><Tag color="error" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.error || '失败'}</Tag></Tooltip>
         return '-'
       },
     },
@@ -123,7 +123,7 @@ export default function Tasks() {
         return sec > 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`
       },
     },
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 90, render: v => v ? v.substring(11, 19) : '-' },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 150, render: v => v ? v.substring(0, 19).replace('T', ' ') : '-' },
     {
       title: '操作', key: 'action', width: 120,
       render: (_, r) => (
@@ -196,7 +196,7 @@ export default function Tasks() {
                 logs.length === 0 ? <Text style={{ color: '#666' }}>暂无日志</Text> :
                 logs.map((log, i) => (
                   <div key={i} style={{ lineHeight: '22px' }}>
-                    <Text style={{ color: '#666' }}>[{log.time}]</Text>
+                    <Text style={{ color: '#666' }}>[{log.time && log.time.includes('-') ? log.time.substring(0, 19) : log.time}]</Text>
                     <Text style={{ color: LOG_COLORS[log.level] || '#ccc', margin: '0 6px' }}>[{log.level}]</Text>
                     <Text style={{ color: '#d4d4d4' }}>{log.message}</Text>
                   </div>
