@@ -122,11 +122,21 @@ def _make_initial_state(owner: str, repo: str, max_prs: int) -> PipelineState:
 
 
 def _emit_task_event(task_id: str, event_type: str, data: Dict[str, Any] = None):
+    event = {
+        "task_id": task_id,
+        "event_type": event_type,
+        "data": data or {},
+        "timestamp": time.time(),
+        "time_str": datetime.now().strftime("%H:%M:%S"),
+    }
+    with _task_lock:
+        if task_id in _tasks:
+            _tasks[task_id].setdefault("logs", []).append(event)
     with _event_lock:
         callbacks = _event_subscribers.get(task_id, [])
     for cb in callbacks:
         try:
-            cb({"task_id": task_id, "event_type": event_type, "data": data or {}, "timestamp": time.time()})
+            cb(event)
         except Exception as e:
             logger.warning(f"事件推送失败: {e}")
 
@@ -244,6 +254,35 @@ def run_multi_agent_analysis(owner: str, repo: str, max_prs: int = 0,
 
     _emit_task_event(task_id, "started", {"owner": owner, "repo": repo, "mode": mode})
 
+    # 注册 Agent 事件回调，将内部事件也写入任务日志
+    _agent_event_names = {
+        "started": "开始执行",
+        "tool_call": "调用工具",
+        "tool_result": "工具返回",
+        "completed": "执行完成",
+        "failed": "执行失败",
+        "retry": "重试",
+        "delegate": "委派任务",
+    }
+
+    def _on_agent_event(event):
+        from .agents.base_agent import AgentEventType
+        et = event.event_type.value if isinstance(event.event_type, AgentEventType) else str(event.event_type)
+        data = dict(event.data)
+        data["agent"] = event.agent_name
+        _emit_task_event(task_id, f"agent_{et}", data)
+
+    try:
+        for desc in agent_registry._agents.values():
+            try:
+                inst = agent_registry.get(desc.name)
+                if inst:
+                    inst.on_event(_on_agent_event)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         from .agent_graphs import build_multi_agent_graph, build_sequential_agent_graph, build_smart_agent_graph
         if mode == "sequential":
@@ -285,6 +324,7 @@ def run_multi_agent_async(owner: str, repo: str, max_prs: int = 0, mode: str = "
             "task_id": task_id, "type": f"multi_agent_{mode}",
             "owner": owner, "repo": repo,
             "status": "pending", "started_at": datetime.now().isoformat(),
+            "logs": [],
         }
 
     def _run():

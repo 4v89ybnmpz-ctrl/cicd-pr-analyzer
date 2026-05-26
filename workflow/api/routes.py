@@ -386,3 +386,63 @@ def register_workflow_routes(router: APIRouter):
         from workflow.agents.artifact_store import artifact_store
         snapshot = artifact_store.snapshot()
         return {"timestamp": datetime.now().isoformat(), "snapshot": snapshot}
+
+    # ====================
+    # LLM 配置
+    # ====================
+
+    @router.get("/agent/llm/config", tags=["Agent"])
+    async def get_llm_config():
+        """获取当前 LLM 配置"""
+        from workflow.config import workflow_config
+        llm = workflow_config.llm
+        config = {
+            "model": getattr(llm, "model_name", "") or getattr(llm, "model", "") or "",
+            "base_url": getattr(llm, "anthropic_api_url", "") or getattr(llm, "base_url", "") or "",
+            "max_tokens": getattr(llm, "max_tokens", 4096),
+            "temperature": getattr(llm, "temperature", 0.3),
+            "ai_ready": workflow_config.ai_ready,
+            "api_key_set": bool(getattr(llm, "anthropic_api_key", None) or getattr(llm, "api_key", None)),
+        }
+        return config
+
+    @router.put("/agent/llm/config", tags=["Agent"])
+    async def update_llm_config(
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ):
+        """热更新 LLM 配置（无需重启）"""
+        from workflow.config import workflow_config
+        try:
+            llm = workflow_config.llm
+            changed = []
+            if model is not None and hasattr(llm, "model_name"):
+                llm.model_name = model
+                changed.append(f"model={model}")
+            elif model is not None and hasattr(llm, "model"):
+                llm.model = model
+                changed.append(f"model={model}")
+            if base_url is not None and hasattr(llm, "anthropic_api_url"):
+                llm.anthropic_api_url = base_url
+                changed.append(f"base_url={base_url}")
+            elif base_url is not None and hasattr(llm, "base_url"):
+                llm.base_url = base_url
+                changed.append(f"base_url={base_url}")
+            if api_key is not None and hasattr(llm, "anthropic_api_key"):
+                llm.anthropic_api_key = api_key
+                changed.append("api_key=***")
+            elif api_key is not None and hasattr(llm, "api_key"):
+                llm.api_key = api_key
+                changed.append("api_key=***")
+            if max_tokens is not None and hasattr(llm, "max_tokens"):
+                llm.max_tokens = max_tokens
+                changed.append(f"max_tokens={max_tokens}")
+            if temperature is not None and hasattr(llm, "temperature"):
+                llm.temperature = temperature
+                changed.append(f"temperature={temperature}")
+            return {"ok": True, "changed": changed, "message": f"已更新: {', '.join(changed)}" if changed else "无变更"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

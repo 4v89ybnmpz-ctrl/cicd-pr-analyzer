@@ -50,9 +50,9 @@ class LLMTierConfig:
 
 # 预定义 LLM 分级
 LLM_TIERS = {
-    "premium": LLMTierConfig("premium", "claude-sonnet-4-20250514", 4096, 0.003, 0.015),
-    "standard": LLMTierConfig("standard", "claude-3-5-haiku-20241022", 2048, 0.001, 0.005),
-    "economy": LLMTierConfig("economy", "claude-3-haiku-20240307", 1024, 0.00025, 0.00125),
+    "premium": LLMTierConfig("premium", "glm-5.1", 4096, 0.001, 0.001),
+    "standard": LLMTierConfig("standard", "glm-5.1", 2048, 0.001, 0.001),
+    "economy": LLMTierConfig("economy", "glm-5.1", 1024, 0.001, 0.001),
 }
 
 # Agent 使用的 LLM 等级映射（高优先级 Agent 用高端模型）
