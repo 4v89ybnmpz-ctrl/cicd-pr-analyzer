@@ -517,3 +517,17 @@ def register_database_routes(router, db):
             elif "404" in err_msg:
                 err_msg = "API 端点不存在（404），请检查 Base URL 和模型名称"
             return {"ok": False, "error": err_msg}
+
+    @router.get("/database/recent-activities")
+    async def get_recent_activities(limit: int = 15):
+        """获取最近活动时间线（PR创建、评论、Issue 等）"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_recent_activities(limit)
+
+    @router.get("/database/contributors/top")
+    async def get_top_contributors(limit: int = 10, sort_by: str = "total_activity"):
+        """获取贡献者排行榜"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_top_contributors(limit, sort_by)

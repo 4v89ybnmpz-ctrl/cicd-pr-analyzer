@@ -3725,3 +3725,200 @@ class DatabaseService:
             "trend_points": trend_points,
             "insight": "；".join(insights) if insights else "各指标环比变化平稳",
         }
+
+    async def get_recent_activities(self, limit: int = 15) -> Dict[str, Any]:
+        """获取最近活动时间线，合并 PR、评论、Issue 三种类型"""
+        if self.db is None:
+            return {"activities": [], "total": 0}
+        try:
+            collection_names = await self.db.list_collection_names()
+            activities = []
+
+            # PR 创建活动
+            if 'pr_data' in collection_names:
+                cursor = self.db['pr_data'].find(
+                    {}, {"_id": 0, "owner": 1, "repo": 1, "number": 1, "title": 1, "user": 1, "state": 1, "created_at": 1}
+                ).sort("created_at", -1).limit(limit)
+                async for doc in cursor:
+                    activities.append({
+                        "type": "pr_created",
+                        "owner": doc.get("owner", ""),
+                        "repo": doc.get("repo", ""),
+                        "number": doc.get("number"),
+                        "title": doc.get("title", ""),
+                        "user": doc.get("user", ""),
+                        "state": doc.get("state", ""),
+                        "created_at": doc.get("created_at", ""),
+                    })
+
+            # 评论活动
+            if 'pr_comments' in collection_names:
+                cursor = self.db['pr_comments'].find(
+                    {}, {"_id": 0, "owner": 1, "repo": 1, "pr_number": 1, "user": 1, "body": 1, "created_at": 1}
+                ).sort("created_at", -1).limit(limit)
+                async for doc in cursor:
+                    body = doc.get("body", "") or ""
+                    activities.append({
+                        "type": "comment",
+                        "owner": doc.get("owner", ""),
+                        "repo": doc.get("repo", ""),
+                        "pr_number": doc.get("pr_number"),
+                        "user": doc.get("user", ""),
+                        "body_preview": body[:80] + ("..." if len(body) > 80 else ""),
+                        "created_at": doc.get("created_at", ""),
+                    })
+
+            # Issue 活动
+            if 'issues' in collection_names:
+                cursor = self.db['issues'].find(
+                    {}, {"_id": 0, "owner": 1, "repo": 1, "number": 1, "title": 1, "user": 1, "state": 1, "created_at": 1, "closed_at": 1}
+                ).sort("created_at", -1).limit(limit)
+                async for doc in cursor:
+                    is_closed = doc.get("state") == "closed"
+                    activities.append({
+                        "type": "issue_closed" if is_closed else "issue_opened",
+                        "owner": doc.get("owner", ""),
+                        "repo": doc.get("repo", ""),
+                        "number": doc.get("number"),
+                        "title": doc.get("title", ""),
+                        "user": doc.get("user", ""),
+                        "created_at": doc.get("closed_at" if is_closed else "created_at", ""),
+                    })
+
+            # 按时间降序合并排序
+            activities.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+            total = len(activities)
+            activities = activities[:limit]
+
+            return {"activities": activities, "total": total}
+        except Exception as e:
+            logger.error(f"获取最近活动失败: {e}")
+            return {"activities": [], "total": 0, "error": str(e)}
+
+    async def get_top_contributors(self, limit: int = 10, sort_by: str = "total_activity") -> Dict[str, Any]:
+        """获取贡献者排行榜，合并 PR、评论、Issue 统计"""
+        if self.db is None:
+            return {"contributors": [], "total": 0, "sort_by": sort_by}
+        try:
+            contributor_map = {}
+
+            # 从 pr_data 统计 PR 数
+            pipeline_pr = [
+                {"$group": {"_id": "$user", "pr_count": {"$sum": 1}, "projects": {"$addToSet": {"$concat": ["$owner", "/", "$repo"]}}}},
+            ]
+            async for doc in self.db['pr_data'].aggregate(pipeline_pr):
+                user = doc["_id"]
+                if not user or user.endswith("[bot]") or "[bot]" in (user or ""):
+                    continue
+                contributor_map[user] = {
+                    "user": user,
+                    "pr_count": doc["pr_count"],
+                    "comment_count": 0,
+                    "issue_count": 0,
+                    "total_activity": doc["pr_count"],
+                    "first_active": None,
+                    "last_active": None,
+                    "projects": list(doc.get("projects", [])),
+                }
+
+            # 从 pr_comments 统计评论数
+            pipeline_comments = [
+                {"$group": {"_id": "$user", "comment_count": {"$sum": 1}}},
+            ]
+            async for doc in self.db['pr_comments'].aggregate(pipeline_comments):
+                user = doc["_id"]
+                if not user or "[bot]" in (user or ""):
+                    continue
+                if user not in contributor_map:
+                    contributor_map[user] = {
+                        "user": user, "pr_count": 0, "comment_count": 0,
+                        "issue_count": 0, "total_activity": 0,
+                        "first_active": None, "last_active": None, "projects": [],
+                    }
+                contributor_map[user]["comment_count"] = doc["comment_count"]
+
+            # 从 issues 统计 Issue 数
+            pipeline_issues = [
+                {"$group": {"_id": "$user", "issue_count": {"$sum": 1}}},
+            ]
+            async for doc in self.db['issues'].aggregate(pipeline_issues):
+                user = doc["_id"]
+                if not user or "[bot]" in (user or ""):
+                    continue
+                if user not in contributor_map:
+                    contributor_map[user] = {
+                        "user": user, "pr_count": 0, "comment_count": 0,
+                        "issue_count": 0, "total_activity": 0,
+                        "first_active": None, "last_active": None, "projects": [],
+                    }
+                contributor_map[user]["issue_count"] = doc["issue_count"]
+
+            # 计算总活跃度
+            for c in contributor_map.values():
+                c["total_activity"] = c["pr_count"] + c["comment_count"] + c["issue_count"]
+
+            # 排序
+            valid_sorts = {"pr_count", "comment_count", "issue_count", "total_activity"}
+            sort_key = sort_by if sort_by in valid_sorts else "total_activity"
+            contributors = sorted(contributor_map.values(), key=lambda x: x[sort_key], reverse=True)
+            total = len(contributors)
+            contributors = contributors[:limit]
+
+            return {"contributors": contributors, "total": total, "sort_by": sort_key}
+        except Exception as e:
+            logger.error(f"获取贡献者排行失败: {e}")
+            return {"contributors": [], "total": 0, "sort_by": sort_by, "error": str(e)}
+
+    async def get_batch_health_snapshots(self, projects: List[str] = None) -> Dict[str, Any]:
+        """批量获取项目健康度快照"""
+        if self.db is None:
+            return {"snapshots": [], "total": 0}
+        try:
+            # 获取项目列表
+            if not projects:
+                projects = []
+                async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+                    projects.append(f"{doc['owner']}/{doc['repo']}")
+
+            if not projects:
+                return {"snapshots": [], "total": 0}
+
+            # 并发获取健康度（限制并发数）
+            sem = asyncio.Semaphore(3)
+
+            async def _get_snapshot(project_key: str) -> Dict[str, Any]:
+                parts = project_key.split("/", 1)
+                if len(parts) < 2:
+                    return None
+                owner, repo = parts[0], parts[1]
+                async with sem:
+                    try:
+                        report = await self.get_project_health_report(owner, repo)
+                        if "error" in report:
+                            return {"owner": owner, "repo": repo, "data_available": False,
+                                    "overall_score": 0, "overall_grade": "N/A"}
+                        # 提取维度摘要
+                        dimensions_summary = {}
+                        for dim in report.get("dimensions", []):
+                            dimensions_summary[dim.get("name", "")] = {
+                                "score": dim.get("score", 0),
+                            }
+                        return {
+                            "owner": owner,
+                            "repo": repo,
+                            "overall_score": report.get("overall_score", 0),
+                            "overall_grade": report.get("overall_grade", "N/A"),
+                            "data_available": True,
+                            "dimensions_summary": dimensions_summary,
+                        }
+                    except Exception:
+                        return {"owner": owner, "repo": repo, "data_available": False,
+                                "overall_score": 0, "overall_grade": "N/A"}
+
+            results = await asyncio.gather(*[_get_snapshot(p) for p in projects])
+            snapshots = [r for r in results if r is not None]
+
+            return {"snapshots": snapshots, "total": len(snapshots)}
+        except Exception as e:
+            logger.error(f"批量获取健康度快照失败: {e}")
+            return {"snapshots": [], "total": 0, "error": str(e)}

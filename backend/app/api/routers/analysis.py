@@ -222,6 +222,13 @@ def register_analysis_routes(router: APIRouter, db, cache):
     # 项目健康度评分
     # ====================
 
+    @router.get("/analysis/health/batch", tags=["项目健康度"])
+    async def get_batch_health():
+        """批量获取所有已注册项目的健康度快照"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        return await db.get_batch_health_snapshots()
+
     @router.get("/analysis/health/{owner}/{repo}", tags=["项目健康度"], response_model=ProjectHealthReport)
     async def get_project_health(
         owner: str,
