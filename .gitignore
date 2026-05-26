@@ -50,7 +50,9 @@ backend/logs/
 backend/config.json
 backend/db_config.json
 backend/encryption_key.json
+backend/app/llm_config.json
 encryption_key.json
+llm_config.json
 
 # Secrets (Docker Secrets / TLS 证书)
 backend/secrets/*.txt
