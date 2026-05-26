@@ -1284,18 +1284,23 @@ class DatabaseService:
                 commits_count = git_log_total or pr_commits_counts.get(project_key, 0)
 
                 last_updated = None
+                # 用聚合查询一次性获取所有集合的最新 saved_at，替代 N+1 逐集合查询
                 for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details", "git_log_summaries", "git_log_commits"]:
                     if coll_name not in collection_names:
                         continue
-                    doc = await self.db[coll_name].find_one(
-                        {"owner": owner, "repo": repo},
-                        {"saved_at": 1, "_id": 0},
-                        sort=[("saved_at", -1)],
-                    )
-                    if doc and doc.get("saved_at"):
-                        sa = doc["saved_at"]
-                        if last_updated is None or sa > last_updated:
-                            last_updated = sa
+                    try:
+                        agg_result = await self.db[coll_name].aggregate([
+                            {"$match": {"owner": owner, "repo": repo}},
+                            {"$sort": {"saved_at": -1}},
+                            {"$limit": 1},
+                            {"$project": {"saved_at": 1, "_id": 0}},
+                        ]).to_list(length=1)
+                        if agg_result and agg_result[0].get("saved_at"):
+                            sa = agg_result[0]["saved_at"]
+                            if last_updated is None or sa > last_updated:
+                                last_updated = sa
+                    except Exception:
+                        pass
 
                 overview.append({
                     "owner": owner,
@@ -1482,15 +1487,28 @@ class DatabaseService:
         reviews_query = {"owner": owner, "repo": repo}
         prs_with_review = await self.db['pr_reviews'].count_documents(reviews_query)
 
-        # 计算平均 reviewer 数（兼容 data 为 array 或 dict 两种格式）
+        # 计算平均 reviewer 数（用聚合替代全量加载）
         if prs_with_review > 0:
-            review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
-            review_counts = []
-            for doc in review_docs:
-                reviews_list = self._extract_reviews_list(doc.get("data"))
-                if reviews_list:
-                    review_counts.append(len(reviews_list))
-            avg_reviewers = round(sum(review_counts) / len(review_counts), 2) if review_counts else None
+            try:
+                # 先尝试 data 为 array 的格式
+                agg_result = await self.db['pr_reviews'].aggregate([
+                    {"$match": reviews_query},
+                    {"$project": {"review_count": {"$size": {"$ifNull": ["$data", []]}}}},
+                    {"$group": {"_id": None, "avg": {"$avg": "$review_count"}}},
+                ]).to_list(length=1)
+                if agg_result and agg_result[0].get("avg") is not None:
+                    avg_reviewers = round(agg_result[0]["avg"], 2)
+                else:
+                    # data 为 dict 格式，回退到采样
+                    sample_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=100)
+                    review_counts = []
+                    for doc in sample_docs:
+                        reviews_list = self._extract_reviews_list(doc.get("data"))
+                        if reviews_list:
+                            review_counts.append(len(reviews_list))
+                    avg_reviewers = round(sum(review_counts) / len(review_counts), 2) if review_counts else None
+            except Exception:
+                avg_reviewers = None
         else:
             avg_reviewers = None
 
@@ -2688,31 +2706,39 @@ class DatabaseService:
     # ====================
 
     @staticmethod
+    @staticmethod
     def _classify_change(pr_title: str, pr_body: str, filenames: List[str], labels: List[str]) -> str:
         """
         基于 PR 标题、body、文件路径和标签分类变更类型
-        返回: feature / bugfix / refactor / docs / test / ci / perf / other
+        返回: feature / bugfix / refactor / docs / test / ci / perf / security / other
         """
+        import re
         text = f"{pr_title} {pr_body}".lower()
         all_files = " ".join(filenames).lower()
         all_labels = " ".join(labels).lower()
 
-        # CI/构建相关
+        # 安全修复（最高优先级）
+        sec_keywords = ["cve", "vulnerability", "xss", "csrf", "injection", "sanitize",
+                        "privilege escalation", "security fix", "security patch", "auth bypass"]
+        sec_labels = ["security", "type:security", "kind/security", "vulnerability"]
+        if any(k in text for k in sec_keywords) or any(k in all_labels for k in sec_labels):
+            return "security"
+
+        # CI/构建
         ci_keywords = ["ci", "build", "pipeline", "workflow", "docker", "deploy", "makefile", "cmake", "jenkins", "github-actions", "gitlab-ci"]
         ci_files = [".github/workflows/", "Dockerfile", "docker-compose", "Jenkinsfile", ".gitlab-ci.yml", "Makefile", "CMakeLists"]
         if any(k in text for k in ci_keywords) or any(k in all_labels for k in ci_keywords) or any(f.startswith(tuple(ci_files)) or f in ci_files for f in filenames):
             return "ci"
 
-        # 测试相关
+        # 测试
         test_keywords = ["test", "spec", "fixture", "mock", "coverage", "unittest", "pytest", "jest"]
         test_files = ["test/", "tests/", "spec/", "__test__", "_test.", ".test.", ".spec.", ".test.ts", ".spec.ts"]
         if any(k in text for k in test_keywords) or any(f.startswith(tuple(test_files)) or any(s in f for s in test_files) for f in filenames):
             return "test"
 
-        # 文档相关
+        # 文档
         doc_keywords = ["doc", "readme", "changelog", "license", "contributing"]
-        doc_files = [".md", ".rst", ".txt", "docs/", "doc/", "README", "CHANGELOG", "LICENSE"]
-        if any(k in text for k in doc_keywords) or any(f.startswith(tuple(doc_files)) or any(f.endswith(s) for s in [".md", ".rst", ".txt"]) for f in filenames):
+        if any(k in text for k in doc_keywords) or any(f.startswith(tuple(["docs/", "doc/"])) or f.lower() in ["readme.md", "changelog.md", "license"] for f in filenames):
             return "docs"
 
         # Bug 修复
@@ -2722,7 +2748,7 @@ class DatabaseService:
             return "bugfix"
 
         # 性能优化
-        perf_keywords = ["perf", "optim", "speed", "memory", "alloc", "cache", "lazy", "async", "benchmark"]
+        perf_keywords = ["perf", "optim", "speed", "memory", "alloc", "cache", "lazy", "benchmark", "n+1", "slow"]
         if any(k in text for k in perf_keywords):
             return "perf"
 
@@ -2741,12 +2767,67 @@ class DatabaseService:
         return "other"
 
     @staticmethod
+    def _classify_scope(filenames: List[str]) -> str:
+        """识别变更影响范围: frontend / backend / infra / docs / fullstack"""
+        if not filenames:
+            return "unknown"
+        scopes = set()
+        for fn in filenames:
+            fl = fn.lower()
+            if any(s in fl for s in ["src/components/", "src/views/", "src/pages/", ".vue", ".jsx", ".tsx",
+                                     "static/", "public/", "assets/css", ".css", ".scss", ".less", ".html"]):
+                scopes.add("frontend")
+            elif any(s in fl for s in ["src/api/", "src/services/", "src/models/", "app/", "server/",
+                                       "lib/", "internal/", "pkg/", "cmd/", ".py", ".go", ".rs", ".java"]):
+                scopes.add("backend")
+            elif any(s in fl for s in [".github/", "dockerfile", "docker-compose", "k8s/", "terraform/",
+                                       "ansible/", ".tf", ".yaml", ".yml", "Makefile", "CMakeLists"]):
+                scopes.add("infra")
+            elif any(s in fl for s in ["docs/", "readme", "changelog", ".md", ".rst"]):
+                scopes.add("docs")
+        if len(scopes) == 1:
+            return scopes.pop()
+        elif scopes >= {"frontend", "backend"}:
+            return "fullstack"
+        elif scopes:
+            return sorted(scopes)[0]
+        return "unknown"
+
+    @staticmethod
+    def _classify_size(additions: int, deletions: int, changed_files: int) -> str:
+        """PR 体积分类: S / M / L / XL"""
+        total = additions + deletions
+        if total <= 50 and changed_files <= 3:
+            return "S"
+        elif total <= 300 and changed_files <= 10:
+            return "M"
+        elif total <= 1000 and changed_files <= 30:
+            return "L"
+        else:
+            return "XL"
+
+    @staticmethod
+    def _detect_breaking_change(pr_title: str, pr_body: str, filenames: List[str]) -> bool:
+        """检测是否包含 breaking change"""
+        import re
+        text = f"{pr_title} {pr_body}".lower()
+        # Conventional Commits breaking: feat! or BREAKING CHANGE in body
+        if re.search(r'(!:|breaking\s+change|breaking-change)', text):
+            return True
+        # 删除公共 API 文件
+        public_paths = ["api/", "public/", "exports/", "index.ts", "index.js", "__init__.py", "mod.rs"]
+        for fn in filenames:
+            if any(p in fn for p in public_paths):
+                return True
+        return False
+
+    @staticmethod
     def _classify_file_type(filename: str) -> str:
         """按文件扩展名分类文件类型"""
         ext_map = {
             ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
             ".jsx": "javascript", ".java": "java", ".go": "go", ".rs": "rust",
-            ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
+            ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp", ".cu": "cuda", ".cuh": "cuda",
             ".rb": "ruby", ".php": "php", ".swift": "swift", ".kt": "kotlin",
             ".scala": "scala", ".cs": "csharp", ".m": "objc", ".mm": "objc",
             ".css": "style", ".scss": "style", ".less": "style", ".html": "markup",
@@ -2760,6 +2841,190 @@ class DatabaseService:
             if filename.endswith(ext):
                 return lang
         return "other"
+
+    @staticmethod
+    def _analyze_diff_content(patch: str, filename: str) -> Dict[str, Any]:
+        """
+        解析单个文件的 diff/patch 内容，提取代码变更语义
+        返回变更模式、关键函数/类变更、import 变更、重构模式、API 变更等
+        """
+        import re
+        if not patch or not isinstance(patch, str):
+            return {"change_patterns": [], "affected_symbols": [], "import_changes": [], "line_stats": {}, "refactor_patterns": [], "api_changes": []}
+
+        lines = patch.split('\n')
+        added_lines = [l[1:] for l in lines if l.startswith('+') and not l.startswith('+++')]
+        removed_lines = [l[1:] for l in lines if l.startswith('-') and not l.startswith('---')]
+
+        line_stats = {
+            "added": len(added_lines),
+            "removed": len(removed_lines),
+            "net_change": len(added_lines) - len(removed_lines),
+        }
+
+        change_patterns = []
+        affected_symbols = []
+        import_changes = []
+        refactor_patterns = []
+        api_changes = []
+
+        all_added = '\n'.join(added_lines)
+        all_removed = '\n'.join(removed_lines)
+
+        # 函数/类定义关键词
+        fn_kws = ['def ', 'function ', 'func ', 'fn ', 'pub fn ', 'async def ', 'async fn ',
+                  'pub async fn ', 'static ', 'private ', 'protected ', 'public ']
+        cls_kws = ['class ', 'struct ', 'interface ', 'enum ', 'type ', 'trait ', 'impl ']
+
+        # 1. 新增/删除 函数/类/装饰器
+        for line in added_lines:
+            stripped = line.strip()
+            if any(stripped.startswith(kw) for kw in fn_kws):
+                fn_name = stripped.split('(')[0].split()[-1] if '(' in stripped else stripped.split()[-1]
+                affected_symbols.append({"symbol": fn_name, "type": "function_added", "line": stripped[:100]})
+                # 检测 API 变更（public 方法签名变更）
+                if any(stripped.startswith(kw) for kw in ['pub fn ', 'pub async fn ', 'def ', 'public ', 'async def ']):
+                    api_changes.append({"type": "api_added", "symbol": fn_name, "line": stripped[:80]})
+            elif any(stripped.startswith(kw) for kw in cls_kws):
+                cls_name = stripped.split('(')[0].split()[-1].rstrip(':').rstrip('{') if '(' in stripped else stripped.split()[-1].rstrip(':').rstrip('{')
+                affected_symbols.append({"symbol": cls_name, "type": "class_added", "line": stripped[:100]})
+            elif stripped.startswith('@'):
+                affected_symbols.append({"symbol": stripped[:50], "type": "decorator_added", "line": stripped[:100]})
+
+        for line in removed_lines:
+            stripped = line.strip()
+            if any(stripped.startswith(kw) for kw in fn_kws):
+                fn_name = stripped.split('(')[0].split()[-1] if '(' in stripped else stripped.split()[-1]
+                affected_symbols.append({"symbol": fn_name, "type": "function_removed", "line": stripped[:100]})
+                if any(stripped.startswith(kw) for kw in ['pub fn ', 'pub async fn ', 'def ', 'public ', 'async def ']):
+                    api_changes.append({"type": "api_removed", "symbol": fn_name, "line": stripped[:80]})
+            elif any(stripped.startswith(kw) for kw in cls_kws):
+                cls_name = stripped.split('(')[0].split()[-1].rstrip(':').rstrip('{') if '(' in stripped else stripped.split()[-1].rstrip(':').rstrip('{')
+                affected_symbols.append({"symbol": cls_name, "type": "class_removed", "line": stripped[:100]})
+
+        # 2. Import 变更
+        import_keywords = ['import ', 'from ', 'require(', 'use ', '#include', 'using ']
+        for line in added_lines:
+            stripped = line.strip()
+            if any(stripped.startswith(kw) for kw in import_keywords):
+                import_changes.append({"change": "added", "line": stripped[:80]})
+        for line in removed_lines:
+            stripped = line.strip()
+            if any(stripped.startswith(kw) for kw in import_keywords):
+                import_changes.append({"change": "removed", "line": stripped[:80]})
+
+        # 3. 基本变更模式
+        if len(added_lines) > 0 and len(removed_lines) == 0:
+            change_patterns.append("pure_addition")
+        elif len(removed_lines) > 0 and len(added_lines) == 0:
+            change_patterns.append("pure_deletion")
+        else:
+            change_patterns.append("modification")
+
+        # 4. 语义变更模式
+        if 'TODO' in all_added or 'FIXME' in all_added or 'HACK' in all_added:
+            change_patterns.append("adds_todo")
+        if 'raise ' in all_added or 'throw ' in all_added or 'panic!' in all_added:
+            change_patterns.append("adds_error_handling")
+        if 'log.' in all_added or 'logger.' in all_added or 'console.log' in all_added or 'println!' in all_added or 'print(' in all_added:
+            change_patterns.append("adds_logging")
+        if 'assert' in all_added or 'expect' in all_added:
+            change_patterns.append("adds_assertion")
+        if any(kw in all_added for kw in ['// ', '# ', '/*', '"""', "'''"]):
+            if not any(kw in all_added for kw in ['def ', 'class ', 'function ', 'if ']):
+                change_patterns.append("adds_comments_only")
+
+        # 安全相关变更
+        sec_patterns = ['sanitize', 'escape', 'encrypt', 'decrypt', 'hashlib', 'bcrypt',
+                        'password', 'token', 'auth', 'permission', 'csrf', 'xss', 'injection']
+        if any(p in all_added.lower() for p in sec_patterns) or any(p in all_removed.lower() for p in sec_patterns):
+            change_patterns.append("security_related")
+
+        # 5. 重构模式检测
+        # 重命名：同文件中删除函数+添加函数，且行数相近
+        added_fns = [s for s in affected_symbols if s["type"] == "function_added"]
+        removed_fns = [s for s in affected_symbols if s["type"] == "function_removed"]
+        if added_fns and removed_fns and len(added_fns) == len(removed_fns):
+            refactor_patterns.append("rename_function")
+
+        # 移动文件：文件路径含 move/rename
+        if any(kw in filename.lower() for kw in ['move', 'rename', 'migrate']):
+            refactor_patterns.append("move_file")
+
+        # 提取方法：删除大函数 + 添加多个小函数
+        if removed_fns and len(added_fns) >= 2:
+            refactor_patterns.append("extract_method")
+
+        # 内联/简化：删除函数多于添加
+        if len(removed_fns) > len(added_fns) and len(removed_fns) >= 2:
+            refactor_patterns.append("inline_or_simplify")
+
+        # 仅修改函数签名（参数变更）
+        added_fn_names = {s["symbol"] for s in added_fns}
+        removed_fn_names = {s["symbol"] for s in removed_fns}
+        common_names = added_fn_names & removed_fn_names
+        if common_names:
+            refactor_patterns.append("signature_change")
+
+        # 6. API 签名变更检测（参数增删）
+        for name in common_names:
+            added_sig = next((s["line"] for s in added_fns if s["symbol"] == name), "")
+            removed_sig = next((s["line"] for s in removed_fns if s["symbol"] == name), "")
+            if added_sig and removed_sig and added_sig != removed_sig:
+                api_changes.append({"type": "signature_modified", "symbol": name, "before": removed_sig[:80], "after": added_sig[:80]})
+
+        return {
+            "change_patterns": change_patterns,
+            "affected_symbols": affected_symbols[:30],
+            "import_changes": import_changes[:15],
+            "line_stats": line_stats,
+            "refactor_patterns": refactor_patterns,
+            "api_changes": api_changes[:10],
+        }
+
+    @staticmethod
+    def _summarize_diff_analysis(file_analyses: List[Dict]) -> Dict[str, Any]:
+        """汇总多个文件的 diff 分析结果，包含重构模式和 API 变更"""
+        total_symbols = []
+        total_imports = []
+        pattern_counts = {}
+        refactor_counts = {}
+        api_changes_all = []
+        total_added = 0
+        total_removed = 0
+
+        for fa in file_analyses:
+            total_symbols.extend(fa.get("affected_symbols", []))
+            total_imports.extend(fa.get("import_changes", []))
+            for p in fa.get("change_patterns", []):
+                pattern_counts[p] = pattern_counts.get(p, 0) + 1
+            for rp in fa.get("refactor_patterns", []):
+                refactor_counts[rp] = refactor_counts.get(rp, 0) + 1
+            api_changes_all.extend(fa.get("api_changes", []))
+            ls = fa.get("line_stats", {})
+            total_added += ls.get("added", 0)
+            total_removed += ls.get("removed", 0)
+
+        symbols_by_type = {}
+        for sym in total_symbols:
+            t = sym.get("type", "unknown")
+            if t not in symbols_by_type:
+                symbols_by_type[t] = []
+            symbols_by_type[t].append(sym.get("symbol", ""))
+
+        added_imports = [ic["line"] for ic in total_imports if ic.get("change") == "added"]
+        removed_imports = [ic["line"] for ic in total_imports if ic.get("change") == "removed"]
+
+        return {
+            "total_added_lines": total_added,
+            "total_removed_lines": total_removed,
+            "symbols_by_type": {k: list(set(v))[:10] for k, v in symbols_by_type.items()},
+            "added_imports": list(set(added_imports))[:10],
+            "removed_imports": list(set(removed_imports))[:10],
+            "pattern_counts": pattern_counts,
+            "refactor_counts": refactor_counts,
+            "api_changes": api_changes_all[:10],
+        }
 
     async def get_code_change_insight(self, owner: str, repo: str,
                                        start_date: str = None, end_date: str = None,
@@ -2778,7 +3043,9 @@ class DatabaseService:
                 start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
 
             # 获取时间范围内的 PR 详情
-            pr_query = {"owner": owner, "repo": repo, "data.created_at": {"$gte": start_date, "$lte": end_date}}
+            # 兼容两种数据格式: data.detail.xxx (NVIDIA/cccl) 和 data.xxx (test-org)
+            # 先用顶层 created_at 做粗筛（记录入库时间），再用 PR 的 created_at 精确过滤
+            pr_query = {"owner": owner, "repo": repo}
             pr_docs = await self.db['pr_details'].find(pr_query, {"_id": 0}).to_list(length=None)
 
             # 获取对应的 pr_files
@@ -2801,23 +3068,52 @@ class DatabaseService:
             for doc in pr_docs:
                 pr_num = doc.get("pr_number")
                 pr_data = doc.get("data", {})
-                title = pr_data.get("title", "")
-                body = pr_data.get("body", "") or ""
-                labels = [l.get("name", "") for l in pr_data.get("labels", []) if isinstance(l, dict)]
-                created_at = pr_data.get("created_at", "")
-                user = (pr_data.get("user") or {}).get("login", "")
-                state = pr_data.get("state", "")
-                additions = pr_data.get("additions", 0) or 0
-                deletions = pr_data.get("deletions", 0) or 0
-                merged = pr_data.get("merged", False)
+
+                # 兼容两种数据格式: data.detail 存在则取 detail，否则直接用 data
+                detail = pr_data.get("detail") if isinstance(pr_data.get("detail"), dict) else None
+                source = detail if detail else pr_data
+
+                title = source.get("title", "")
+                body = source.get("body", "") or ""
+                labels = [l.get("name", "") for l in source.get("labels", []) if isinstance(l, dict)]
+                created_at = source.get("created_at", "")
+                user_info = source.get("user")
+                if isinstance(user_info, dict):
+                    user = user_info.get("login", "")
+                elif isinstance(user_info, str):
+                    user = user_info
+                else:
+                    user = ""
+                state = source.get("state", "")
+                additions = source.get("additions", 0) or 0
+                deletions = source.get("deletions", 0) or 0
+                merged = source.get("merged", False)
+
+                # 按日期精确过滤（PR 的 created_at）
+                if created_at:
+                    pr_date = created_at[:10]
+                    if pr_date < start_date or pr_date > end_date:
+                        continue
 
                 # 获取文件列表
                 pr_files = files_map.get(pr_num, [])
                 filenames = [f.get("filename", "") for f in pr_files if isinstance(f, dict)]
 
+                # 分析 diff 内容
+                file_analyses = []
+                for f in pr_files:
+                    if isinstance(f, dict) and f.get("patch"):
+                        fa = self._analyze_diff_content(f["patch"], f.get("filename", ""))
+                        fa["filename"] = f.get("filename", "")
+                        file_analyses.append(fa)
+                diff_summary = self._summarize_diff_analysis(file_analyses) if file_analyses else None
+
                 # 分类
                 category = self._classify_change(title, body, filenames, labels)
                 file_types = [self._classify_file_type(fn) for fn in filenames]
+                scope = self._classify_scope(filenames)
+                size = self._classify_size(additions, deletions, len(filenames))
+                breaking = self._detect_breaking_change(title, body, filenames)
 
                 total_additions += additions
                 total_deletions += deletions
@@ -2827,6 +3123,17 @@ class DatabaseService:
                 for ft in file_types:
                     file_type_counts[ft] = file_type_counts.get(ft, 0) + 1
 
+                # 风险指标
+                risk_flags = []
+                if size == "XL":
+                    risk_flags.append("xl_pr")
+                if len(filenames) > 20:
+                    risk_flags.append("too_many_files")
+                if breaking:
+                    risk_flags.append("breaking_change")
+                if additions > 500 and deletions < 10:
+                    risk_flags.append("large_addition")
+
                 classified_prs.append({
                     "pr_number": pr_num, "title": title, "category": category,
                     "user": user, "state": state, "merged": merged,
@@ -2834,19 +3141,80 @@ class DatabaseService:
                     "additions": additions, "deletions": deletions,
                     "changed_files": len(filenames),
                     "file_types": list(set(file_types)),
+                    "scope": scope, "size": size, "breaking": breaking,
+                    "risk_flags": risk_flags,
+                    "diff_summary": diff_summary,
                 })
 
             # 按时间分桶
             periods = self._bucket_prs_by_time(classified_prs, granularity)
 
+            # 汇总所有 PR 的 diff 分析
+            all_diff_summaries = [pr.get("diff_summary") for pr in classified_prs if pr.get("diff_summary")]
+            overall_diff = self._summarize_diff_analysis(
+                [fa for ds in all_diff_summaries for fa in ds.get("file_analyses", [])]
+            ) if all_diff_summaries else None
+            # 直接从 classified_prs 的 diff_summary 聚合
+            overall_diff_agg = self._aggregate_diff_summaries(all_diff_summaries)
+
             # 生成阶段性摘要
             for period in periods:
                 period["summary"] = self._generate_period_summary(period)
 
+            # 计算阶段间环比趋势
+            period_trends = self._compute_period_trends(periods)
+
+            # 工程洞察：scope 分布、size 分布、风险汇总、文件耦合、变更速率
+            scope_counts = {}
+            size_counts = {}
+            risk_summary = {}
+            file_coupling = {}  # 文件同现次数
+            for pr in classified_prs:
+                s = pr.get("scope", "unknown")
+                scope_counts[s] = scope_counts.get(s, 0) + 1
+                sz = pr.get("size", "M")
+                size_counts[sz] = size_counts.get(sz, 0) + 1
+                for rf in pr.get("risk_flags", []):
+                    risk_summary[rf] = risk_summary.get(rf, 0) + 1
+
+            # 文件耦合分析（同 PR 中一起变更的文件对）
+            file_pr_count = {}  # 每个文件被多少 PR 变更
+            for pr in classified_prs:
+                pr_files_list = []
+                for f_doc in files_map.get(pr.get("pr_number"), []):
+                    if isinstance(f_doc, dict):
+                        fn = f_doc.get("filename", "")
+                        if fn:
+                            pr_files_list.append(fn)
+                            file_pr_count[fn] = file_pr_count.get(fn, 0) + 1
+                # 同 PR 文件对（最多取 5 个文件避免组合爆炸）
+                for i in range(min(len(pr_files_list), 5)):
+                    for j in range(i + 1, min(len(pr_files_list), 5)):
+                        pair = tuple(sorted([pr_files_list[i], pr_files_list[j]]))
+                        file_coupling[pair] = file_coupling.get(pair, 0) + 1
+
+            # 高耦合文件对（同现 >= 2 次）
+            high_coupling = [
+                {"files": list(pair), "count": cnt}
+                for pair, cnt in sorted(file_coupling.items(), key=lambda x: x[1], reverse=True)
+                if cnt >= 2
+            ][:15]
+
+            # 高 churn 文件（被最多 PR 变更）
+            high_churn_files = [
+                {"filename": fn, "pr_count": cnt}
+                for fn, cnt in sorted(file_pr_count.items(), key=lambda x: x[1], reverse=True)
+            ][:15]
+
+            # 变更速率（PR/天）
+            total_days = max((datetime.fromisoformat(end_date) - datetime.fromisoformat(start_date)).days, 1)
+            pr_velocity = round(len(classified_prs) / total_days, 2)
+
             # 整体摘要
             overall_summary = self._generate_overall_summary(
                 classified_prs, category_counts, file_type_counts,
-                total_additions, total_deletions, start_date, end_date
+                total_additions, total_deletions, start_date, end_date,
+                scope_counts, size_counts, risk_summary, pr_velocity
             )
 
             return {
@@ -2856,22 +3224,162 @@ class DatabaseService:
                 "total_prs": len(classified_prs),
                 "category_counts": category_counts,
                 "file_type_counts": dict(sorted(file_type_counts.items(), key=lambda x: x[1], reverse=True)[:15]),
+                "scope_counts": scope_counts,
+                "size_counts": size_counts,
+                "risk_summary": risk_summary,
                 "total_additions": total_additions,
                 "total_deletions": total_deletions,
+                "pr_velocity": pr_velocity,
+                "high_churn_files": high_churn_files,
+                "high_coupling": high_coupling,
                 "periods": periods,
+                "period_trends": period_trends,
+                "classified_prs": classified_prs,
                 "overall_summary": overall_summary,
+                "diff_analysis": overall_diff_agg,
                 "generated_at": now.isoformat(),
             }
         except Exception as e:
             logger.error(f"生成代码变更洞察失败: {e}")
             return {"error": str(e)}
 
+    async def ai_analyze_code_changes(self, owner: str, repo: str,
+                                       start_date: str = None, end_date: str = None,
+                                       focus: str = "overview") -> Dict[str, Any]:
+        """
+        使用 LLM 对代码变更进行深度语义分析
+        focus: overview(整体分析) / risk(风险分析) / architecture(架构影响) / quality(代码质量)
+        """
+        if self.db is None:
+            return {"error": "数据库未连接"}
+
+        # 先获取洞察数据作为 LLM 输入
+        insight = await self.get_code_change_insight(owner, repo, start_date, end_date, "week")
+        if insight.get("error") or insight.get("total_prs", 0) == 0:
+            return {"error": insight.get("error", "无变更数据，无法分析")}
+
+        # 构建发给 LLM 的变更摘要
+        pr_summaries = []
+        for pr in insight.get("classified_prs", [])[:10]:
+            summary = f"PR #{pr['pr_number']}: {pr['title']}\n"
+            summary += f"  分类: {pr['category']}, 范围: {pr.get('scope','?')}, 体积: {pr.get('size','?')}"
+            summary += f", +{pr['additions']}/-{pr['deletions']}, {pr['changed_files']}文件\n"
+            if pr.get('risk_flags'):
+                summary += f"  风险: {', '.join(pr['risk_flags'])}\n"
+            ds = pr.get('diff_summary', {})
+            if ds:
+                syms = ds.get('symbols_by_type', {})
+                if syms:
+                    sym_parts = []
+                    for t, names in syms.items():
+                        sym_parts.append(f"{t}: {', '.join(names[:3])}")
+                    summary += f"  符号变更: {'; '.join(sym_parts)}\n"
+                patterns = ds.get('pattern_counts', {})
+                if patterns:
+                    summary += f"  变更模式: {', '.join(f'{k}×{v}' for k,v in list(patterns.items())[:5])}\n"
+                refactors = ds.get('refactor_counts', {})
+                if refactors:
+                    summary += f"  重构: {', '.join(f'{k}×{v}' for k,v in refactors.items())}\n"
+                apis = ds.get('api_changes', [])
+                if apis:
+                    summary += f"  API变更: {len(apis)}处\n"
+            pr_summaries.append(summary)
+
+        # 构建 LLM prompt
+        focus_prompts = {
+            "overview": "请从以下维度进行综合分析：\n1. 变更意图：这批变更整体在做什么？解决什么问题？\n2. 变更质量：代码变更是否合理？有无过度工程或遗漏？\n3. 风险评估：有哪些潜在风险？哪些变更需要重点关注？\n4. 架构影响：对项目架构有什么影响？是否引入新的依赖或耦合？\n5. 改进建议：有什么可以改进的地方？",
+            "risk": "请重点进行风险分析：\n1. 哪些变更可能引入 Bug？为什么？\n2. 是否有破坏性变更？影响范围？\n3. 大型 PR 是否可以拆分？\n4. 是否有安全相关的变更需要特别注意？\n5. 测试覆盖是否充分？\n6. 给出风险等级（高/中/低）和具体建议",
+            "architecture": "请重点分析架构影响：\n1. 变更对模块划分有什么影响？\n2. 是否引入了新的耦合？\n3. 文件变更模式反映了什么架构特征？\n4. 是否有架构层面的技术债？\n5. 对未来扩展性的影响？",
+            "quality": "请重点分析代码质量：\n1. 变更的代码质量如何？\n2. 是否有代码异味（code smell）？\n3. 重构是否充分？\n4. 是否有重复代码或可以抽象的地方？\n5. 错误处理和日志是否完善？",
+        }
+
+        system_prompt = """你是一位资深软件工程师和代码审查专家，正在分析一个项目的代码变更。
+请基于提供的变更数据，给出专业、具体、有洞察力的分析。
+避免泛泛而谈，要结合具体变更内容给出判断。
+用中文回答，使用 Markdown 格式。"""
+
+        user_prompt = f"""## 项目: {owner}/{repo}
+## 时间范围: {insight.get('start_date')} ~ {insight.get('end_date')}
+
+## 统计概览
+- PR 总数: {insight.get('total_prs')}
+- 变更类型: {insight.get('category_counts')}
+- 影响范围: {insight.get('scope_counts')}
+- PR 体积: {insight.get('size_counts')}
+- 风险指标: {insight.get('risk_summary')}
+- 变更速率: {insight.get('pr_velocity')} PR/天
+
+## 高 Churn 文件
+{chr(10).join(f"- {f['filename']} ({f['pr_count']} PRs)" for f in insight.get('high_churn_files', [])[:10])}
+
+## 高耦合文件对
+{chr(10).join(f"- {c['files'][0]} ↔ {c['files'][1]} ({c['count']}次)" for c in insight.get('high_coupling', [])[:8])}
+
+## 各 PR 变更详情
+{chr(10).join(pr_summaries)}
+
+## 分析要求
+{focus_prompts.get(focus, focus_prompts['overview'])}"""
+
+        # 调用 LLM
+        try:
+            from workflow.config import workflow_config
+            if not workflow_config.ai_ready:
+                return {"error": "LLM 未配置或初始化失败，请先配置 API Key 并重启服务", "ai_ready": False}
+
+            import asyncio
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: workflow_config.llm.invoke([
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ])
+                    ),
+                    timeout=120.0
+                )
+            except asyncio.TimeoutError:
+                return {"error": "LLM 请求超时（60秒），请检查 LLM 服务是否可达、Base URL 是否正确", "ai_ready": True}
+
+            content = response.content if hasattr(response, 'content') else str(response)
+            if not content or not content.strip():
+                return {"error": "LLM 返回空内容，请检查模型是否正常", "ai_ready": True}
+
+            return {
+                "owner": owner, "repo": repo,
+                "focus": focus,
+                "start_date": insight.get("start_date"),
+                "end_date": insight.get("end_date"),
+                "analysis": content,
+                "total_prs_analyzed": insight.get("total_prs", 0),
+                "ai_ready": True,
+                "generated_at": datetime.now().isoformat(),
+            }
+        except ImportError:
+            return {"error": "LLM 模块未安装", "ai_ready": False}
+        except Exception as e:
+            err_msg = str(e)
+            # 提供更友好的错误提示
+            if "Connection" in err_msg:
+                err_msg = f"LLM 连接失败，请检查 Base URL 是否正确、LLM 服务是否可达\n详细信息: {err_msg}"
+            elif "401" in err_msg or "Unauthorized" in err_msg:
+                err_msg = "LLM API Key 认证失败（401），请检查 API Key 是否正确"
+            elif "403" in err_msg:
+                err_msg = "LLM API 访问被拒绝（403），请检查 API Key 权限"
+            elif "404" in err_msg:
+                err_msg = "LLM API 端点不存在（404），请检查 Base URL 和模型名称是否正确"
+            elif "429" in err_msg:
+                err_msg = "LLM API 请求频率超限（429），请稍后重试"
+            logger.error(f"AI 分析代码变更失败: {e}")
+            return {"error": err_msg, "ai_ready": False}
+
     @staticmethod
     def _bucket_prs_by_time(classified_prs: List[Dict], granularity: str) -> List[Dict[str, Any]]:
-        """按时间分桶"""
+        """按时间分桶，并聚合每阶段的 diff 分析、文件类型、贡献者分布"""
         buckets = {}
         for pr in classified_prs:
-            created = pr.get("created_at", "")[:10]  # YYYY-MM-DD
+            created = pr.get("created_at", "")[:10]
             if not created:
                 continue
             try:
@@ -2887,7 +3395,12 @@ class DatabaseService:
                 key = created
 
             if key not in buckets:
-                buckets[key] = {"period": key, "prs": [], "category_counts": {}, "additions": 0, "deletions": 0}
+                buckets[key] = {
+                    "period": key, "prs": [],
+                    "category_counts": {}, "additions": 0, "deletions": 0,
+                    "file_type_counts": {}, "contributors": {},
+                    "diff_summaries": [],
+                }
             bucket = buckets[key]
             bucket["prs"].append(pr)
             bucket["additions"] += pr.get("additions", 0)
@@ -2895,56 +3408,139 @@ class DatabaseService:
             cat = pr.get("category", "other")
             bucket["category_counts"][cat] = bucket["category_counts"].get(cat, 0) + 1
 
-        return [buckets[k] for k in sorted(buckets.keys())]
+            # 聚合文件类型
+            for ft in pr.get("file_types", []):
+                bucket["file_type_counts"][ft] = bucket["file_type_counts"].get(ft, 0) + 1
+
+            # 聚合贡献者
+            user = pr.get("user", "")
+            if user:
+                bucket["contributors"][user] = bucket["contributors"].get(user, 0) + 1
+
+            # 收集 diff_summary 用于阶段级聚合
+            ds = pr.get("diff_summary")
+            if ds:
+                bucket["diff_summaries"].append(ds)
+
+        # 为每个阶段生成聚合 diff 分析
+        result = []
+        for k in sorted(buckets.keys()):
+            bucket = buckets[k]
+            # 阶段级 diff 聚合
+            if bucket["diff_summaries"]:
+                bucket["diff_analysis"] = DatabaseService._aggregate_diff_summaries(bucket["diff_summaries"])
+            else:
+                bucket["diff_analysis"] = {}
+            del bucket["diff_summaries"]
+
+            # 贡献者排序取 Top
+            bucket["top_contributors"] = sorted(
+                bucket["contributors"].items(), key=lambda x: x[1], reverse=True
+            )[:10]
+            del bucket["contributors"]
+
+            # 文件类型排序取 Top
+            bucket["file_type_counts"] = dict(
+                sorted(bucket["file_type_counts"].items(), key=lambda x: x[1], reverse=True)[:10]
+            )
+
+            result.append(bucket)
+
+        return result
 
     @staticmethod
     def _generate_period_summary(period: Dict) -> str:
-        """生成单个时间阶段的自然语言摘要"""
+        """生成单个时间阶段的自然语言摘要，包含分类、文件类型、贡献者和 diff 分析概要"""
         prs = period.get("prs", [])
         cats = period.get("category_counts", {})
         additions = period.get("additions", 0)
         deletions = period.get("deletions", 0)
         period_key = period.get("period", "")
+        file_types = period.get("file_type_counts", {})
+        top_contributors = period.get("top_contributors", [])
+        diff_analysis = period.get("diff_analysis", {})
 
         if not prs:
             return f"{period_key}: 无变更"
 
-        parts = [f"{len(prs)} 个 PR"]
-        cat_parts = []
         cat_names = {
             "feature": "新功能", "bugfix": "Bug修复", "refactor": "重构",
             "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化", "other": "其他",
         }
+
+        lines = [f"{period_key}: {len(prs)} 个 PR"]
+
+        # 分类统计
+        cat_parts = []
         for cat, count in sorted(cats.items(), key=lambda x: x[1], reverse=True):
             name = cat_names.get(cat, cat)
             cat_parts.append(f"{name} {count}")
+        lines.append("变更类型：" + "、".join(cat_parts))
 
-        parts.append("（" + "、".join(cat_parts) + "）")
-        parts.append(f"+{additions}/-{deletions}")
+        # 代码变更量
+        lines.append(f"代码变更：+{additions}/-{deletions}")
 
-        # 列出关键 PR 标题（最多 3 个）
+        # 涉及语言
+        if file_types:
+            top_ft = list(file_types.keys())[:5]
+            lines.append("涉及语言：" + "、".join(top_ft))
+
+        # 主要贡献者
+        if top_contributors:
+            contrib_str = "、".join(f"{u}({c})" for u, c in top_contributors[:5])
+            lines.append(f"贡献者：{contrib_str}")
+
+        # Diff 分析概要
+        if diff_analysis:
+            sym_parts = []
+            for sym_type, syms in diff_analysis.get("symbols_by_type", {}).items():
+                if syms:
+                    sym_labels = {
+                        "function_added": "新增函数", "function_removed": "删除函数",
+                        "class_added": "新增类", "class_removed": "删除类",
+                        "decorator_added": "新增装饰器",
+                    }
+                    label = sym_labels.get(sym_type, sym_type)
+                    sym_parts.append(f"{label} {len(syms)}")
+            if sym_parts:
+                lines.append("符号变更：" + "、".join(sym_parts))
+
+            patterns = diff_analysis.get("pattern_counts", {})
+            if patterns:
+                pat_str = "、".join(f"{k}×{v}" for k, v in sorted(patterns.items(), key=lambda x: x[1], reverse=True)[:5])
+                lines.append(f"变更模式：{pat_str}")
+
+        # 关键 PR 标题（最多 3 个）
         key_prs = []
-        for pr in prs[:5]:
+        for pr in prs[:3]:
             title = pr.get("title", "")
             if title:
                 key_prs.append(f"#{pr.get('pr_number', '?')} {title[:60]}")
         if key_prs:
-            parts.append("\n  " + "; ".join(key_prs))
+            lines.append("关键 PR：" + "; ".join(key_prs))
 
-        return f"{period_key}: " + " ".join(parts)
+        return "\n".join(lines)
 
     @staticmethod
     def _generate_overall_summary(prs: List[Dict], category_counts: Dict,
                                     file_type_counts: Dict, total_add: int, total_del: int,
-                                    start_date: str, end_date: str) -> str:
-        """生成整体自然语言摘要"""
+                                    start_date: str, end_date: str,
+                                    scope_counts: Dict = None, size_counts: Dict = None,
+                                    risk_summary: Dict = None, pr_velocity: float = 0) -> str:
+        """生成洞察驱动的整体摘要，突出异常、趋势和行动建议"""
         cat_names = {
             "feature": "新功能", "bugfix": "Bug修复", "refactor": "重构",
-            "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化", "other": "其他",
+            "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化",
+            "security": "安全修复", "other": "其他",
+        }
+        size_labels = {"S": "小型", "M": "中型", "L": "大型", "XL": "超大型"}
+        risk_labels = {
+            "xl_pr": "超大型PR", "too_many_files": "变更文件过多",
+            "breaking_change": "破坏性变更", "large_addition": "大量新增代码",
         }
 
         lines = [f"📊 {start_date} ~ {end_date} 项目变更洞察"]
-        lines.append(f"共 {len(prs)} 个 PR，+{total_add}/-{total_del} 行变更")
+        lines.append(f"共 {len(prs)} 个 PR，+{total_add}/-{total_del} 行变更，变更速率 {pr_velocity} PR/天")
 
         # 分类统计
         cat_parts = []
@@ -2953,6 +3549,19 @@ class DatabaseService:
             pct = round(count / len(prs) * 100) if prs else 0
             cat_parts.append(f"{name} {count}({pct}%)")
         lines.append("变更类型：" + "、".join(cat_parts))
+
+        # Scope 分布
+        if scope_counts:
+            scope_parts = [f"{s} {c}" for s, c in sorted(scope_counts.items(), key=lambda x: x[1], reverse=True)]
+            lines.append("影响范围：" + "、".join(scope_parts))
+
+        # Size 分布
+        if size_counts:
+            size_parts = []
+            for sz in ["S", "M", "L", "XL"]:
+                if sz in size_counts:
+                    size_parts.append(f"{size_labels[sz]} {size_counts[sz]}")
+            lines.append("PR 体积：" + "、".join(size_parts))
 
         # Top 文件类型
         top_types = sorted(file_type_counts.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -2970,4 +3579,149 @@ class DatabaseService:
             user_parts = [f"{u}({c})" for u, c in top_users]
             lines.append("主要贡献者：" + "、".join(user_parts))
 
+        # 风险预警
+        if risk_summary:
+            risk_parts = [f"{risk_labels.get(k, k)} {v}" for k, v in sorted(risk_summary.items(), key=lambda x: x[1], reverse=True)]
+            lines.append("⚠️ 风险指标：" + "、".join(risk_parts))
+
+        # 行动建议
+        suggestions = []
+        if risk_summary and risk_summary.get("xl_pr", 0) > 0:
+            suggestions.append(f"有 {risk_summary['xl_pr']} 个超大型 PR，建议拆分为更小的变更以降低审查难度")
+        if risk_summary and risk_summary.get("breaking_change", 0) > 0:
+            suggestions.append(f"检测到 {risk_summary['breaking_change']} 个破坏性变更，需确认下游兼容性")
+        if category_counts.get("bugfix", 0) > len(prs) * 0.3:
+            suggestions.append("Bug 修复占比超过 30%，建议关注代码质量和测试覆盖率")
+        if size_counts and size_counts.get("XL", 0) > len(prs) * 0.2:
+            suggestions.append("超大型 PR 占比超过 20%，建议推行小 PR 策略")
+        if scope_counts and scope_counts.get("fullstack", 0) > 0:
+            suggestions.append(f"有 {scope_counts['fullstack']} 个全栈变更 PR，建议前后端分离提交")
+        if pr_velocity > 5:
+            suggestions.append(f"变更速率 {pr_velocity} PR/天 较高，确保 review 跟上节奏")
+
+        if suggestions:
+            lines.append("\n💡 行动建议：")
+            for i, s in enumerate(suggestions, 1):
+                lines.append(f"  {i}. {s}")
+
         return "\n".join(lines)
+
+    @staticmethod
+    def _aggregate_diff_summaries(summaries: List[Dict]) -> Dict[str, Any]:
+        """聚合多个 PR 的 diff_summary 为整体 diff 分析"""
+        if not summaries:
+            return {}
+
+        total_added = sum(s.get("total_added_lines", 0) for s in summaries)
+        total_removed = sum(s.get("total_removed_lines", 0) for s in summaries)
+
+        all_symbols = {}
+        all_imports_added = []
+        all_imports_removed = []
+        all_patterns = {}
+
+        for s in summaries:
+            for sym_type, syms in s.get("symbols_by_type", {}).items():
+                if sym_type not in all_symbols:
+                    all_symbols[sym_type] = set()
+                all_symbols[sym_type].update(syms)
+            all_imports_added.extend(s.get("added_imports", []))
+            all_imports_removed.extend(s.get("removed_imports", []))
+            for p, cnt in s.get("pattern_counts", {}).items():
+                all_patterns[p] = all_patterns.get(p, 0) + cnt
+
+        return {
+            "total_added_lines": total_added,
+            "total_removed_lines": total_removed,
+            "symbols_by_type": {k: sorted(list(v))[:10] for k, v in all_symbols.items()},
+            "added_imports": sorted(list(set(all_imports_added)))[:15],
+            "removed_imports": sorted(list(set(all_imports_removed)))[:15],
+            "pattern_counts": dict(sorted(all_patterns.items(), key=lambda x: x[1], reverse=True)),
+        }
+
+    @staticmethod
+    def _compute_period_trends(periods: List[Dict]) -> Dict[str, Any]:
+        """计算阶段间环比趋势，包含 PR 数、增删行、分类占比的变化"""
+        if len(periods) < 2:
+            return {"trend_points": [], "insight": "阶段数不足，无法计算趋势"}
+
+        trend_points = []
+        all_categories = set()
+        for p in periods:
+            all_categories.update(p.get("category_counts", {}).keys())
+
+        for i, period in enumerate(periods):
+            point = {
+                "period": period["period"],
+                "pr_count": len(period.get("prs", [])),
+                "additions": period.get("additions", 0),
+                "deletions": period.get("deletions", 0),
+                "net_change": period.get("additions", 0) - period.get("deletions", 0),
+                "category_counts": period.get("category_counts", {}),
+            }
+
+            # 计算环比变化率
+            if i > 0:
+                prev = periods[i - 1]
+                prev_pr_count = len(prev.get("prs", []))
+                prev_add = prev.get("additions", 0)
+                prev_del = prev.get("deletions", 0)
+
+                point["pr_count_change"] = round(
+                    (point["pr_count"] - prev_pr_count) / prev_pr_count * 100, 1
+                ) if prev_pr_count > 0 else None
+                point["additions_change"] = round(
+                    (point["additions"] - prev_add) / prev_add * 100, 1
+                ) if prev_add > 0 else None
+                point["deletions_change"] = round(
+                    (point["deletions"] - prev_del) / prev_del * 100, 1
+                ) if prev_del > 0 else None
+
+                # 分类占比变化
+                cat_changes = {}
+                for cat in all_categories:
+                    cur_cnt = period.get("category_counts", {}).get(cat, 0)
+                    prev_cnt = prev.get("category_counts", {}).get(cat, 0)
+                    cur_total = point["pr_count"] if point["pr_count"] > 0 else 1
+                    prev_total = prev_pr_count if prev_pr_count > 0 else 1
+                    cur_pct = cur_cnt / cur_total
+                    prev_pct = prev_cnt / prev_total
+                    cat_changes[cat] = round((cur_pct - prev_pct) * 100, 1)
+                point["category_pct_change"] = cat_changes
+            else:
+                point["pr_count_change"] = None
+                point["additions_change"] = None
+                point["deletions_change"] = None
+                point["category_pct_change"] = {}
+
+            trend_points.append(point)
+
+        # 生成趋势洞察
+        insights = []
+        if len(trend_points) >= 2:
+            last = trend_points[-1]
+            if last.get("pr_count_change") is not None:
+                if last["pr_count_change"] > 20:
+                    insights.append(f"最近阶段 PR 数环比增长 {last['pr_count_change']}%，活跃度上升")
+                elif last["pr_count_change"] < -20:
+                    insights.append(f"最近阶段 PR 数环比下降 {abs(last['pr_count_change'])}%，活跃度降低")
+
+            if last.get("additions_change") is not None and last["additions_change"] > 50:
+                insights.append(f"新增代码量环比增长 {last['additions_change']}%，可能有大功能上线")
+
+            # 检查分类占比显著变化
+            cat_pct = last.get("category_pct_change", {})
+            for cat, change in cat_pct.items():
+                cat_names = {
+                    "feature": "新功能", "bugfix": "Bug修复", "refactor": "重构",
+                    "docs": "文档", "test": "测试", "ci": "CI/构建", "perf": "性能优化",
+                }
+                if abs(change) >= 10:
+                    name = cat_names.get(cat, cat)
+                    direction = "上升" if change > 0 else "下降"
+                    insights.append(f"{name}占比{direction} {abs(change)}%")
+
+        return {
+            "trend_points": trend_points,
+            "insight": "；".join(insights) if insights else "各指标环比变化平稳",
+        }

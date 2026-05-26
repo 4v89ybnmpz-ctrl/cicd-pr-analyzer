@@ -38,6 +38,24 @@ def register_task_routes(router, cache, github_service, db):
         logs = task_queue.get_task_logs(task_id)
         if logs is None:
             raise HTTPException(status_code=404, detail="任务不存在")
+        # 补全旧日志中缺失的年月日
+        task = task_queue.get_task(task_id)
+        task_date = None
+        if task and task.created_at:
+            task_date = task.created_at[:10]
+        else:
+            # 从数据库查
+            try:
+                doc = await db.db['tasks'].find_one({"task_id": task_id}, {"created_at": 1, "_id": 0})
+                if doc and doc.get("created_at"):
+                    task_date = doc["created_at"][:10]
+            except Exception:
+                pass
+        if task_date:
+            for log in logs:
+                t = log.get("time", "")
+                if t and "-" not in t:
+                    log["time"] = f"{task_date} {t}"
         return {"task_id": task_id, "logs": logs, "total": len(logs), "timestamp": datetime.now().isoformat()}
 
     @router.delete("/tasks/{task_id}")
