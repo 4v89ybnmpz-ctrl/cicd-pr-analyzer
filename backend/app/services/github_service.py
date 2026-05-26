@@ -13,26 +13,6 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def retry_on_failure(max_retries: int = 3, delay: int = 5):
-    """异步重试装饰器"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            last_exception = None
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.warning(f"请求失败 (尝试 {attempt + 1}/{max_retries}): {e}, {delay}秒后重试...")
-                        await asyncio.sleep(delay)
-                    else:
-                        logger.error(f"请求失败，已达到最大重试次数 {max_retries}: {e}")
-            raise last_exception
-        return wrapper
-    return decorator
-
 
 class TokenPool:
     """Token 池管理类（异步安全）"""
@@ -41,15 +21,41 @@ class TokenPool:
         self.tokens = tokens if tokens else []
         self.current_index = 0
         self.lock = asyncio.Lock()
+        # 速率限制追踪: token -> (remaining, reset_epoch)
+        self._rate_limits: Dict[str, Tuple[int, float]] = {}
         logger.info(f"Token 池初始化完成，共 {len(self.tokens)} 个 Token")
 
     async def get_token(self) -> Optional[str]:
         if not self.tokens:
             return None
         async with self.lock:
-            token = self.tokens[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.tokens)
-            return token
+            now = time.time()
+            # 尝试找一个未限速的 token
+            for _ in range(len(self.tokens)):
+                token = self.tokens[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.tokens)
+                limit_info = self._rate_limits.get(token)
+                if limit_info is None:
+                    return token
+                remaining, reset_epoch = limit_info
+                if remaining > 0 or now >= reset_epoch:
+                    # 配额有余或已过重置时间，清除限速标记
+                    if now >= reset_epoch:
+                        self._rate_limits.pop(token, None)
+                    return token
+            # 所有 token 都限速了，找最早重置的等待
+            earliest_reset = min((info[1] for info in self._rate_limits.values()), default=now)
+            wait = max(0, earliest_reset - now) + 1
+            logger.warning(f"所有 Token 已限速，等待 {wait:.0f} 秒")
+            return None
+
+    def update_rate_limit(self, token: str, remaining: int, reset_epoch: float):
+        """更新 token 的速率限制状态"""
+        if remaining <= 0:
+            self._rate_limits[token] = (remaining, reset_epoch)
+            logger.warning(f"Token 限速: remaining={remaining}, reset in {reset_epoch - time.time():.0f}s")
+        elif token in self._rate_limits:
+            del self._rate_limits[token]
 
     async def add_token(self, token: str):
         async with self.lock:
@@ -151,6 +157,7 @@ class GitHubPRService:
             r".*\[bot\]$", r".*-bot$", r".*_bot$", r"^bot-.*",
             r".*-ci$", r".*-automation$", r".*pipeline.*",
         ]
+        self._compiled_bot_regex = [re.compile(p, re.IGNORECASE) for p in self.bot_regex_patterns]
 
     def _get_client(self) -> httpx.AsyncClient:
         """获取或创建异步 HTTP 客户端"""
@@ -171,26 +178,46 @@ class GitHubPRService:
             return True
         if username.lower() in [bot.lower() for bot in self.known_bot_patterns]:
             return True
-        import re
-        for pattern in self.bot_regex_patterns:
-            if re.match(pattern, username, re.IGNORECASE):
+        for compiled in self._compiled_bot_regex:
+            if compiled.match(username):
                 return True
         return False
 
     async def _make_request(self, url: str, headers: Dict[str, str],
                             params: Dict[str, Any], timeout: int = 30) -> httpx.Response:
-        """发起异步 HTTP 请求（带重试机制）"""
+        """发起异步 HTTP 请求（带重试 + 速率限制感知）"""
         client = self._get_client()
         last_exception = None
         for attempt in range(self.max_retries):
             try:
                 response = await client.get(url, headers=headers, params=params, timeout=timeout)
+
+                # 解析速率限制响应头
+                remaining = response.headers.get("X-RateLimit-Remaining")
+                reset_epoch = response.headers.get("X-RateLimit-Reset")
+                token = headers.get("Authorization", "").replace("token ", "")
+                if remaining is not None and reset_epoch is not None:
+                    try:
+                        self.token_pool.update_rate_limit(token, int(remaining), float(reset_epoch))
+                    except (ValueError, TypeError):
+                        pass
+
+                # 处理 403 速率限制耗尽
+                if response.status_code == 403 and remaining is not None and int(remaining) == 0:
+                    reset_at = float(reset_epoch) if reset_epoch else time.time() + 60
+                    wait = max(1, reset_at - time.time()) + 1
+                    logger.warning(f"GitHub API 速率限制耗尽，等待 {wait:.0f} 秒后重试 (attempt {attempt + 1})")
+                    await asyncio.sleep(wait)
+                    continue
+
                 return response
             except (httpx.RequestError, httpx.HTTPStatusError) as e:
                 last_exception = e
                 if attempt < self.max_retries - 1:
-                    logger.warning(f"请求失败 (尝试 {attempt + 1}/{self.max_retries}): {e}, {self.retry_delay}秒后重试...")
-                    await asyncio.sleep(self.retry_delay)
+                    # 指数退避
+                    delay = self.retry_delay * (2 ** attempt)
+                    logger.warning(f"请求失败 (尝试 {attempt + 1}/{self.max_retries}): {e}, {delay}秒后重试...")
+                    await asyncio.sleep(delay)
                 else:
                     logger.error(f"请求失败，已达到最大重试次数 {self.max_retries}: {e}")
         raise last_exception
@@ -625,8 +652,10 @@ class GitHubPRService:
 
         async def _fetch_pr_details(pr_number: int) -> Dict[str, Any]:
             async with semaphore:
-                comments = await self.fetch_pr_comments(owner, repo, pr_number)
-                timeline = await self.fetch_pr_timeline(owner, repo, pr_number)
+                comments, timeline = await asyncio.gather(
+                    self.fetch_pr_comments(owner, repo, pr_number),
+                    self.fetch_pr_timeline(owner, repo, pr_number),
+                )
                 return {
                     "pr_number": pr_number, "comments": comments, "timeline": timeline,
                     "error": comments.get("error") or timeline.get("error")

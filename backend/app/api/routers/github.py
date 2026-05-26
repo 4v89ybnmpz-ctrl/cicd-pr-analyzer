@@ -126,13 +126,22 @@ def register_github_routes(router, cache, github_service, db):
                 results.append(result)
                 if result["error"] is None:
                     success_count += 1
-                    if db is not None:
-                        try:
-                            await db.save_pr_comments(owner, repo, pr_num, result)
-                        except Exception as e:
-                            logger.error(f"保存PR#{pr_num}评论到数据库失败: {e}")
                 else:
                     failed_count += 1
+
+        # 批量保存到数据库（并行）
+        if db is not None:
+            save_coros = []
+            for result in results:
+                if result.get("error") is not None:
+                    continue
+                pr_num = result.get("pr_number")
+                save_coros.append(db.save_pr_comments(owner, repo, pr_num, result))
+            if save_coros:
+                save_results = await asyncio.gather(*save_coros, return_exceptions=True)
+                for i, sr in enumerate(save_results):
+                    if isinstance(sr, Exception):
+                        logger.error(f"保存评论到数据库失败: {sr}")
 
         return {
             "owner": owner, "repo": repo, "results": results,
@@ -164,13 +173,22 @@ def register_github_routes(router, cache, github_service, db):
                 results.append(result)
                 if result["error"] is None:
                     success_count += 1
-                    if db is not None:
-                        try:
-                            await db.save_pr_timeline(owner, repo, pr_num, result)
-                        except Exception as e:
-                            logger.error(f"保存PR#{pr_num}时间线到数据库失败: {e}")
                 else:
                     failed_count += 1
+
+        # 批量保存
+        if db is not None:
+            save_coros = []
+            for result in results:
+                if result.get("error") is not None:
+                    continue
+                pr_num = result.get("pr_number")
+                save_coros.append(db.save_pr_timeline(owner, repo, pr_num, result))
+            if save_coros:
+                save_results = await asyncio.gather(*save_coros, return_exceptions=True)
+                for i, sr in enumerate(save_results):
+                    if isinstance(sr, Exception):
+                        logger.error(f"保存时间线到数据库失败: {sr}")
 
         return {
             "owner": owner, "repo": repo, "results": results,
@@ -191,9 +209,10 @@ def register_github_routes(router, cache, github_service, db):
         """批量获取多个 PR 的详细信息"""
         result = await github_service.fetch_pr_detail_batch(request.owner, request.repo, request.pr_numbers)
         if db is not None:
-            for item in result["results"]:
-                if item["error"] is None:
-                    await db.save_pr_detail(request.owner, request.repo, item["pr_number"], item)
+            save_coros = [db.save_pr_detail(request.owner, request.repo, item["pr_number"], item)
+                          for item in result["results"] if item["error"] is None]
+            if save_coros:
+                await asyncio.gather(*save_coros, return_exceptions=True)
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/prs/{owner}/{repo}/details", response_model=MultiPRCollectionResponse)
@@ -202,9 +221,10 @@ def register_github_routes(router, cache, github_service, db):
         pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
         result = await github_service.fetch_pr_detail_batch(owner, repo, pr_numbers)
         if db is not None:
-            for item in result["results"]:
-                if item["error"] is None:
-                    await db.save_pr_detail(owner, repo, item["pr_number"], item)
+            save_coros = [db.save_pr_detail(owner, repo, item["pr_number"], item)
+                          for item in result["results"] if item["error"] is None]
+            if save_coros:
+                await asyncio.gather(*save_coros, return_exceptions=True)
         return {
             "owner": owner, "repo": repo, "results": result["results"],
             "total_prs": len(pr_numbers), "success_count": result["success_count"],
@@ -225,9 +245,10 @@ def register_github_routes(router, cache, github_service, db):
         pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
         result = await github_service.fetch_all_pr_reviews(owner, repo, pr_numbers)
         if db is not None:
-            for item in result["results"]:
-                if item["error"] is None:
-                    await db.save_pr_reviews(owner, repo, item["pr_number"], item)
+            save_coros = [db.save_pr_reviews(owner, repo, item["pr_number"], item)
+                          for item in result["results"] if item["error"] is None]
+            if save_coros:
+                await asyncio.gather(*save_coros, return_exceptions=True)
         return {
             "owner": owner, "repo": repo, "results": result["results"],
             "total_prs": len(pr_numbers), "success_count": result["success_count"],
@@ -248,9 +269,10 @@ def register_github_routes(router, cache, github_service, db):
         pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
         result = await github_service.fetch_all_pr_commits(owner, repo, pr_numbers)
         if db is not None:
-            for item in result["results"]:
-                if item["error"] is None:
-                    await db.save_pr_commits(owner, repo, item["pr_number"], item)
+            save_coros = [db.save_pr_commits(owner, repo, item["pr_number"], item)
+                          for item in result["results"] if item["error"] is None]
+            if save_coros:
+                await asyncio.gather(*save_coros, return_exceptions=True)
         return {
             "owner": owner, "repo": repo, "results": result["results"],
             "total_prs": len(pr_numbers), "success_count": result["success_count"],
@@ -271,9 +293,10 @@ def register_github_routes(router, cache, github_service, db):
         pr_numbers = await _get_pr_numbers(owner, repo, limit, db, github_service)
         result = await github_service.fetch_all_pr_files(owner, repo, pr_numbers)
         if db is not None:
-            for item in result["results"]:
-                if item["error"] is None:
-                    await db.save_pr_files(owner, repo, item["pr_number"], item["files"])
+            save_coros = [db.save_pr_files(owner, repo, item["pr_number"], item["files"])
+                          for item in result["results"] if item["error"] is None]
+            if save_coros:
+                await asyncio.gather(*save_coros, return_exceptions=True)
         return {
             "owner": owner, "repo": repo, "results": result["results"],
             "total_prs": len(pr_numbers), "success_count": result["success_count"],

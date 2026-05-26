@@ -205,9 +205,17 @@ class GitRepoService:
             if not lines:
                 continue
 
-            try:
-                commit = json.loads(lines[0])
-            except (json.JSONDecodeError, IndexError):
+            json_idx = None
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith("{"):
+                    try:
+                        commit = json.loads(stripped)
+                        json_idx = i
+                        break
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            if json_idx is None:
                 continue
 
             commit["author_date_utc"] = self._to_utc_minute(commit.get("author_date"))
@@ -216,17 +224,35 @@ class GitRepoService:
             commit["committer_tz"] = self._extract_tz(commit.get("committer_date"))
 
             files = []
-            for line in lines[1:]:
+            for line in lines[json_idx + 1:]:
                 line = line.strip()
                 if not line or line.startswith("---"):
                     continue
-                parts = line.split("\t")
-                if len(parts) == 3:
+                file_parts = line.split("\t")
+                if len(file_parts) == 3:
                     try:
-                        add = int(parts[0]) if parts[0] != "-" else 0
-                        delete = int(parts[1]) if parts[1] != "-" else 0
+                        add = int(file_parts[0]) if file_parts[0] != "-" else 0
+                        delete = int(file_parts[1]) if file_parts[1] != "-" else 0
                         files.append({
-                            "file": parts[2],
+                            "file": file_parts[2],
+                            "additions": add,
+                            "deletions": delete,
+                        })
+                    except ValueError:
+                        pass
+
+            # numstat 行可能出现在 JSON 之前（git log --numstat 输出格式）
+            for line in lines[:json_idx]:
+                line = line.strip()
+                if not line or line.startswith("---"):
+                    continue
+                file_parts = line.split("\t")
+                if len(file_parts) == 3:
+                    try:
+                        add = int(file_parts[0]) if file_parts[0] != "-" else 0
+                        delete = int(file_parts[1]) if file_parts[1] != "-" else 0
+                        files.append({
+                            "file": file_parts[2],
                             "additions": add,
                             "deletions": delete,
                         })
