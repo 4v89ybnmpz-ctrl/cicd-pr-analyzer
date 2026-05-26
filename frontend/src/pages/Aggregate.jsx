@@ -20,8 +20,16 @@ export default function Aggregate() {
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
   if (error) return <Alert type="error" message={error} />
 
-  const byRepo = stats?.by_repo || []
+  const rawByRepo = stats?.by_repo || []
   const byState = stats?.by_state || []
+
+  // 后端 by_repo._id 可能是 {owner, repo} 对象，转为 "owner/repo" 字符串
+  const byRepo = rawByRepo.map(r => ({
+    ...r,
+    _id: typeof r._id === 'object' && r._id !== null
+      ? `${r._id.owner}/${r._id.repo}`
+      : r._id,
+  }))
 
   const total = byRepo.reduce((s, r) => s + r.count, 0)
 
