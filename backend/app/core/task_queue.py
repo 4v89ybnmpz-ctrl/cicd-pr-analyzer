@@ -33,7 +33,7 @@ class TaskInfo:
         os.makedirs(LOG_DIR, exist_ok=True)
 
     def log(self, level: str, message: str):
-        entry = {"time": datetime.now().isoformat()[11:19], "level": level, "message": message}
+        entry = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "level": level, "message": message}
         self.log_lines.append(entry)
         if len(self.log_lines) > 1000:
             self.log_lines = self.log_lines[-1000:]
@@ -69,9 +69,10 @@ class TaskInfo:
 
 
 class TaskQueue:
-    def __init__(self):
+    def __init__(self, max_concurrent: int = 5):
         self.tasks: Dict[str, TaskInfo] = {}
         self._running_keys: Dict[str, str] = {}
+        self._concurrency_sem = asyncio.Semaphore(max_concurrent)
         self._db = None
 
     def set_db(self, db):
@@ -167,7 +168,8 @@ class TaskQueue:
         task.log("INFO", f"任务开始执行")
         await self._save_to_db(task)
         try:
-            result = await coro_func(task)
+            async with self._concurrency_sem:
+                result = await coro_func(task)
             task.result = result
             task.status = "completed"
             task.progress = task.total

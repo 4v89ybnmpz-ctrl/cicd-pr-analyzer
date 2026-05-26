@@ -15,14 +15,17 @@ class DataCache:
     支持设置过期时间，自动清理过期数据
     """
 
-    def __init__(self, default_ttl: int = 300):
+    def __init__(self, default_ttl: int = 300, max_entries: int = 500):
         """
         初始化缓存
         :param default_ttl: 默认过期时间（秒），默认5分钟
+        :param max_entries: 最大缓存条目数，超出时 LRU 淘汰
         """
         self._cache: Dict[str, Dict[str, Any]] = {}
         self.default_ttl = default_ttl
-        logger.info(f"缓存系统初始化，默认过期时间: {default_ttl}秒")
+        self.max_entries = max_entries
+        self._cleanup_count = 0
+        logger.info(f"缓存系统初始化，默认过期时间: {default_ttl}秒, 最大条目: {max_entries}")
 
     def get(self, key: str) -> Optional[Any]:
         """
@@ -51,6 +54,11 @@ class DataCache:
         :param data: 缓存数据
         :param ttl: 过期时间（秒），None 则使用默认值
         """
+        # LRU 淘汰：超出最大条目数时删除最早创建的
+        if len(self._cache) >= self.max_entries:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k]["created_at"])
+            del self._cache[oldest_key]
+
         expires_at = datetime.now() + timedelta(seconds=ttl or self.default_ttl)
 
         self._cache[key] = {
@@ -58,6 +66,12 @@ class DataCache:
             "expires_at": expires_at,
             "created_at": datetime.now()
         }
+
+        # 每 50 次 set 自动清理一次过期缓存
+        self._cleanup_count += 1
+        if self._cleanup_count >= 50:
+            self.cleanup_expired()
+            self._cleanup_count = 0
 
         logger.debug(f"缓存已设置: {key}, TTL: {ttl or self.default_ttl}秒")
 
