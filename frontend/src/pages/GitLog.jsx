@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, AutoComplete, Modal } from 'antd'
+import { Table, Input, Tag, Space, Button, Card, Row, Col, Statistic, message, Tooltip, AutoComplete, Modal, Select } from 'antd'
 import { ReloadOutlined, SearchOutlined, BranchesOutlined, FileTextOutlined } from '@ant-design/icons'
 import * as api from '../api'
 
@@ -15,6 +15,9 @@ export default function GitLog() {
   const [projects, setProjects] = useState([])
   const [searchText, setSearchText] = useState('')
   const [filesModal, setFilesModal] = useState({ open: false, commit: null })
+  // 分支相关状态
+  const [branches, setBranches] = useState([])
+  const [selectedBranch, setSelectedBranch] = useState(null)
 
   useEffect(() => {
     api.getGitProjects().then(res => {
@@ -43,12 +46,13 @@ export default function GitLog() {
       }))
   }, [projects, searchText])
 
-  const fetchCommits = useCallback(async (p = 1, owner = queryOwner, repo = queryRepo) => {
+  const fetchCommits = useCallback(async (p = 1, owner = queryOwner, repo = queryRepo, branch = selectedBranch) => {
     if (!owner || !repo) return
     setLoading(true)
     try {
       const params = { page: p, size: 20, sort_by: 'author_date', sort_order: 'desc' }
       if (authorFilter) params.author = authorFilter
+      if (branch) params.branch = branch
       const res = await api.getGitLogCommits(owner, repo, params)
       setData((res.data.data || []).map((c, i) => ({ key: c.hash || i, ...c })))
       setTotal(res.data.total || 0)
@@ -57,7 +61,7 @@ export default function GitLog() {
       if (e.response?.status !== 404) message.error('查询失败: ' + e.message)
     }
     setLoading(false)
-  }, [queryOwner, queryRepo, authorFilter])
+  }, [queryOwner, queryRepo, authorFilter, selectedBranch])
 
   const fetchSummary = useCallback(async (owner = queryOwner, repo = queryRepo) => {
     if (!owner || !repo) { setSummary(null); return }
@@ -67,27 +71,48 @@ export default function GitLog() {
     } catch { setSummary(null) }
   }, [queryOwner, queryRepo])
 
-  useEffect(() => { fetchCommits(1); fetchSummary() }, [fetchCommits, fetchSummary])
+  const fetchBranches = useCallback(async (owner = queryOwner, repo = queryRepo) => {
+    if (!owner || !repo) { setBranches([]); return }
+    try {
+      const res = await api.getGitBranches(owner, repo)
+      const raw = res.data.branches || []
+      // 转为短名称（去掉 origin/ 前缀）
+      const shortNames = [...new Set(raw.map(b => b.replace(/^origin\//, '')))]
+      setBranches(shortNames)
+    } catch { setBranches([]) }
+  }, [queryOwner, queryRepo])
+
+  useEffect(() => { fetchCommits(1); fetchSummary(); fetchBranches() }, [fetchCommits, fetchSummary, fetchBranches])
 
   const handleQuery = (owner, repo) => {
     const o = (owner || queryOwner).trim()
     const r = (repo || queryRepo).trim()
     if (!o || !r) { message.warning('请输入 owner 和 repo'); return }
+    setSelectedBranch(null)
     setQueryOwner(o)
     setQueryRepo(r)
     setSearchText(`${o}/${r}`)
-    fetchCommits(1, o, r)
-    fetchSummary(o, r)
   }
 
   const handleSelect = (value) => {
     const [o, r] = value.split('/')
+    setSelectedBranch(null)
     setQueryOwner(o)
     setQueryRepo(r)
     setSearchText(value)
-    fetchCommits(1, o, r)
-    fetchSummary(o, r)
   }
+
+  // 切换分支时触发查询
+  const handleBranchChange = (branch) => {
+    setSelectedBranch(branch)
+  }
+
+  // selectedBranch 变化时自动查询
+  useEffect(() => {
+    if (queryOwner && queryRepo) {
+      fetchCommits(1, queryOwner, queryRepo, selectedBranch)
+    }
+  }, [selectedBranch])
 
   const columns = [
     {
@@ -95,8 +120,23 @@ export default function GitLog() {
       render: v => <Tooltip title="点击复制完整 hash"><code style={{ cursor: 'pointer' }} onClick={() => { navigator.clipboard?.writeText(data.find(d => d.abbrev_hash === v)?.hash || v) }}>{v}</code></Tooltip>,
     },
     { title: '提交信息', dataIndex: 'subject', ellipsis: true, render: v => <span style={{ fontWeight: 500 }}>{v}</span> },
+    {
+      title: '分支', dataIndex: 'branches', width: 140,
+      render: (v) => {
+        if (!v || v.length === 0) return <span style={{ color: '#d9d9d9' }}>-</span>
+        const display = v.slice(0, 2)
+        const rest = v.length - 2
+        return (
+          <Space size={2} wrap>
+            {display.map((b, i) => <Tag key={i} color="blue" style={{ fontSize: 11 }}>{b}</Tag>)}
+            {rest > 0 && <Tag style={{ fontSize: 11 }}>+{rest}</Tag>}
+          </Space>
+        )
+      },
+      filters: branches.map(b => ({ text: b, value: b })),
+      onFilter: (value, record) => (record.branches || []).includes(value),
+    },
     { title: '作者', dataIndex: 'author_name', width: 120, render: v => <Tag>{v}</Tag> },
-    { title: '作者邮箱', dataIndex: 'author_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
       title: '作者时间(UTC)', dataIndex: 'author_date_utc', width: 120,
       sorter: (a, b) => (a.author_date_utc || '').localeCompare(b.author_date_utc || ''),
@@ -104,12 +144,10 @@ export default function GitLog() {
     },
     { title: '作者时区', dataIndex: 'author_tz', width: 80, render: v => v ? <Tag color="orange">{v}</Tag> : <span style={{ color: '#d9d9d9' }}>-</span> },
     { title: '提交者', dataIndex: 'committer_name', width: 120, render: v => <Tag color="geekblue">{v}</Tag> },
-    { title: '提交者邮箱', dataIndex: 'committer_email', width: 180, ellipsis: true, render: v => <span style={{ fontSize: 12, color: '#999' }}>{v}</span> },
     {
       title: '提交时间(UTC)', dataIndex: 'committer_date_utc', width: 120,
       render: (v, r) => v || r.committer_date?.substring(0, 16),
     },
-    { title: '提交者时区', dataIndex: 'committer_tz', width: 80, render: v => v ? <Tag color="purple">{v}</Tag> : <span style={{ color: '#d9d9d9' }}>-</span> },
     {
       title: '文件数', dataIndex: 'files_changed', width: 70, align: 'center',
       sorter: (a, b) => (a.files_changed || 0) - (b.files_changed || 0),
@@ -166,6 +204,20 @@ export default function GitLog() {
           onChange={e => setAuthorFilter(e.target.value)}
           onPressEnter={() => fetchCommits(1)}
           style={{ width: 180 }} allowClear />
+        {branches.length > 0 && (
+          <Select
+            style={{ width: 200 }}
+            placeholder="按分支筛选"
+            value={selectedBranch}
+            onChange={handleBranchChange}
+            allowClear
+            showSearch
+            options={[
+              { value: null, label: '全部分支' },
+              ...branches.map(b => ({ value: b, label: b })),
+            ]}
+          />
+        )}
         <Button icon={<ReloadOutlined />} onClick={() => fetchCommits(page)}>刷新</Button>
       </Space>
 
@@ -201,7 +253,7 @@ export default function GitLog() {
         dataSource={data}
         loading={loading}
         size="middle"
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1300 }}
         pagination={{
           current: page, total, pageSize: 20,
           onChange: (p) => fetchCommits(p),
