@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Table, Tag, Space, Button, Input, Spin, Alert, Tooltip, Progress, Card, Row, Col, Statistic, InputNumber, message, Badge, Modal, Popconfirm, Descriptions } from 'antd'
-import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined, PlusOutlined, FileTextOutlined } from '@ant-design/icons'
+import { ReloadOutlined, SearchOutlined, ArrowLeftOutlined, ThunderboltOutlined, LoadingOutlined, DeleteOutlined, BranchesOutlined, PlusOutlined, FileTextOutlined, CloudSyncOutlined } from '@ant-design/icons'
 import * as api from '../api'
+import DagFlowPanel from '../components/DagFlowPanel'
 
 const METRICS = [
-  { key: 'pr_count', label: 'PR', color: '#1890ff', githubKey: 'github_pr_total' },
-  { key: 'comments_count', label: '评论', color: '#faad14', githubKey: 'github_pr_comments_total' },
-  { key: 'issues_count', label: 'Issues', color: '#eb2f96', githubKey: 'github_pure_issues_total' },
-  { key: 'timeline_count', label: 'Timeline', color: '#722ed1', githubKey: null },
-  { key: 'details_count', label: 'PR 详情', color: '#52c41a', githubKey: 'github_pr_total' },
-  { key: 'reviews_count', label: 'Reviews', color: '#13c2c2', githubKey: 'github_pr_total' },
-  { key: 'commits_count', label: 'Commits', color: '#fa541c', githubKey: 'github_pr_total' },
+  { key: 'pr_count', label: 'PR', color: '#1890ff', githubKey: 'github_pr_total', syncKey: 'prs' },
+  { key: 'comments_count', label: '评论', color: '#faad14', githubKey: 'github_pr_comments_total', syncKey: 'comments' },
+  { key: 'issues_count', label: 'Issues', color: '#eb2f96', githubKey: 'github_pure_issues_total', syncKey: 'issues' },
+  { key: 'timeline_count', label: 'Timeline', color: '#722ed1', githubKey: null, syncKey: 'timelines' },
+  { key: 'details_count', label: 'PR 详情', color: '#52c41a', githubKey: 'github_pr_total', syncKey: 'details' },
+  { key: 'reviews_count', label: 'Reviews', color: '#13c2c2', githubKey: 'github_pr_total', syncKey: 'reviews' },
+  { key: 'commits_count', label: 'Commits', color: '#fa541c', githubKey: 'github_pr_total', syncKey: 'commits' },
 ]
 
 const TASK_ACTIONS = [
@@ -23,6 +24,7 @@ const TASK_ACTIONS = [
   { key: 'update_issues', label: '增量更新 Issues', desc: '对比 updated_at 增量更新已有 Issues', apiFn: 'updateIssues', icon: '🔄' },
   { key: 'update_comments', label: '增量更新评论', desc: '对比 updated_at 增量更新已有评论', apiFn: 'updateComments', icon: '🔄' },
   { key: 'git_clone', label: '克隆仓库', desc: 'bare clone 仓库到本地（已克隆则跳过）', apiFn: 'asyncGitClone', icon: '📂' },
+  { key: 'git_update', label: 'Git 仓库更新', desc: 'fetch 远程最新数据 + 重新提取 Git Log', apiFn: 'asyncGitUpdate', icon: '🔄' },
   { key: 'git_extract', label: '提取 Git Log', desc: '自动克隆 + 提取全部 commit 历史 + 变更文件详情', apiFn: 'asyncGitExtract', icon: '📝' },
   { key: 'files', label: '获取 PR 文件', desc: '获取 PR 的变更文件列表（热力图数据源）', apiFn: 'fetchPrFiles', defaultParam: 30, paramName: 'limit', icon: '📄' },
 ]
@@ -34,7 +36,40 @@ const STATUS_MAP = {
   failed: { color: 'error', text: '失败' },
 }
 
+const SYNC_TAG_MAP = {
+  full: { color: 'success', text: '已全量' },
+  partial: { color: 'warning', text: '部分' },
+  none: { color: 'default', text: '未获取' },
+}
+
 function Completeness({ project }) {
+  // 优先基于 GitHub 统计的覆盖率
+  const stats = project.github_stats || {}
+  const syncStatus = project.sync_status || {}
+  const hasGithubStats = stats.github_pr_total || stats.github_pr_comments_total || stats.github_pure_issues_total
+
+  if (hasGithubStats) {
+    const comparisons = [
+      { fetched: project.pr_count || 0, total: stats.github_pr_total },
+      { fetched: project.comments_count || 0, total: stats.github_pr_comments_total },
+      { fetched: project.issues_count || 0, total: stats.github_pure_issues_total },
+    ].filter(c => c.total !== null && c.total !== undefined && c.total > 0)
+    const pct = comparisons.length > 0
+      ? Math.round(comparisons.reduce((s, c) => s + Math.min(c.fetched / c.total, 1), 0) / comparisons.length * 100)
+      : 0
+    let status = 'exception'
+    if (pct >= 80) status = 'success'
+    else if (pct >= 50) status = 'normal'
+    else if (pct > 0) status = 'active'
+    const fullDims = Object.values(syncStatus).filter(v => v === 'full').length
+    return (
+      <Tooltip title={`覆盖率 ${pct}% | 已全量维度: ${fullDims}/${Object.keys(syncStatus).length || 7}`}>
+        <Progress percent={pct} size="small" status={status} style={{ width: 80 }} />
+      </Tooltip>
+    )
+  }
+
+  // 降级：基于有无数据的二值判断
   const filled = METRICS.filter(m => project[m.key] > 0).length
   const pct = Math.round((filled / METRICS.length) * 100)
   let status = 'exception'
@@ -42,7 +77,7 @@ function Completeness({ project }) {
   else if (pct >= 40) status = 'normal'
   else if (pct > 0) status = 'active'
   return (
-    <Tooltip title={`已获取 ${filled}/${METRICS.length} 类数据`}>
+    <Tooltip title={`已获取 ${filled}/${METRICS.length} 类数据（无 GitHub 统计）`}>
       <Progress percent={pct} size="small" status={status} style={{ width: 80 }} />
     </Tooltip>
   )
@@ -278,7 +313,12 @@ function ProjectDetail({ owner, repo, onBack }) {
 
       <Row gutter={[24, 0]}>
         <Col xs={24} lg={14}>
-          <Card title={<span><ThunderboltOutlined style={{ marginRight: 8 }} />数据获取操作</span>} size="small">
+          <DagFlowPanel owner={owner} repo={repo} onDone={refreshAll} />
+          <Card
+            title={<span><ThunderboltOutlined style={{ marginRight: 8 }} />数据获取操作</span>}
+            size="small"
+            style={{ marginTop: 12 }}
+          >
             {TASK_ACTIONS.map(action => (
               <TaskButton key={action.key} action={action} owner={owner} repo={repo} onTaskCreated={refreshAll} />
             ))}
@@ -440,6 +480,7 @@ export default function ProjectsOverview() {
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [addOwner, setAddOwner] = useState('')
   const [addRepo, setAddRepo] = useState('')
+  const [refreshingStats, setRefreshingStats] = useState(false)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -452,6 +493,18 @@ export default function ProjectsOverview() {
     }
     setLoading(false)
   }, [])
+
+  const handleRefreshAllStats = async () => {
+    setRefreshingStats(true)
+    try {
+      const res = await api.refreshAllProjectStats()
+      message.success(res.data.message || 'GitHub 统计刷新完成')
+      fetchData()
+    } catch (e) {
+      message.error(`刷新失败: ${e.message}`)
+    }
+    setRefreshingStats(false)
+  }
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -488,8 +541,31 @@ export default function ProjectsOverview() {
       },
     },
     ...METRICS.map(m => ({
-      title: m.label, dataIndex: m.key, key: m.key, width: 80, align: 'center',
-      render: v => v ? <Tag color={m.color}>{v.toLocaleString()}</Tag> : <span style={{ color: '#d9d9d9' }}>-</span>,
+      title: m.label, dataIndex: m.key, key: m.key, width: 120, align: 'center',
+      render: (v, r) => {
+        const ghTotal = r.github_stats?.[m.githubKey]
+        const syncVal = r.sync_status?.[m.syncKey]
+        const tagInfo = syncVal ? SYNC_TAG_MAP[syncVal] : null
+        return (
+          <div>
+            {v ? (
+              <span style={{ color: m.color, fontWeight: 500 }}>
+                {v.toLocaleString()}{ghTotal ? `/${ghTotal.toLocaleString()}` : ''}
+              </span>
+            ) : (
+              <span style={{ color: '#d9d9d9' }}>0</span>
+            )}
+            {ghTotal && v ? (
+              <div style={{ fontSize: 11, color: '#999' }}>
+                {Math.min(Math.round((v / ghTotal) * 100), 100)}%
+              </div>
+            ) : null}
+            {tagInfo ? (
+              <Tag color={tagInfo.color} style={{ fontSize: 10, lineHeight: '16px', padding: '0 3px', marginTop: 2 }}>{tagInfo.text}</Tag>
+            ) : null}
+          </div>
+        )
+      },
       sorter: (a, b) => (a[m.key] || 0) - (b[m.key] || 0),
     })),
     {
@@ -538,6 +614,7 @@ export default function ProjectsOverview() {
           allowClear
         />
         <Button icon={<ReloadOutlined />} onClick={fetchData} loading={loading}>刷新</Button>
+        <Button icon={<CloudSyncOutlined />} onClick={handleRefreshAllStats} loading={refreshingStats}>刷新 GitHub 统计</Button>
         <Button type="dashed" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>添加项目</Button>
         <span style={{ color: '#999', fontSize: 12 }}>
           {filtered.length === data.length ? `共 ${data.length} 个项目` : `筛选: ${filtered.length} / ${data.length}`}
@@ -549,7 +626,7 @@ export default function ProjectsOverview() {
         dataSource={filtered.map(p => ({ key: `${p.owner}/${p.repo}`, ...p }))}
         loading={loading}
         pagination={{ pageSize: 20, showTotal: t => `共 ${t} 个项目` }}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1400 }}
         size="middle"
       />
 

@@ -40,14 +40,21 @@ export const getGitLogSummary = (owner, repo) => api.get(`/git/repos/${owner}/${
 
 export const getGitLogCommits = (owner, repo, params) => api.get(`/git/repos/${owner}/${repo}/log/commits`, { params })
 
+export const getGitBranches = (owner, repo) => api.get(`/git/repos/${owner}/${repo}/branches`)
+
 export const getGitProjects = () => api.get('/git/projects')
 
 export const asyncGitClone = (owner, repo) => api.post(`/git/tasks/clone/${owner}/${repo}`)
 
-export const asyncGitExtract = (owner, repo, maxCount) => {
+export const asyncGitExtract = (owner, repo, maxCount, branch) => {
   const mc = typeof maxCount === 'object' ? (maxCount.max_count || 0) : (maxCount || 0)
-  return api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params: { max_count: mc } })
+  const params = { max_count: mc }
+  if (branch) params.branch = branch
+  return api.post(`/git/tasks/extract/${owner}/${repo}`, null, { params })
 }
+
+export const asyncGitUpdate = (owner, repo) =>
+  api.post(`/git/tasks/update/${owner}/${repo}`)
 
 export const deleteGitRepo = (owner, repo) => api.delete(`/git/repos/${owner}/${repo}`)
 
@@ -209,5 +216,52 @@ export const getTopContributors = (params) =>
 
 export const getBatchHealth = () =>
   api.get('/analysis/health/batch', { timeout: 60000 })
+
+// ====================
+// 通知管理
+// ====================
+export const getNotificationConfigs = () => api.get('/notifications/config')
+export const createNotificationConfig = (data) => api.post('/notifications/config', data)
+export const updateNotificationConfig = (configId, data) => api.put(`/notifications/config/${configId}`, data)
+export const deleteNotificationConfig = (configId) => api.delete(`/notifications/config/${configId}`)
+export const testNotificationConfig = (configId) =>
+  api.post(`/notifications/config/${configId}/test`, null, { timeout: 30000 })
+export const getNotificationHistory = (params) => api.get('/notifications/history', { params })
+
+// ====================
+// 数据导出
+// ====================
+export const exportReport = (owner, repo, params) =>
+  api.get(`/export/report/${owner}/${repo}`, { params, responseType: 'blob', timeout: 120000 })
+export const exportData = (owner, repo, params) =>
+  api.get(`/export/data/${owner}/${repo}`, { params, responseType: 'blob', timeout: 120000 })
+
+// ====================
+// Webhook 管理
+// ====================
+export const getWebhookConfig = () => api.get('/webhooks/config')
+export const updateWebhookConfig = (data) => api.put('/webhooks/config', data)
+export const getWebhookEvents = (params) => api.get('/webhooks/events', { params })
+
+// ====================
+// 多仓库对比
+// ====================
+export const compareProjects = (data) => api.post('/analysis/compare', data, { timeout: 120000 })
+export const getContributorsOverlap = (params) => api.get('/analysis/compare/contributors-overlap', { params })
+
+// ====================
+// 数据完整性 — GitHub 统计刷新
+// ====================
+export const refreshProjectStats = (owner, repo) =>
+  api.post(`/database/projects/${owner}/${repo}/refresh-stats`)
+export const refreshAllProjectStats = () =>
+  api.post('/database/projects/refresh-all-stats', null, { timeout: 120000 })
+
+// ====================
+// 系统配置
+// ====================
+export const getProxyConfig = () => api.get('/config/proxy')
+export const updateProxyConfig = (proxy) => api.put('/config/proxy', null, { params: { proxy } })
+export const getAppConfig = () => api.get('/config')
 
 export default api
