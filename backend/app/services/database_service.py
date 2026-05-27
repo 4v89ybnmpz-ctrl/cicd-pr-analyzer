@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import uuid
 
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
@@ -1269,6 +1270,16 @@ class DatabaseService:
             async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
                 all_projects.add(f"{doc['owner']}/{doc['repo']}")
 
+            # 批量读取已缓存的 GitHub 统计和同步状态
+            github_stats_map = {}
+            sync_status_map = {}
+            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "github_stats": 1, "sync_status": 1, "_id": 0}):
+                pk = f"{doc['owner']}/{doc['repo']}"
+                if doc.get("github_stats"):
+                    github_stats_map[pk] = doc["github_stats"]
+                if doc.get("sync_status"):
+                    sync_status_map[pk] = doc["sync_status"]
+
             overview = []
             for project_key in sorted(all_projects):
                 parts = project_key.split("/", 1)
@@ -1284,7 +1295,6 @@ class DatabaseService:
                 commits_count = git_log_total or pr_commits_counts.get(project_key, 0)
 
                 last_updated = None
-                # 用聚合查询一次性获取所有集合的最新 saved_at，替代 N+1 逐集合查询
                 for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details", "git_log_summaries", "git_log_commits"]:
                     if coll_name not in collection_names:
                         continue
@@ -1302,6 +1312,30 @@ class DatabaseService:
                     except Exception:
                         pass
 
+                # GitHub 实际总量（从缓存读取）
+                gh_stats = github_stats_map.get(project_key, {})
+                # 读取已记录的同步状态（由任务完成时 update_sync_status 写入）
+                sync_status = sync_status_map.get(project_key, {})
+                # 合并推断：对于已明确标记为 full 的维度保留，其余用推断补充
+                inferred = self._infer_sync_status(
+                    pr_count, comments_count, issues_count,
+                    timeline_count, details_count, reviews_count, commits_count,
+                    gh_stats,
+                )
+                # 如果数据库有明确的 full 标记，优先保留；否则用推断
+                merged = {}
+                for dim in ["prs", "comments", "issues", "details", "reviews", "commits", "timelines"]:
+                    db_val = sync_status.get(dim)
+                    if db_val == "full":
+                        merged[dim] = "full"
+                    else:
+                        merged[dim] = inferred.get(dim, "none")
+                    sync_status = self._infer_sync_status(
+                        pr_count, comments_count, issues_count,
+                        timeline_count, details_count, reviews_count, commits_count,
+                        gh_stats,
+                    )
+
                 overview.append({
                     "owner": owner,
                     "repo": repo,
@@ -1314,7 +1348,107 @@ class DatabaseService:
                     "commits_count": commits_count,
                     "git_log_total": git_log_total,
                     "last_updated": last_updated,
+                    "github_pr_total": gh_stats.get("github_pr_total"),
+                    "github_comments_total": gh_stats.get("github_comments_total"),
+                    "github_issues_total": gh_stats.get("github_issues_total"),
+                    "sync_status": merged,
                 })
+
+            logger.info(f"项目总览: {len(overview)} 个项目")
+            return overview
+        except Exception as e:
+            logger.error(f"获取项目总览失败: {e}")
+            return []
+
+    @staticmethod
+    def _infer_sync_status(pr_count, comments_count, issues_count,
+                           timeline_count, details_count, reviews_count,
+                           commits_count, gh_stats) -> Dict[str, str]:
+        """根据本地数量和 GitHub 总量自动推断同步状态"""
+        gh_pr = gh_stats.get("github_pr_total") if gh_stats else None
+        gh_comments = gh_stats.get("github_comments_total") if gh_stats else None
+        gh_issues = gh_stats.get("github_issues_total") if gh_stats else None
+
+        def _status(local, remote):
+            if local <= 0:
+                return "none"
+            if remote and remote > 0:
+                return "full" if local >= remote else "partial"
+            # 有本地数据但没有 GitHub 总量参考，标记为 partial
+            return "partial"
+
+        return {
+            "prs": _status(pr_count, gh_pr),
+            "comments": _status(comments_count, gh_comments),
+            "issues": _status(issues_count, gh_issues),
+            "details": _status(details_count, gh_pr),
+            "reviews": _status(reviews_count, gh_pr),
+            "commits": _status(commits_count, gh_pr),
+            "timelines": "none" if timeline_count <= 0 else "partial",
+        }
+
+    async def update_sync_status(self, owner: str, repo: str, dimension: str, status: str = "full"):
+        """更新项目的同步状态"""
+        if self.db is None:
+            return
+        try:
+            await self.db['registered_projects'].update_one(
+                {"owner": owner, "repo": repo},
+                {"$set": {f"sync_status.{dimension}": status}},
+            )
+        except Exception as e:
+            logger.error(f"更新同步状态失败: {e}")
+
+    async def refresh_project_github_stats(self, owner: str, repo: str, github_service) -> Dict:
+        """刷新单个项目的 GitHub 统计数据"""
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        try:
+            stats = await github_service.get_repo_stats(owner, repo)
+            if stats.get("error"):
+                return {"error": stats["error"]}
+
+            gh_stats = {
+                "github_pr_total": stats.get("github_pr_total"),
+                "github_comments_total": stats.get("github_pr_comments_total"),
+                "github_issues_total": stats.get("github_pure_issues_total"),
+                "stargazers_count": stats.get("stargazers_count"),
+                "forks_count": stats.get("forks_count"),
+                "updated_at": datetime.now().isoformat(),
+            }
+
+            await self.db['registered_projects'].update_one(
+                {"owner": owner, "repo": repo},
+                {"$set": {"github_stats": gh_stats}},
+                upsert=True,
+            )
+            return {"data": gh_stats, "error": None}
+        except Exception as e:
+            logger.error(f"刷新 GitHub 统计失败: {e}")
+            return {"error": str(e)}
+
+    async def refresh_all_github_stats(self, github_service) -> Dict:
+        """批量刷新所有已注册项目的 GitHub 统计"""
+        if self.db is None:
+            return {"results": [], "error": "数据库未连接"}
+        try:
+            projects = []
+            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+                projects.append((doc["owner"], doc["repo"]))
+
+            results = []
+            for owner, repo in projects:
+                res = await self.refresh_project_github_stats(owner, repo, github_service)
+                results.append({
+                    "project": f"{owner}/{repo}",
+                    "success": "error" not in res,
+                    "error": res.get("error"),
+                })
+
+            return {"results": results, "total": len(results)}
+        except Exception as e:
+            logger.error(f"批量刷新 GitHub 统计失败: {e}")
+            return {"results": [], "error": str(e)}
 
             logger.info(f"项目总览: {len(overview)} 个项目")
             return overview
@@ -1365,7 +1499,8 @@ class DatabaseService:
             return None
 
     async def list_git_log_commits(self, owner: str, repo: str,
-                                    author: str = None, page: int = 1, size: int = 20,
+                                    author: str = None, branch: str = None,
+                                    page: int = 1, size: int = 20,
                                     sort_by: str = "author_date", sort_order: int = -1) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
@@ -1373,6 +1508,8 @@ class DatabaseService:
             query = {"owner": owner, "repo": repo}
             if author:
                 query["author_name"] = {"$regex": author, "$options": "i"}
+            if branch:
+                query["branches"] = branch
             total = await self.db['git_log_commits'].count_documents(query)
             skip = (page - 1) * size
             cursor = self.db['git_log_commits'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
@@ -3922,3 +4059,264 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"批量获取健康度快照失败: {e}")
             return {"snapshots": [], "total": 0, "error": str(e)}
+
+    # ====================
+    # 通知配置 CRUD
+    # ====================
+
+    async def save_notification_config(self, config_data: Dict) -> Dict:
+        """保存通知配置"""
+        if self.db is None:
+            return {"data": None, "error": "数据库未连接"}
+        try:
+            config_id = config_data.get("config_id") or uuid.uuid4().hex[:8]
+            now = datetime.now().isoformat()
+            config_data["config_id"] = config_id
+            config_data["created_at"] = config_data.get("created_at") or now
+            config_data["updated_at"] = now
+            await self.db['notifications_config'].update_one(
+                {"config_id": config_id},
+                {"$set": config_data},
+                upsert=True,
+            )
+            config_data["_id"] = str(config_data.get("_id", ""))
+            return {"data": config_data, "error": None}
+        except Exception as e:
+            logger.error(f"保存通知配置失败: {e}")
+            return {"data": None, "error": str(e)}
+
+    async def update_notification_config(self, config_id: str, updates: Dict) -> Dict:
+        """更新通知配置"""
+        if self.db is None:
+            return {"data": None, "error": "数据库未连接"}
+        try:
+            updates["updated_at"] = datetime.now().isoformat()
+            result = await self.db['notifications_config'].update_one(
+                {"config_id": config_id},
+                {"$set": updates},
+            )
+            if result.matched_count == 0:
+                return {"data": None, "error": "配置不存在"}
+            doc = await self.db['notifications_config'].find_one({"config_id": config_id})
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return {"data": doc, "error": None}
+        except Exception as e:
+            logger.error(f"更新通知配置失败: {e}")
+            return {"data": None, "error": str(e)}
+
+    async def delete_notification_config(self, config_id: str) -> Dict:
+        """删除通知配置"""
+        if self.db is None:
+            return {"data": None, "error": "数据库未连接"}
+        try:
+            await self.db['notifications_config'].delete_one({"config_id": config_id})
+            return {"data": {"deleted": True, "config_id": config_id}, "error": None}
+        except Exception as e:
+            logger.error(f"删除通知配置失败: {e}")
+            return {"data": None, "error": str(e)}
+
+    async def list_notification_configs(self) -> Dict:
+        """获取所有通知配置"""
+        if self.db is None:
+            return {"data": [], "error": "数据库未连接"}
+        try:
+            configs = []
+            async for doc in self.db['notifications_config'].find().sort("created_at", -1):
+                doc["_id"] = str(doc["_id"])
+                configs.append(doc)
+            return {"data": configs, "error": None}
+        except Exception as e:
+            logger.error(f"获取通知配置失败: {e}")
+            return {"data": [], "error": str(e)}
+
+    async def get_notification_config(self, config_id: str) -> Dict:
+        """获取单条通知配置"""
+        if self.db is None:
+            return {"data": None, "error": "数据库未连接"}
+        try:
+            doc = await self.db['notifications_config'].find_one({"config_id": config_id})
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return {"data": doc, "error": None}
+        except Exception as e:
+            logger.error(f"获取通知配置失败: {e}")
+            return {"data": None, "error": str(e)}
+
+    # ====================
+    # 通知历史 CRUD
+    # ====================
+
+    async def save_notification_history(self, history_data: Dict) -> str:
+        """保存通知发送记录"""
+        if self.db is None:
+            return ""
+        try:
+            history_data["history_id"] = history_data.get("history_id") or uuid.uuid4().hex[:8]
+            history_data["sent_at"] = datetime.now().isoformat()
+            await self.db['notifications_history'].insert_one(history_data)
+            return history_data["history_id"]
+        except Exception as e:
+            logger.error(f"保存通知历史失败: {e}")
+            return ""
+
+    async def list_notification_history(self, config_id: str = None, status: str = None,
+                                        page: int = 1, size: int = 20) -> Dict:
+        """查询通知历史（分页）"""
+        if self.db is None:
+            return {"data": [], "total": 0, "error": "数据库未连接"}
+        try:
+            query = {}
+            if config_id:
+                query["config_id"] = config_id
+            if status:
+                query["status"] = status
+            total = await self.db['notifications_history'].count_documents(query)
+            items = []
+            async for doc in self.db['notifications_history'].find(query).sort("sent_at", -1).skip((page - 1) * size).limit(size):
+                doc["_id"] = str(doc["_id"])
+                items.append(doc)
+            return {"data": items, "total": total, "page": page, "size": size, "error": None}
+        except Exception as e:
+            logger.error(f"查询通知历史失败: {e}")
+            return {"data": [], "total": 0, "error": str(e)}
+
+    # ====================
+    # 多仓库对比分析
+    # ====================
+
+    async def compare_projects(self, project_keys: List[str], dimensions: List[str] = None) -> Dict:
+        """多项目横向对比分析"""
+        if self.db is None:
+            return {"error": "数据库未连接"}
+        if len(project_keys) < 2:
+            return {"error": "至少需要 2 个项目进行对比"}
+        try:
+            semaphore = asyncio.Semaphore(3)
+
+            async def _get_report(project_key: str) -> Optional[Dict]:
+                parts = project_key.split("/", 1)
+                if len(parts) < 2:
+                    return None
+                owner, repo = parts[0], parts[1]
+                async with semaphore:
+                    report = await self.get_project_health_report(owner, repo)
+                    if "error" in report:
+                        return None
+                    return {
+                        "project": project_key,
+                        "owner": owner,
+                        "repo": repo,
+                        "overall_score": report.get("overall_score", 0),
+                        "overall_grade": report.get("overall_grade", "N/A"),
+                        "dimensions": report.get("dimensions", []),
+                        "data_available": report.get("data_available", True),
+                    }
+
+            results = await asyncio.gather(*[_get_report(pk) for pk in project_keys])
+            projects = [r for r in results if r is not None]
+
+            if not projects:
+                return {"projects": [], "comparison": {}, "error": "无可用数据"}
+
+            # 构建对比数据
+            comparison = self._build_comparison(projects, dimensions)
+
+            # 贡献者重叠分析
+            overlap = await self.get_contributors_overlap(project_keys)
+
+            return {
+                "projects": projects,
+                "comparison": comparison,
+                "contributors_overlap": overlap.get("contributors", []),
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"多仓库对比失败: {e}")
+            return {"error": str(e)}
+
+    def _build_comparison(self, projects: List[Dict], dimensions: List[str] = None) -> Dict:
+        """构建对比数据（维度排名 + 雷达图数据）"""
+        # 收集所有维度名称
+        all_dim_names = []
+        for p in projects:
+            for dim in p.get("dimensions", []):
+                if dim["name"] not in all_dim_names:
+                    all_dim_names.append(dim["name"])
+
+        if dimensions:
+            all_dim_names = [d for d in all_dim_names if d in dimensions]
+
+        # 每个维度的排名
+        rankings = []
+        for dim_name in all_dim_names:
+            dim_scores = []
+            for p in projects:
+                score = 0
+                for dim in p.get("dimensions", []):
+                    if dim["name"] == dim_name:
+                        score = dim.get("score", 0)
+                        break
+                dim_scores.append({"project": p["project"], "score": round(score, 1)})
+            dim_scores.sort(key=lambda x: x["score"], reverse=True)
+            for i, ds in enumerate(dim_scores):
+                ds["rank"] = i + 1
+            rankings.append({"dimension": dim_name, "rankings": dim_scores})
+
+        # 雷达图数据
+        radar_data = []
+        for p in projects:
+            values = []
+            for dim_name in all_dim_names:
+                score = 0
+                for dim in p.get("dimensions", []):
+                    if dim["name"] == dim_name:
+                        score = dim.get("score", 0)
+                        break
+                values.append({"dimension": dim_name, "score": round(score, 1)})
+            radar_data.append({"project": p["project"], "values": values})
+
+        return {"rankings": rankings, "radar_data": radar_data, "dimensions": all_dim_names}
+
+    async def get_contributors_overlap(self, project_keys: List[str]) -> Dict:
+        """跨项目贡献者重叠分析"""
+        if self.db is None:
+            return {"contributors": [], "error": "数据库未连接"}
+        try:
+            user_projects = {}  # user -> {project -> pr_count}
+
+            for pk in project_keys:
+                parts = pk.split("/", 1)
+                if len(parts) < 2:
+                    continue
+                owner, repo = parts[0], parts[1]
+                pipeline = [
+                    {"$match": {"owner": owner, "repo": repo}},
+                    {"$group": {"_id": "$user", "pr_count": {"$sum": 1}}},
+                ]
+                async for doc in self.db['pr_data'].aggregate(pipeline):
+                    user = doc["_id"]
+                    if not user or "[bot]" in (user or ""):
+                        continue
+                    if user not in user_projects:
+                        user_projects[user] = {}
+                    user_projects[user][pk] = doc["pr_count"]
+
+            # 过滤出跨项目贡献者（2+ 个项目）
+            overlap = []
+            for user, projs in user_projects.items():
+                if len(projs) >= 2:
+                    total = sum(projs.values())
+                    overlap.append({
+                        "user": user,
+                        "projects": list(projs.keys()),
+                        "project_count": len(projs),
+                        "total_prs": total,
+                        "details": projs,
+                    })
+
+            overlap.sort(key=lambda x: x["total_prs"], reverse=True)
+            return {"contributors": overlap, "total": len(overlap)}
+        except Exception as e:
+            logger.error(f"贡献者重叠分析失败: {e}")
+            return {"contributors": [], "error": str(e)}

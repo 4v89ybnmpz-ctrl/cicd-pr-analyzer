@@ -35,6 +35,8 @@ def register_async_task_routes(router, github_service, db):
                 t.log("INFO", "正在保存到数据库...")
                 await db.save_pr_data(owner, repo, result)
                 t.log("INFO", "数据库保存完成")
+                # 更新同步状态为已全量
+                await db.update_sync_status(owner, repo, "prs", "full")
             return {"fetched": result.get("total", 0), "error": None}
 
         asyncio.create_task(task_queue.run_task(task, _do, key))
@@ -62,6 +64,7 @@ def register_async_task_routes(router, github_service, db):
                 t.log("INFO", "正在保存到数据库...")
                 await db.save_issues(owner, repo, result)
                 t.log("INFO", "数据库保存完成")
+                await db.update_sync_status(owner, repo, "issues", "full")
             return {"fetched": result.get("total", 0), "error": None}
 
         asyncio.create_task(task_queue.run_task(task, _do, key))
@@ -96,6 +99,8 @@ def register_async_task_routes(router, github_service, db):
                     await asyncio.sleep(github_service.request_delay)
 
             await asyncio.gather(*[_fetch(n) for n in pr_numbers])
+            if db is not None:
+                await db.update_sync_status(owner, repo, "comments", "full")
             return {"fetched": total_saved}
 
         asyncio.create_task(task_queue.run_task(task, _do, key))
@@ -137,6 +142,7 @@ def register_async_task_routes(router, github_service, db):
                         except Exception as ex:
                             t.log("WARN", f"保存 Issue#{r['issue_number']} Timeline 失败: {ex}")
                 t.log("INFO", f"已保存 {saved} 个 Timeline 到数据库")
+                await db.update_sync_status(owner, repo, "timelines", "full")
             return {"fetched": result.get("success_count", 0), "failed": result.get("failed_count", 0)}
 
         asyncio.create_task(task_queue.run_task(task, _do, key))
@@ -215,6 +221,8 @@ def register_async_task_routes(router, github_service, db):
 
             await asyncio.gather(*[_fetch(n) for n in pr_numbers])
             t.log("INFO", f"完成: {total_saved} 成功, {total_failed} 失败")
+            if db is not None:
+                await db.update_sync_status(owner, repo, "details", "full")
             return {"fetched": total_saved, "failed": total_failed}
 
         asyncio.create_task(task_queue.run_task(task, _do, key))

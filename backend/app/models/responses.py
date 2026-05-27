@@ -718,3 +718,42 @@ class TrendAlertsReport(BaseModel):
     alerts: List[AlertItem] = Field(default_factory=list, description="预警列表")
     summary: Dict[str, Any] = Field(default_factory=dict, description="预警摘要")
     generated_at: Optional[str] = Field(None, description="报告生成时间")
+
+
+# ====================
+# 通知推送响应模型
+# ====================
+
+class NotificationConfigResponse(TimestampMixin):
+    """通知配置响应"""
+    data: Dict[str, Any] = Field(default_factory=dict, description="通知配置数据")
+
+
+class NotificationConfigListResponse(TimestampMixin):
+    """通知配置列表响应"""
+    data: List[Dict[str, Any]] = Field(default_factory=list, description="通知配置列表")
+
+
+class NotificationTestResponse(TimestampMixin):
+    """通知测试发送响应"""
+    sent: bool = Field(False, description="是否发送成功")
+    channel: str = Field("", description="发送渠道")
+    message: Optional[str] = Field(None, description="返回消息")
+
+
+class NotificationHistoryResponse(TimestampMixin):
+    """通知历史响应"""
+    data: List[Dict[str, Any]] = Field(default_factory=list, description="通知历史列表")
+    total: int = Field(0, description="总记录数")
+
+
+# ====================
+# 数据导出响应模型
+# ====================
+
+class ExportTaskResponse(TimestampMixin):
+    """导出任务响应"""
+    message: str = Field("", description="消息")
+    filename: str = Field("", description="文件名")
+    size_bytes: int = Field(0, description="文件大小")
+    format: str = Field("", description="导出格式")

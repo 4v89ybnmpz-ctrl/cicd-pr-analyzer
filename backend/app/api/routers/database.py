@@ -10,7 +10,7 @@ from app.models.responses import DatabaseStatsResponse, DeleteResponse, Database
 logger = logging.getLogger(__name__)
 
 
-def register_database_routes(router, db):
+def register_database_routes(router, db, github_service=None):
     """注册数据库相关路由"""
 
     @router.post("/database/projects/register")
@@ -531,3 +531,29 @@ def register_database_routes(router, db):
         if db is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
         return await db.get_top_contributors(limit, sort_by)
+
+    # ====================
+    # GitHub 统计刷新
+    # ====================
+
+    @router.post("/database/projects/{owner}/{repo}/refresh-stats", tags=["项目统计"])
+    async def refresh_project_stats(owner: str, repo: str):
+        """刷新单个项目的 GitHub 统计数据"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        if github_service is None:
+            raise HTTPException(status_code=503, detail="GitHub 服务不可用")
+        result = await db.refresh_project_github_stats(owner, repo, github_service)
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
+        return {"data": result["data"], "message": "统计已刷新", "timestamp": datetime.now().isoformat()}
+
+    @router.post("/database/projects/refresh-all-stats", tags=["项目统计"])
+    async def refresh_all_stats():
+        """批量刷新所有已注册项目的 GitHub 统计数据"""
+        if db is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        if github_service is None:
+            raise HTTPException(status_code=503, detail="GitHub 服务不可用")
+        result = await db.refresh_all_github_stats(github_service)
+        return {**result, "timestamp": datetime.now().isoformat()}

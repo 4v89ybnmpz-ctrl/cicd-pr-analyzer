@@ -10,6 +10,10 @@ from .task import register_task_routes
 from .browser import register_browser_routes
 from .atomgit import register_atomgit_routes
 from .analysis import register_analysis_routes
+from .export import register_export_routes
+from .notifications import register_notification_routes
+from .webhooks import register_webhook_routes
+from .compare import register_compare_routes
 
 __all__ = [
     'register_base_routes',
@@ -22,4 +26,8 @@ __all__ = [
     'register_browser_routes',
     'register_atomgit_routes',
     'register_analysis_routes',
+    'register_export_routes',
+    'register_notification_routes',
+    'register_webhook_routes',
+    'register_compare_routes',
 ]
