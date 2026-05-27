@@ -70,9 +70,34 @@ class TokenPool:
             logger.info(f"Token 已移除，当前共 {len(self.tokens)} 个 Token")
 
     def get_stats(self) -> Dict[str, Any]:
+        now = time.time()
+        rate_limits = []
+        for i, token in enumerate(self.tokens):
+            masked = token[:4] + '*' * (len(token) - 8) + token[-4:] if len(token) > 8 else '****'
+            info = self._rate_limits.get(token)
+            if info:
+                remaining, reset_epoch = info
+                rate_limits.append({
+                    "index": i,
+                    "token_masked": masked,
+                    "remaining": remaining,
+                    "reset_at": reset_epoch,
+                    "reset_in_seconds": max(0, reset_epoch - now),
+                    "limited": remaining <= 0 and now < reset_epoch,
+                })
+            else:
+                rate_limits.append({
+                    "index": i,
+                    "token_masked": masked,
+                    "remaining": None,
+                    "reset_at": None,
+                    "reset_in_seconds": None,
+                    "limited": False,
+                })
         return {
             "total_tokens": len(self.tokens),
-            "current_index": self.current_index
+            "current_index": self.current_index,
+            "rate_limits": rate_limits,
         }
 
 
