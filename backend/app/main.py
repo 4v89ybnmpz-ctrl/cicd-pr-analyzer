@@ -297,9 +297,11 @@ def main():
     try:
         server_host = os.environ.get("HOST", config.get("host", "0.0.0.0"))
         server_port = int(os.environ.get("PORT", config.get("port", 1234)))
+        debug = config.get("debug", False)
         uvicorn.run(
-            app, host=server_host, port=server_port,
-            log_level="info", access_log=True, use_colors=False
+            "app.main:app", host=server_host, port=server_port,
+            log_level="info", access_log=True, use_colors=False,
+            reload=debug, reload_dirs=["app"] if debug else None,
         )
     except KeyboardInterrupt:
         logger.info("收到键盘中断，正在关闭服务...")
