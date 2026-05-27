@@ -279,7 +279,7 @@ app/
   - `GET /browser/api-responses` - 查看拦截的 API 响应
 - **测试**: 44/44 通过 (100%)
 
-### 19. AtomGit 平台支持 ✅ (2026-04-12 新增)
+### 19. AtomGit 平台支持 ✅ (2026-04-12 新增, 2026-05-27 增强)
 - **目录结构** [app/gitcode/](app/gitcode/)
   - [service.py](app/gitcode/service.py) - AtomGitService API 服务类
   - [config.py](app/gitcode/config.py) - AtomGit API 配置
@@ -291,17 +291,42 @@ app/
   - `fetch_all_pull_comments()` - 获取 PR 全部评论（自动分页）
   - `fetch_pulls_with_comments()` - 批量获取 PR 及评论
   - `fetch_all_project_comments()` - 全量获取整个项目 PR 评论（自动遍历所有 PR）
+  - `fetch_pull_detail()` - 获取单个 PR 详细信息（描述/标签/指派人/评审人/里程碑/代码变更统计/合并状态）
+  - `fetch_pull_reviews()` - 获取 PR Reviews（自动分页）
+  - `fetch_pull_commits()` - 获取 PR Commits（自动分页）
+  - `fetch_pull_files()` - 获取 PR 变更文件列表（自动分页）
+  - `fetch_pull_timeline()` - 获取 PR 时间线事件（自动分页）
+  - `fetch_issues()` - 获取仓库 Issue 列表（自动过滤 PR）
+  - `fetch_issue_detail()` - 获取单个 Issue 详细信息
+  - `fetch_all_pull_details()` - 并发获取多个 PR 详情
+  - `fetch_all_pull_reviews()` - 并发获取多个 PR Reviews
+  - `fetch_all_pull_commits()` - 并发获取多个 PR Commits
+  - `fetch_all_pull_files()` - 并发获取多个 PR 变更文件
+  - `fetch_all_pull_timelines()` - 并发获取多个 PR 时间线
   - `_extract_pipeline_info()` - 从 Bot 评论提取 openlibing.com 流水线信息
 - **API 接口**
   - `GET /atomgit/pulls/{owner}/{repo}` - PR 列表
-  - `GET /atomgit/pulls/{owner}/{repo}/{number}/comments` - 单个 PR 评论（自动存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/detail` - PR 详情（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/comments` - 单个 PR 评论（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/reviews` - PR Reviews（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/commits` - PR Commits（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/files` - PR 变更文件（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/{number}/timeline` - PR 时间线（存库）
   - `GET /atomgit/pulls/{owner}/{repo}/comments` - 批量获取评论（存库）
   - `GET /atomgit/pulls/{owner}/{repo}/comments/all` - **全量获取整个项目评论（存库）**
+  - `GET /atomgit/pulls/{owner}/{repo}/details` - 并发获取多个 PR 详情（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/reviews` - 并发获取多个 PR Reviews（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/commits` - 并发获取多个 PR Commits（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/files` - 并发获取多个 PR 变更文件（存库）
+  - `GET /atomgit/pulls/{owner}/{repo}/timelines` - 并发获取多个 PR 时间线（存库）
+  - `GET /atomgit/issues/{owner}/{repo}` - Issue 列表
+  - `GET /atomgit/issues/{owner}/{repo}/{number}` - Issue 详情
 - **全量获取参数**
   - `state=open/closed/all` - PR 状态
   - `max_prs=0` - 最大 PR 数（0=全部）
   - `skip_no_comments=true` - 跳过无评论 PR
 - **验证数据**: cann/ge 项目 1838 个 PR, 30491 条评论, 17154 条 Bot 评论, 全部存库
+- **测试**: [test_atomgit.py](app/test/test_atomgit.py) - 28 项测试（100% 通过）
 
 ### 20. 版本控制 ✅ (2026-05-18 新增)
 - 补充 `.gitignore` 规则，添加 `backend/secrets/` 排除

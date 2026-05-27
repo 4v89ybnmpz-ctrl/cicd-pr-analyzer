@@ -140,6 +140,16 @@
 - [x] AtomGit 评论存库 - PR 评论自动保存到数据库
 - [x] AtomGit 流水线信息提取 - 从 Bot 评论中提取 openlibing.com 流水线链接和任务状态
 - [x] AtomGit API 路由 - /atomgit/* 接口
+- [x] AtomGit PR 详情获取 - 获取单个 PR 详细信息（描述/标签/指派人/评审人/里程碑/代码变更统计/合并状态）
+- [x] AtomGit PR Reviews 获取 - 获取 PR 评审记录（自动分页）
+- [x] AtomGit PR Commits 获取 - 获取 PR 提交记录（自动分页）
+- [x] AtomGit PR 变更文件获取 - 获取 PR 变更文件列表（自动分页）
+- [x] AtomGit PR 时间线获取 - 获取 PR 时间线事件（自动分页）
+- [x] AtomGit Issue 列表获取 - 获取仓库 Issue 列表（自动过滤 PR）
+- [x] AtomGit Issue 详情获取 - 获取单个 Issue 详细信息
+- [x] AtomGit 批量并发获取 - 并发获取多个 PR 的详情/Reviews/Commits/文件/时间线
+- [x] AtomGit 数据库持久化 - 详情/Reviews/Commits/文件/时间线自动保存到数据库
+- [x] AtomGit 测试用例 - 28 项测试（服务层 + 格式化 + API 集成）
 
 ---
 
