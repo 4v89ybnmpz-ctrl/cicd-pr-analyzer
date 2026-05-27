@@ -1,12 +1,14 @@
 """
 服务监控模块
 用于诊断服务卡死问题，记录运行状态
+支持自动恢复：检测到卡死时优雅退出，由 watchdog 父进程自动重启
 """
 import threading
 import time
 import traceback
 import sys
 import os
+import subprocess
 import psutil
 import logging
 from datetime import datetime
@@ -23,14 +25,17 @@ class ServiceMonitor:
     记录服务运行状态，诊断卡死问题
     """
 
-    def __init__(self, log_file: str = "monitor.log", heartbeat_interval: int = 10):
+    def __init__(self, log_file: str = "monitor.log", heartbeat_interval: int = 10,
+                 auto_recovery: bool = False):
         """
         初始化监控器
         :param log_file: 监控日志文件
         :param heartbeat_interval: 心跳间隔（秒）
+        :param auto_recovery: 是否启用自动恢复（检测到卡死时自动退出，由 watchdog 重启）
         """
         self.log_file = log_file
         self.heartbeat_interval = heartbeat_interval
+        self.auto_recovery = auto_recovery
         self.is_running = False
         self.monitor_thread = None
         self.lock = threading.Lock()
@@ -44,13 +49,17 @@ class ServiceMonitor:
         self.heartbeat_missed = 0
         self.max_heartbeat_miss = 3  # 最大心跳丢失次数
 
+        # 自动恢复状态
+        self.recovery_count = 0
+        self.last_recovery_time = None
+
         # 内存监控
         self.memory_threshold = 500 * 1024 * 1024  # 500MB 内存阈值
 
         # 线程监控
         self.thread_count_history: List[int] = []
 
-        logger.info(f"服务监控器初始化，心跳间隔: {heartbeat_interval}秒")
+        logger.info(f"服务监控器初始化，心跳间隔: {heartbeat_interval}秒，自动恢复: {auto_recovery}")
 
     def start(self):
         """启动监控"""
@@ -116,6 +125,10 @@ class ServiceMonitor:
                     "missed_count": self.heartbeat_missed
                 })
                 self._dump_thread_status()
+
+                # 自动恢复：优雅退出当前进程，由 watchdog 父进程重启
+                if self.auto_recovery:
+                    self._trigger_recovery()
 
     def _check_requests(self):
         """检查超时请求"""
@@ -267,8 +280,36 @@ class ServiceMonitor:
             "thread_count": threading.active_count(),
             "memory_mb": process.memory_info().rss / 1024 / 1024,
             "cpu_percent": process.cpu_percent(),
-            "heartbeat_missed": self.heartbeat_missed
+            "heartbeat_missed": self.heartbeat_missed,
+            "auto_recovery": self.auto_recovery,
+            "recovery_count": self.recovery_count,
+            "last_recovery_time": self.last_recovery_time.isoformat() if self.last_recovery_time else None,
         }
+
+    def _trigger_recovery(self):
+        """触发自动恢复：优雅退出当前进程，由 watchdog 重启"""
+        self.recovery_count += 1
+        self.last_recovery_time = datetime.now()
+
+        self._log_diagnostic("auto_recovery_triggered", {
+            "message": "检测到服务卡死，触发自动恢复",
+            "recovery_count": self.recovery_count,
+            "action": "进程将以 exit code 42 退出，watchdog 将自动重启",
+            "pid": os.getpid(),
+        })
+        logger.critical(
+            f"自动恢复触发 (第 {self.recovery_count} 次)：服务卡死，进程 {os.getpid()} 即将退出"
+        )
+
+        # 确保日志已刷盘
+        for handler in logging.root.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+
+        # 使用 exit code 42 通知 watchdog 这是自动恢复退出
+        os._exit(42)
 
 
 def timeout_guard(timeout_seconds: int = 30):
@@ -345,20 +386,30 @@ def get_monitor() -> ServiceMonitor:
         log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, "monitor.log")
-        _monitor_instance = ServiceMonitor(log_file=log_file)
+        _monitor_instance = ServiceMonitor(log_file=log_file, auto_recovery=False)
     return _monitor_instance
 
 
-def start_monitoring():
-    """启动监控"""
-    monitor = get_monitor()
-    monitor.start()
+def start_monitoring(auto_recovery: bool = False):
+    """启动监控
+    :param auto_recovery: 是否启用自动恢复（检测到卡死时自动退出，由 watchdog 重启）
+    """
+    global _monitor_instance
+
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "monitor.log")
+    _monitor_instance = ServiceMonitor(log_file=log_file, auto_recovery=auto_recovery)
+    _monitor_instance.start()
 
     # 安装异常钩子
-    exception_hook = ExceptionHook(monitor)
+    exception_hook = ExceptionHook(_monitor_instance)
     exception_hook.install()
 
-    return monitor
+    if auto_recovery:
+        logger.info("自动恢复已启用（watchdog 模式）")
+
+    return _monitor_instance
 
 
 def stop_monitoring():
@@ -366,3 +417,143 @@ def stop_monitoring():
     global _monitor_instance
     if _monitor_instance:
         _monitor_instance.stop()
+
+
+# ====================
+# Watchdog 进程管理器
+# ====================
+
+# 自动恢复退出码（子进程用此码退出表示需要重启）
+RECOVERY_EXIT_CODE = 42
+
+
+class ServiceWatchdog:
+    """
+    服务看门狗 — 以子进程方式运行服务，监控其存活状态并自动重启
+
+    使用方式：
+        python -m app.core.monitor --watchdog
+
+    工作原理：
+        1. 以 subprocess 启动 uvicorn 服务进程
+        2. 监控子进程退出码：
+           - exit code 42 → 服务自检卡死，自动重启（带退避）
+           - exit code 0  → 正常退出，不重启
+           - 其他 exit code → 异常退出，自动重启（带退避）
+        3. 通过 HTTP 心跳检测子进程是否真正可响应
+        4. 连续重启失败超过阈值后停止尝试
+    """
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 1234,
+                 max_restarts: int = 10, restart_cooldown: int = 5,
+                 health_check_url: str = None):
+        self.host = host
+        self.port = port
+        self.max_restarts = max_restarts
+        self.restart_cooldown = restart_cooldown  # 重启冷却时间（秒），每次翻倍
+        self.health_check_url = health_check_url or f"http://{host}:{port}/api/health"
+        self.process = None
+        self.restart_count = 0
+        self.start_time = None
+
+    def _build_cmd(self):
+        """构建启动命令"""
+        return [
+            sys.executable, "-m", "app.main",
+        ]
+
+    def _start_process(self):
+        """启动服务子进程"""
+        env = os.environ.copy()
+        env["HOST"] = self.host
+        env["PORT"] = str(self.port)
+        env["WATCHDOG_MODE"] = "1"  # 告知子进程在 watchdog 模式下运行
+
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.process = subprocess.Popen(
+            self._build_cmd(),
+            cwd=backend_dir,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        self.start_time = datetime.now()
+        logger.info(f"服务进程已启动 (PID: {self.process.pid})")
+
+    def _health_check(self, timeout: int = 3) -> bool:
+        """HTTP 健康检查"""
+        try:
+            import urllib.request
+            req = urllib.request.Request(self.health_check_url, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def _wait_for_healthy(self, max_wait: int = 30) -> bool:
+        """等待服务变为健康状态"""
+        start = time.time()
+        while time.time() - start < max_wait:
+            if self._health_check():
+                return True
+            time.sleep(1)
+        return False
+
+    def run(self):
+        """watchdog 主循环"""
+        logger.info(f"Watchdog 启动 — 目标服务 {self.host}:{self.port}")
+        logger.info(f"配置: 最大重启次数={self.max_restarts}, 冷却时间={self.restart_cooldown}s")
+
+        while self.restart_count <= self.max_restarts:
+            self._start_process()
+
+            # 等待服务启动完成
+            healthy = self._wait_for_healthy(max_wait=30)
+            if healthy:
+                logger.info(f"服务启动成功 (PID: {self.process.pid})")
+                if self.restart_count > 0:
+                    logger.info(f"这是第 {self.restart_count} 次自动恢复")
+            else:
+                logger.warning(f"服务启动后未通过健康检查 (PID: {self.process.pid})，继续监控")
+
+            # 等待子进程退出
+            exit_code = self.process.wait()
+            uptime = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
+
+            logger.warning(f"服务进程退出 (PID: {self.process.pid}, exit code: {exit_code}, 运行: {uptime:.0f}s)")
+
+            if exit_code == 0:
+                logger.info("服务正常退出，不重启")
+                return
+
+            # 异常退出或恢复退出 → 计划重启
+            self.restart_count += 1
+            if self.restart_count > self.max_restarts:
+                logger.critical(f"已达到最大重启次数 ({self.max_restarts})，停止重启")
+                return
+
+            # 指数退避：冷却时间随重启次数翻倍，上限 60 秒
+            cooldown = min(self.restart_cooldown * (2 ** (self.restart_count - 1)), 60)
+            reason = "服务卡死（自动恢复）" if exit_code == RECOVERY_EXIT_CODE else f"异常退出 (code {exit_code})"
+            logger.info(f"原因: {reason}，{cooldown}s 后重启 (第 {self.restart_count}/{self.max_restarts} 次)")
+            time.sleep(cooldown)
+
+        logger.critical("Watchdog 退出：超过最大重启次数")
+
+
+def run_watchdog():
+    """以 watchdog 模式启动服务"""
+    import subprocess
+
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "1234"))
+
+    watchdog = ServiceWatchdog(host=host, port=port)
+    try:
+        watchdog.run()
+    except KeyboardInterrupt:
+        logger.info("Watchdog 收到中断信号")
+        if watchdog.process and watchdog.process.poll() is None:
+            watchdog.process.terminate()
+            watchdog.process.wait(timeout=10)
+        logger.info("Watchdog 已停止")

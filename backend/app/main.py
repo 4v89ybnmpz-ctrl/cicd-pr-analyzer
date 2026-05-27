@@ -36,6 +36,11 @@ from app.core.docker_secrets import get_database_password
 # 导入 API 路由
 from app.api.routes import create_router
 
+# 导入导出和通知引擎
+from app.core.exporter import ReportExporter
+from app.core.notification import NotificationEngine
+from app.core.webhook import WebhookHandler
+
 # 设置日志
 logger = setup_logging()
 
@@ -98,6 +103,12 @@ db = DatabaseService(
 )
 logger.info(f"数据库配置: {db_host}:{db_port}/{db_database} (环境变量: {'是' if db_password_env else '否'})")
 
+# 初始化导出引擎和通知引擎（db 引用在 lifespan 中连接）
+exporter = ReportExporter(db)
+notification_engine = NotificationEngine(db)
+webhook_handler = WebhookHandler(db, github_service, gitcode_service)
+logger.info("导出引擎、通知引擎和 Webhook 处理器已创建")
+
 
 # ====================
 # Lifespan 异步生命周期管理
@@ -119,9 +130,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"数据库连接异常: {e}")
 
+    # 初始化通知引擎
+    try:
+        await notification_engine.initialize()
+        logger.info("通知引擎初始化成功")
+    except Exception as e:
+        logger.warning(f"通知引擎初始化失败: {e}")
+
+    # 加载 Webhook 配置
+    try:
+        await webhook_handler.load_config()
+        logger.info("Webhook 配置加载成功")
+    except Exception as e:
+        logger.warning(f"Webhook 配置加载失败: {e}")
+
     # 启动服务监控
-    start_monitoring()
-    logger.info("服务监控已启动")
+    watchdog_mode = os.environ.get("WATCHDOG_MODE") == "1"
+    config_auto_recovery = config.get("auto_recovery", False)
+    auto_recovery = watchdog_mode or config_auto_recovery
+    start_monitoring(auto_recovery=auto_recovery)
+    logger.info(f"服务监控已启动 (自动恢复: {auto_recovery}, watchdog 模式: {watchdog_mode})")
 
     yield  # 应用运行中
 
@@ -132,6 +160,12 @@ async def lifespan(app: FastAPI):
     # 关闭 GitHub 服务 HTTP 客户端
     try:
         await github_service.close()
+    except Exception:
+        pass
+
+    # 关闭通知引擎
+    try:
+        await notification_engine.shutdown()
     except Exception:
         pass
 
@@ -176,7 +210,9 @@ app.add_middleware(
 logger.info(f"CORS 配置: allow_origins={allow_origins}")
 
 # 注册路由
-router = create_router(cache, github_service, db, config_manager, gitcode_service)
+router = create_router(cache, github_service, db, config_manager, gitcode_service,
+                        notification_engine=notification_engine, exporter=exporter,
+                        webhook_handler=webhook_handler)
 app.include_router(router)
 
 # 注册安全中间件
