@@ -3,6 +3,7 @@ GitHub PR 服务模块（异步版本）
 使用 httpx 替代 requests，asyncio.gather 替代 ThreadPoolExecutor
 """
 import asyncio
+import re
 import time
 from typing import Dict, Any, List, Optional
 import logging
