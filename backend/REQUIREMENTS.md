@@ -99,7 +99,7 @@
 - [x] 内存监控 - 记录内存使用情况，检测内存泄漏
 - [x] 异常捕获增强 - 捕获未处理异常并记录详细信息
 - [x] 服务卡死诊断日志 - 记录卡死时的线程状态、请求队列、资源占用
-- [ ] 自动恢复机制 - 检测到卡死时自动重启服务
+- [x] 自动恢复机制 - 检测到卡死时自动重启服务（watchdog 进程 + exit code 42 + 指数退避）
 
 ## 16. 配置与日志整理
 - [x] 合并配置文件 - 将 db_config.json 合并到 config.json
@@ -546,28 +546,28 @@
 > 增强平台集成能力，支持实时数据更新、通知推送和数据导出。
 
 ### 30.1 Webhook 接收
-- [ ] GitHub Webhook 接收 — 监听 push/pull_request/pull_request_review 事件
-- [ ] GitCode Webhook 接收 — 监听 merge_request 事件
-- [ ] Webhook 签名验证 — 验证 payload 签名防止伪造
-- [ ] 实时增量更新 — Webhook 事件触发后自动增量拉取关联数据
-- [ ] Webhook 管理 API — `POST /webhooks/configure`, `GET /webhooks/events`
+- [x] GitHub Webhook 接收 — 监听 push/pull_request/pull_request_review 事件
+- [x] GitCode Webhook 接收 — 监听 merge_request 事件
+- [x] Webhook 签名验证 — 验证 payload 签名防止伪造
+- [x] 实时增量更新 — Webhook 事件触发后自动增量拉取关联数据
+- [x] Webhook 管理 API — `POST /webhooks/configure`, `GET /webhooks/events`
 
 ### 30.2 通知推送
-- [ ] 邮件通知 — 分析报告完成后发送邮件摘要
-- [ ] 飞书/钉钉/Slack 通知 — 推送报告链接和关键指标到 IM
-- [ ] 通知规则配置 — 按项目/指标/阈值配置通知触发条件
-- [ ] 通知管理 API — `POST /notifications/config`, `GET /notifications/history`
+- [x] 邮件通知 — 分析报告完成后发送邮件摘要
+- [x] 飞书/钉钉/Slack 通知 — 推送报告链接和关键指标到 IM
+- [x] 通知规则配置 — 按项目/指标/阈值配置通知触发条件
+- [x] 通知管理 API — `POST /notifications/config`, `GET /notifications/history`
 
 ### 30.3 数据导出
-- [ ] 报告导出 PDF — 将 CI/CD 洞察报告导出为 PDF
-- [ ] 报告导出 Excel — 将统计数据导出为 Excel（多 Sheet）
-- [ ] 数据批量导出 CSV — 支持各数据集合的 CSV 导出
-- [ ] 导出 API — `GET /export/report/{owner}/{repo}?format=pdf|excel|csv`
+- [x] 报告导出 PDF — 将 CI/CD 洞察报告导出为 PDF
+- [x] 报告导出 Excel — 将统计数据导出为 Excel（多 Sheet）
+- [x] 数据批量导出 CSV — 支持各数据集合的 CSV 导出
+- [x] 导出 API — `GET /export/report/{owner}/{repo}?format=pdf|excel|csv`
 
 ### 30.4 多仓库对比
-- [ ] 同组织多项目横向对比 — 按健康度/CI 成功率/Review 覆盖率等维度对比
-- [ ] 跨项目贡献者重叠分析 — 识别在多个项目间活跃的贡献者
-- [ ] 对比看板 API — `POST /analysis/compare`, `GET /analysis/compare/{compare_id}`
+- [x] 同组织多项目横向对比 — 按健康度/CI 成功率/Review 覆盖率等维度对比
+- [x] 跨项目贡献者重叠分析 — 识别在多个项目间活跃的贡献者
+- [x] 对比看板 API — `POST /analysis/compare`, `GET /analysis/compare/{compare_id}`
 
 ---
 

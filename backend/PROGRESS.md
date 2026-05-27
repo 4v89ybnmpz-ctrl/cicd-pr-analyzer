@@ -182,7 +182,7 @@ app/
   └── requirements.txt   # 依赖
   ```
 
-### 16. 服务稳定性监控 ✅ (2026-04-10 新增)
+### 16. 服务稳定性监控 ✅ (2026-04-10 新增, 2026-05-27 更新)
 - [monitor.py](app/core/monitor.py) - 服务监控模块:
   - `ServiceMonitor` - 服务监控器类
   - `track_request()` - 请求追踪
@@ -191,10 +191,13 @@ app/
   - `_check_memory()` - 内存监控
   - `_check_threads()` - 线程状态检测
   - `_dump_thread_status()` - 导出线程堆栈
+  - `_trigger_recovery()` - 自动恢复触发（exit code 42 退出，由 watchdog 重启）
   - `ExceptionHook` - 全局异常钩子
+  - `ServiceWatchdog` - 看门狗进程管理器（子进程启动 + HTTP 健康检查 + 指数退避重启）
 - [main.py](app/main.py) - 集成监控:
   - 监控中间件 - 请求追踪中间件
-  - `GET /monitor/status` - 监控状态接口
+  - `GET /monitor/status` - 监控状态接口（含 auto_recovery/recovery_count）
+  - 支持 `--watchdog` 命令行参数启动看门狗模式
 - 监控日志输出到 `logs/monitor.log`
 - 功能:
   - 心跳检测（10秒间隔）
@@ -203,6 +206,7 @@ app/
   - 线程数异常检测
   - 未捕获异常记录
   - 卡死时导出线程堆栈
+  - **自动恢复** — 检测到卡死时以 exit code 42 退出，watchdog 自动重启（指数退避，最大 10 次）
 
 ### 16. 配置与日志整理 ✅ (2026-04-10 新增)
 - **合并配置文件**
@@ -618,7 +622,7 @@ app/
 
 ## 最后更新时间
 
-2026-05-20 (异步改造 + 安全加固完成)
+2026-05-27 (自动恢复机制完成)
 
 > 将全量同步 I/O 改造为原生异步，充分利用 FastAPI 异步特性
 
@@ -767,3 +771,109 @@ app/
 - 14 项测试（100% 通过）:
   - API 集成: 11 项（报告端点/日期范围/top_n/覆盖率/延迟/深度/状态分布/洞察/趋势/粒度/503）
   - 评级函数: 3 项（覆盖率/延迟/深度 A-F 评级）
+
+---
+
+## 30.2 通知推送 (2026-05-26)
+
+- [x] 邮件通知 — aiosmtplib 异步 SMTP 发送
+- [x] 飞书/钉钉/Slack 通知 — httpx 异步 Webhook 调用
+- [x] 通知规则配置 — 按项目/指标/阈值/操作符配置触发条件
+- [x] 通知管理 API — CRUD + 测试发送 + 历史查询
+
+### 30.2.1 核心引擎 [notification.py](app/core/notification.py)
+- `NotificationEngine` — 通知引擎（全局单例）
+- `_send_email()` — aiosmtplib 异步邮件发送
+- `_send_feishu()` — 飞书 Bot Webhook（Interactive Card）
+- `_send_dingtalk()` — 钉钉 Bot Webhook（Markdown + HMAC 签名）
+- `_send_slack()` — Slack Incoming Webhook（Block Kit）
+- `evaluate_and_notify()` — 规则匹配 + 多渠道发送 + 历史记录
+- `_evaluate_rules()` — 项目/指标/阈值规则匹配引擎
+
+### 30.2.2 数据库服务 [database_service.py](app/services/database_service.py)
+- `save/update/delete/list/get_notification_config()` — 配置 CRUD
+- `save/list_notification_history()` — 历史记录管理
+
+### 30.2.3 API 路由 [notifications.py](app/api/routers/notifications.py)
+- `POST /notifications/config` — 创建通知配置
+- `PUT /notifications/config/{config_id}` — 更新通知配置
+- `DELETE /notifications/config/{config_id}` — 删除通知配置
+- `GET /notifications/config` — 获取所有通知配置
+- `POST /notifications/config/{config_id}/test` — 测试发送
+- `GET /notifications/history` — 查询通知历史（分页）
+
+### 30.2.4 前端页面
+- `NotificationConfig.jsx` — 通知规则配置页（表单 + 动态规则列表）
+- `NotificationHistory.jsx` — 通知历史记录页（分页列表 + 筛选）
+
+---
+
+## 30.3 数据导出 (2026-05-26)
+
+- [x] 报告导出 PDF — reportlab 生成结构化 PDF（支持中文）
+- [x] 报告导出 Excel — openpyxl 多 Sheet 导出（自动列宽）
+- [x] 数据批量导出 CSV — csv 模块（utf-8-sig 编码）
+- [x] 导出 API — FileResponse 流式下载
+
+### 30.3.1 核心引擎 [exporter.py](app/core/exporter.py)
+- `ReportExporter` — 导出引擎
+- `export_csv()` — CSV 导出（嵌套文档展平）
+- `export_excel()` — Excel 多 Sheet 导出（自动列宽调整）
+- `export_pdf()` — PDF 报告生成（健康度/Review/预警/通用模板）
+- `_cleanup_old_exports()` — 自动清理 24 小时前的导出文件
+
+### 30.3.2 API 路由 [export.py](app/api/routers/export.py)
+- `GET /export/report/{owner}/{repo}?format=pdf|excel` — 报告导出
+- `GET /export/data/{owner}/{repo}?collection=...&format=excel|csv` — 原始数据导出
+
+### 30.3.3 前端页面
+- `DataExport.jsx` — 数据导出页（报告导出 + 原始数据导出）
+---
+
+## 30.1 Webhook 接收 (2026-05-26)
+
+- [x] GitHub Webhook 接收 — 监听 push/pull_request/pull_request_review/issues 事件
+- [x] GitCode Webhook 接收 — 监听 merge_request 事件
+- [x] Webhook 签名验证 — HMAC-SHA256（GitHub）/ Token 对比（GitCode）
+- [x] 实时增量更新 — 事件触发后自动增量拉取 PR 详情/评论/Reviews
+- [x] Webhook 管理 API — 配置 CRUD + 事件日志查询
+
+### 30.1.1 核心引擎 [webhook.py](app/core/webhook.py)
+- `WebhookHandler` — Webhook 处理器（签名验证 + 事件分发 + 增量更新）
+- `verify_github_signature()` — HMAC-SHA256 签名验证
+- `verify_gitcode_signature()` — X-Gitlab-Token 验证
+- `handle_github_event()` — GitHub 事件分发（PR/Review/Push/Issues）
+- `handle_gitcode_event()` — GitCode MR 事件处理
+- `_on_pr_event()` — 增量更新 PR 详情 + 评论 + Reviews
+- `_on_review_event()` — 增量更新 Reviews
+- `_on_issue_event()` — 增量更新 Issues
+
+### 30.1.2 API 路由 [webhooks.py](app/api/routers/webhooks.py)
+- `POST /webhooks/github` — GitHub Webhook 接收
+- `POST /webhooks/gitcode` — GitCode Webhook 接收
+- `GET /webhooks/events` — 事件日志查询（分页）
+- `GET /webhooks/config` — 获取配置
+- `PUT /webhooks/config` — 更新配置
+
+### 30.1.3 前端页面
+- `WebhookManager.jsx` — Webhook 配置 + 事件日志页
+
+---
+
+## 30.4 多仓库对比 (2026-05-26)
+
+- [x] 同组织多项目横向对比 — 按健康度/CI成功率/Review覆盖率等维度对比
+- [x] 跨项目贡献者重叠分析 — 识别跨项目贡献者
+- [x] 对比看板 API — 同步返回对比结果
+
+### 30.4.1 数据库服务 [database_service.py](app/services/database_service.py)
+- `compare_projects()` — 多项目横向对比（并发获取健康度 + 维度排名 + 雷达图数据）
+- `_build_comparison()` — 对比数据构建（维度排名 + 雷达图）
+- `get_contributors_overlap()` — 跨项目贡献者重叠分析
+
+### 30.4.2 API 路由 [compare.py](app/api/routers/compare.py)
+- `POST /analysis/compare` — 多项目横向对比
+- `GET /analysis/compare/contributors-overlap` — 贡献者重叠分析
+
+### 30.4.3 前端页面
+- `ProjectCompare.jsx` — 多仓库对比看板（雷达图 + 排名表 + 贡献者重叠）
