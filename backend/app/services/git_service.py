@@ -21,9 +21,20 @@ def _repo_path(owner: str, repo: str) -> str:
 class GitRepoService:
     """Git 仓库克隆和日志提取服务"""
 
-    def __init__(self, github_token: str = None):
+    def __init__(self, github_token: str = None, proxy: str = None):
         self.github_token = github_token
+        self.proxy = proxy
         os.makedirs(REPOS_DIR, exist_ok=True)
+        # 构建带代理的环境变量（clone/fetch 需要网络）
+        self._net_env = None
+        if proxy:
+            import copy
+            self._net_env = copy.copy(os.environ)
+            self._net_env["http_proxy"] = proxy
+            self._net_env["https_proxy"] = proxy
+            self._net_env["HTTP_PROXY"] = proxy
+            self._net_env["HTTPS_PROXY"] = proxy
+            logger.info(f"GitRepoService 代理已配置: {proxy}")
         logger.info(f"GitRepoService 初始化, repos 目录: {REPOS_DIR}")
 
     def _clone_url(self, owner: str, repo: str) -> str:
@@ -45,6 +56,7 @@ class GitRepoService:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._net_env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -67,6 +79,7 @@ class GitRepoService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=dest,
+            env=self._net_env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -75,10 +88,11 @@ class GitRepoService:
 
         return {"status": "updated"}
 
-    async def extract_git_log(self, owner: str, repo: str, max_count: int = 0) -> Dict[str, Any]:
+    async def extract_git_log(self, owner: str, repo: str, max_count: int = 0,
+                              branch: str = None) -> Dict[str, Any]:
         """
         从 bare 仓库提取 git log 数据
-        包含基础提交信息 + 每次提交的文件变更详情
+        branch: 指定分支名（如 origin/main），"all" 表示所有分支，None 表示默认分支
         """
         dest = _repo_path(owner, repo)
         if not os.path.exists(dest):
@@ -108,6 +122,13 @@ class GitRepoService:
         if max_count > 0:
             cmd.append(f"--max-count={max_count}")
 
+        # 分支参数：指定分支、--all 或默认
+        extract_branches = []
+        if branch == "all" or branch == "--all":
+            cmd.append("--all")
+        elif branch:
+            cmd.append(branch)
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -123,15 +144,7 @@ class GitRepoService:
         raw = stdout.decode("utf-8", errors="replace")
         commits = self._parse_git_log(raw)
 
-        stats_cmd = ["git", "log", "--all", "--format=%H", "--shortstat"]
-        stats_proc = await asyncio.create_subprocess_exec(
-            *stats_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=dest,
-        )
-        stats_out, _ = await stats_proc.communicate()
-
+        # 获取所有远程分支列表
         branch_proc = await asyncio.create_subprocess_exec(
             "git", "branch", "-r", "--format=%(refname:short)",
             stdout=asyncio.subprocess.PIPE,
@@ -139,7 +152,19 @@ class GitRepoService:
             cwd=dest,
         )
         branch_out, _ = await branch_proc.communicate()
-        branches = [b.strip() for b in branch_out.decode("utf-8", errors="replace").splitlines() if b.strip()]
+        all_branches = [b.strip() for b in branch_out.decode("utf-8", errors="replace").splitlines() if b.strip()]
+
+        # 为 commits 标注分支来源
+        if branch and branch not in ("all", "--all"):
+            # 指定单个分支
+            short_name = branch.replace("origin/", "") if branch.startswith("origin/") else branch
+            for c in commits:
+                c["branches"] = [short_name]
+            extract_branches = [short_name]
+        else:
+            # --all 或默认：用 git branch --contains 标注每个 commit
+            extract_branches = all_branches
+            await self._annotate_commit_branches(commits, all_branches, dest)
 
         tag_proc = await asyncio.create_subprocess_exec(
             "git", "tag",
@@ -160,18 +185,44 @@ class GitRepoService:
                 contributors[name]["additions"] += f.get("additions", 0) or 0
                 contributors[name]["deletions"] += f.get("deletions", 0) or 0
 
-        logger.info(f"git log 提取完成: {owner}/{repo}, {len(commits)} commits, {len(branches)} branches, {len(tags)} tags")
+        logger.info(f"git log 提取完成: {owner}/{repo}, {len(commits)} commits, {len(all_branches)} branches, {len(tags)} tags, branch={branch}")
 
         return {
             "owner": owner,
             "repo": repo,
             "total_commits": len(commits),
             "commits": commits,
-            "branches": branches,
+            "branches": all_branches,
             "tags": tags,
+            "extract_branch": branch or "default",
             "contributors": [{"name": k, **v} for k, v in sorted(contributors.items(), key=lambda x: x[1]["commits"], reverse=True)],
             "extracted_at": datetime.now().isoformat(),
         }
+
+    async def _annotate_commit_branches(self, commits: list, branches: list, cwd: str):
+        """为每个 commit 标注它属于哪些分支"""
+        # 批量查询：对每个分支执行 git log --format=%H 获取该分支的 commit 集合
+        commit_branches = {}  # hash -> set of branch names
+        for br in branches:
+            short_name = br.replace("origin/", "") if br.startswith("origin/") else br
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "log", br, "--format=%H",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+                out, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    for line in out.decode("utf-8", errors="replace").splitlines():
+                        h = line.strip()
+                        if h:
+                            commit_branches.setdefault(h, set()).add(short_name)
+            except Exception:
+                pass
+
+        for c in commits:
+            c["branches"] = list(commit_branches.get(c.get("hash", ""), []))
 
     @staticmethod
     def _extract_tz(iso_str: str) -> str:

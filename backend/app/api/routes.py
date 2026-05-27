@@ -16,6 +16,10 @@ from app.api.routers import (
     register_browser_routes,
     register_atomgit_routes,
     register_analysis_routes,
+    register_export_routes,
+    register_notification_routes,
+    register_webhook_routes,
+    register_compare_routes,
 )
 from app.api.routers.async_tasks import register_async_task_routes
 from app.api.routers.git import register_git_routes
@@ -23,15 +27,10 @@ from app.api.routers.git import register_git_routes
 logger = logging.getLogger(__name__)
 
 
-def create_router(cache, github_service, db, config_manager, gitcode_service=None):
+def create_router(cache, github_service, db, config_manager, gitcode_service=None,
+                  notification_engine=None, exporter=None, webhook_handler=None):
     """
     创建 API 路由
-    :param cache: 缓存实例
-    :param github_service: GitHub 服务实例
-    :param db: 数据库实例
-    :param config_manager: 配置管理器实例
-    :param gitcode_service: GitCode 服务实例（可选）
-    :return: APIRouter 实例
     """
     router = APIRouter()
 
@@ -40,7 +39,7 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
     register_config_routes(router, cache, github_service, config_manager)
     register_cache_routes(router, cache)
     register_github_routes(router, cache, github_service, db)
-    register_database_routes(router, db)
+    register_database_routes(router, db, github_service)
     register_task_routes(router, cache, github_service, db)
     register_browser_routes(router)
     register_atomgit_routes(router, db)
@@ -48,10 +47,25 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
 
     register_async_task_routes(router, github_service, db)
 
-    register_git_routes(router, db, github_service)
+    register_git_routes(router, db, github_service, config=config_manager.config if hasattr(config_manager, 'config') else None)
 
     if gitcode_service:
         register_gitcode_routes(router, gitcode_service, db)
+
+    # 数据导出路由
+    if exporter:
+        register_export_routes(router, db, exporter)
+
+    # 通知推送路由
+    if notification_engine:
+        register_notification_routes(router, db, notification_engine)
+
+    # Webhook 路由
+    if webhook_handler:
+        register_webhook_routes(router, db, webhook_handler)
+
+    # 多仓库对比路由
+    register_compare_routes(router, db)
 
     logger.info("所有路由注册完成")
     return router

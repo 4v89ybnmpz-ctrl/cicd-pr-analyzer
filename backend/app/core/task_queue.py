@@ -171,9 +171,15 @@ class TaskQueue:
             async with self._concurrency_sem:
                 result = await coro_func(task)
             task.result = result
-            task.status = "completed"
-            task.progress = task.total
-            task.log("INFO", f"任务完成, 结果: {json.dumps(result, ensure_ascii=False)[:200]}")
+            # 检查返回值是否包含错误信息，统一标记为失败
+            if isinstance(result, dict) and result.get("error"):
+                task.error = result["error"]
+                task.status = "failed"
+                task.log("ERROR", f"任务失败: {result['error']}")
+            else:
+                task.status = "completed"
+                task.progress = task.total
+                task.log("INFO", f"任务完成, 结果: {json.dumps(result, ensure_ascii=False)[:200]}")
         except Exception as e:
             task.error = str(e)
             task.status = "failed"
