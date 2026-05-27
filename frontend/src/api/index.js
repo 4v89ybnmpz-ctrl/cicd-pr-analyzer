@@ -263,6 +263,12 @@ export const refreshAllProjectStats = () =>
 export const getProxyConfig = () => api.get('/config/proxy')
 export const updateProxyConfig = (proxy) => api.put('/config/proxy', null, { params: { proxy } })
 export const getAppConfig = () => api.get('/config')
+export const getGithubTokens = () => api.get('/config/tokens/github')
+export const updateGithubTokens = (payload) => api.put('/config/tokens/github', payload)
+export const checkGithubTokens = () => api.get('/config/tokens/github/check')
+export const getAtomgitTokens = () => api.get('/config/tokens/atomgit')
+export const updateAtomgitTokens = (payload) => api.put('/config/tokens/atomgit', payload)
+export const checkAtomgitTokens = () => api.get('/config/tokens/atomgit/check')
 
 // ====================
 // GitCode 平台 (gitcode.net)
@@ -279,5 +285,41 @@ export const getGitCodeBatchComments = (owner, repo, params) =>
   api.get(`/gitcode/mrs/${owner}/${repo}/comments`, { params })
 export const getGitCodeBatchDetails = (owner, repo, params) =>
   api.get(`/gitcode/mrs/${owner}/${repo}/details`, { params })
+
+// ====================
+// AtomGit 平台 (atomgit.com)
+// ====================
+export const getAtomGitPulls = (owner, repo, params) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}`, { params })
+export const getAtomGitPullDetail = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/detail`)
+export const getAtomGitPullComments = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/comments`)
+export const getAtomGitPullReviews = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/reviews`)
+export const getAtomGitPullCommits = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/commits`)
+export const getAtomGitPullFiles = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/files`)
+export const getAtomGitPullTimeline = (owner, repo, pullNumber) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/${pullNumber}/timeline`)
+export const getAtomGitBatchComments = (owner, repo, params) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/comments`, { params })
+export const getAtomGitAllComments = (owner, repo, params) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/comments/all`, { params })
+export const getAtomGitBatchDetails = (owner, repo, prNumbers) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/details`, { params: { pr_numbers: prNumbers } })
+export const getAtomGitBatchReviews = (owner, repo, prNumbers) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/reviews`, { params: { pr_numbers: prNumbers } })
+export const getAtomGitBatchCommits = (owner, repo, prNumbers) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/commits`, { params: { pr_numbers: prNumbers } })
+export const getAtomGitBatchFiles = (owner, repo, prNumbers) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/files`, { params: { pr_numbers: prNumbers } })
+export const getAtomGitBatchTimelines = (owner, repo, prNumbers) =>
+  api.get(`/atomgit/pulls/${owner}/${repo}/timelines`, { params: { pr_numbers: prNumbers } })
+export const getAtomGitIssues = (owner, repo, params) =>
+  api.get(`/atomgit/issues/${owner}/${repo}`, { params })
+export const getAtomGitIssueDetail = (owner, repo, issueNumber) =>
+  api.get(`/atomgit/issues/${owner}/${repo}/${issueNumber}`)
 
 export default api
