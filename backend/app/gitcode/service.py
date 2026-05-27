@@ -2,15 +2,21 @@
 AtomGit API 服务（异步版本）
 通过 AtomGit API v5 获取 PR 和评论数据，使用 httpx 异步客户端
 
-API 文档:
-  GET /repos/:owner/:repo/pulls              → PR 列表
-  GET /repos/:owner/:repo/pulls/:number      → PR 详情
-  GET /repos/:owner/:repo/pulls/:number/comments → PR 评论
+API 文档 (AtomGit/Gitee 风格 API v5):
+  GET /repos/:owner/:repo/pulls                     → PR 列表
+  GET /repos/:owner/:repo/pulls/:number             → PR 详情
+  GET /repos/:owner/:repo/pulls/:number/comments    → PR 评论 (review comments)
+  GET /repos/:owner/:repo/pulls/:number/commits     → PR 提交记录
+  GET /repos/:owner/:repo/pulls/:number/files       → PR 变更文件
+  GET /repos/:owner/:repo/pulls/:number/reviews     → PR Reviews
+  GET /repos/:owner/:repo/issues/:number/timeline   → Issue/PR 时间线
+  GET /repos/:owner/:repo/issues                    → Issue 列表
+  GET /repos/:owner/:repo/issues/:number            → Issue 详情
 """
 import re
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from functools import wraps
 
 import httpx
@@ -152,6 +158,17 @@ class AtomGitService:
             r = await self._request(url, params)
             pulls = r.json()
 
+            # 从响应头获取总数（AtomGit/Gitee 风格）
+            total_count = None
+            for header_key in ["X-Total", "X-Total-Count", "total_count"]:
+                val = r.headers.get(header_key)
+                if val:
+                    try:
+                        total_count = int(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
             # 格式化 PR 数据
             formatted = [self._format_pull(p) for p in pulls]
 
@@ -159,7 +176,7 @@ class AtomGitService:
                 "owner": owner,
                 "repo": repo,
                 "pulls": formatted,
-                "total": len(formatted),
+                "total": total_count if total_count is not None else len(formatted),
                 "page": page,
                 "error": None,
             }
@@ -405,6 +422,395 @@ class AtomGitService:
             "error": None,
         }
 
+    async def fetch_pull_detail(self, owner: str, repo: str, pull_number: int) -> Dict[str, Any]:
+        """
+        获取单个 PR 的详细信息
+        AtomGit API: GET /repos/:owner/:repo/pulls/:number
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}"
+        params = self._get_params()
+
+        logger.info(f"获取 PR 详情: {owner}/{repo} #{pull_number}")
+
+        try:
+            r = await self._request(url, params)
+            pr = r.json()
+            return {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "detail": self._format_pull_detail(pr),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 PR 详情失败: {e}")
+            return {"owner": owner, "repo": repo, "pull_number": pull_number,
+                    "detail": {}, "error": str(e)}
+
+    async def fetch_pull_reviews(self, owner: str, repo: str, pull_number: int) -> Dict[str, Any]:
+        """
+        获取 PR 的 Reviews
+        AtomGit API: GET /repos/:owner/:repo/pulls/:number/reviews
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
+        all_reviews = []
+        page = 1
+
+        logger.info(f"获取 PR Reviews: {owner}/{repo} #{pull_number}")
+
+        try:
+            while True:
+                params = self._get_params(page=page, per_page=self.per_page)
+                r = await self._request(url, params)
+                reviews = r.json()
+
+                if not reviews:
+                    break
+
+                for review in reviews:
+                    all_reviews.append(self._format_review(review))
+
+                if len(reviews) < self.per_page:
+                    break
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            return {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "reviews": all_reviews,
+                "total": len(all_reviews),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 PR Reviews 失败: {e}")
+            return {"owner": owner, "repo": repo, "pull_number": pull_number,
+                    "reviews": [], "total": 0, "error": str(e)}
+
+    async def fetch_pull_commits(self, owner: str, repo: str, pull_number: int) -> Dict[str, Any]:
+        """
+        获取 PR 的 Commits
+        AtomGit API: GET /repos/:owner/:repo/pulls/:number/commits
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/commits"
+        all_commits = []
+        page = 1
+
+        logger.info(f"获取 PR Commits: {owner}/{repo} #{pull_number}")
+
+        try:
+            while True:
+                params = self._get_params(page=page, per_page=self.per_page)
+                r = await self._request(url, params)
+                commits = r.json()
+
+                if not commits:
+                    break
+
+                for commit in commits:
+                    all_commits.append(self._format_commit(commit))
+
+                if len(commits) < self.per_page:
+                    break
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            return {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "commits": all_commits,
+                "total": len(all_commits),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 PR Commits 失败: {e}")
+            return {"owner": owner, "repo": repo, "pull_number": pull_number,
+                    "commits": [], "total": 0, "error": str(e)}
+
+    async def fetch_pull_files(self, owner: str, repo: str, pull_number: int) -> Dict[str, Any]:
+        """
+        获取 PR 的变更文件列表
+        AtomGit API: GET /repos/:owner/:repo/pulls/:number/files
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/files"
+        all_files = []
+        page = 1
+
+        logger.info(f"获取 PR 变更文件: {owner}/{repo} #{pull_number}")
+
+        try:
+            while True:
+                params = self._get_params(page=page, per_page=self.per_page)
+                r = await self._request(url, params)
+                files = r.json()
+
+                if not files:
+                    break
+
+                for f in files:
+                    all_files.append(self._format_file(f))
+
+                if len(files) < self.per_page:
+                    break
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            return {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "files": all_files,
+                "total": len(all_files),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 PR 变更文件失败: {e}")
+            return {"owner": owner, "repo": repo, "pull_number": pull_number,
+                    "files": [], "total": 0, "error": str(e)}
+
+    async def fetch_pull_timeline(self, owner: str, repo: str, pull_number: int) -> Dict[str, Any]:
+        """
+        获取 PR 的时间线事件
+        AtomGit API: GET /repos/:owner/:repo/issues/:number/timeline
+        注意: 时间线通过 Issues API 访问，PR 也是一种 Issue
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/issues/{pull_number}/timeline"
+        all_events = []
+        page = 1
+
+        logger.info(f"获取 PR 时间线: {owner}/{repo} #{pull_number}")
+
+        try:
+            while True:
+                params = self._get_params(page=page, per_page=self.per_page)
+                r = await self._request(url, params)
+                events = r.json()
+
+                if not events:
+                    break
+
+                for event in events:
+                    all_events.append(self._format_timeline_event(event))
+
+                if len(events) < self.per_page:
+                    break
+
+                page += 1
+                await asyncio.sleep(self.request_delay)
+
+            return {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "events": all_events,
+                "total": len(all_events),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 PR 时间线失败: {e}")
+            return {"owner": owner, "repo": repo, "pull_number": pull_number,
+                    "events": [], "total": 0, "error": str(e)}
+
+    async def fetch_issues(self, owner: str, repo: str,
+                           state: str = "all", page: int = 1,
+                           per_page: int = None,
+                           max_count: int = 0) -> Dict[str, Any]:
+        """
+        获取仓库的 Issue 列表（不含 PR）
+        AtomGit API: GET /repos/:owner/:repo/issues
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/issues"
+        all_issues = []
+        current_page = page
+
+        logger.info(f"获取 Issue 列表: {owner}/{repo}, state={state}")
+
+        try:
+            while True:
+                params = self._get_params(
+                    state=state, page=current_page,
+                    per_page=per_page or self.per_page,
+                )
+                r = await self._request(url, params)
+                issues = r.json()
+
+                if not issues:
+                    break
+
+                for issue in issues:
+                    # 跳过 PR（AtomGit 中 PR 也会出现在 issues 列表）
+                    if "pull_request" in issue:
+                        continue
+                    all_issues.append(self._format_issue(issue))
+
+                if max_count > 0 and len(all_issues) >= max_count:
+                    all_issues = all_issues[:max_count]
+                    break
+
+                if len(issues) < (per_page or self.per_page):
+                    break
+
+                current_page += 1
+                await asyncio.sleep(self.request_delay)
+
+            return {
+                "owner": owner,
+                "repo": repo,
+                "issues": all_issues,
+                "total": len(all_issues),
+                "page": page,
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 Issue 列表失败: {e}")
+            return {"owner": owner, "repo": repo, "issues": [], "total": 0, "error": str(e)}
+
+    async def fetch_issue_detail(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+        """
+        获取单个 Issue 的详细信息
+        AtomGit API: GET /repos/:owner/:repo/issues/:number
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}"
+        params = self._get_params()
+
+        logger.info(f"获取 Issue 详情: {owner}/{repo} #{issue_number}")
+
+        try:
+            r = await self._request(url, params)
+            issue = r.json()
+            return {
+                "owner": owner,
+                "repo": repo,
+                "issue_number": issue_number,
+                "detail": self._format_issue(issue),
+                "error": None,
+            }
+        except Exception as e:
+            logger.error(f"获取 Issue 详情失败: {e}")
+            return {"owner": owner, "repo": repo, "issue_number": issue_number,
+                    "detail": {}, "error": str(e)}
+
+    # ========================
+    # 批量并发获取方法
+    # ========================
+
+    async def fetch_all_pull_details(self, owner: str, repo: str,
+                                     pr_numbers: List[int],
+                                     max_workers: int = 3) -> Dict[str, Any]:
+        """并发获取多个 PR 的详细信息"""
+        logger.info(f"并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 详情")
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                result = await self.fetch_pull_detail(owner, repo, pr_num)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        return self._collect_batch_results(pr_numbers, results, "detail")
+
+    async def fetch_all_pull_reviews(self, owner: str, repo: str,
+                                     pr_numbers: List[int],
+                                     max_workers: int = 3) -> Dict[str, Any]:
+        """并发获取多个 PR 的 Reviews"""
+        logger.info(f"并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR Reviews")
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                result = await self.fetch_pull_reviews(owner, repo, pr_num)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        return self._collect_batch_results(pr_numbers, results, "reviews")
+
+    async def fetch_all_pull_commits(self, owner: str, repo: str,
+                                     pr_numbers: List[int],
+                                     max_workers: int = 3) -> Dict[str, Any]:
+        """并发获取多个 PR 的 Commits"""
+        logger.info(f"并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR Commits")
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                result = await self.fetch_pull_commits(owner, repo, pr_num)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        return self._collect_batch_results(pr_numbers, results, "commits")
+
+    async def fetch_all_pull_files(self, owner: str, repo: str,
+                                   pr_numbers: List[int],
+                                   max_workers: int = 3) -> Dict[str, Any]:
+        """并发获取多个 PR 的变更文件"""
+        logger.info(f"并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 变更文件")
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                result = await self.fetch_pull_files(owner, repo, pr_num)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        return self._collect_batch_results(pr_numbers, results, "files")
+
+    async def fetch_all_pull_timelines(self, owner: str, repo: str,
+                                       pr_numbers: List[int],
+                                       max_workers: int = 3) -> Dict[str, Any]:
+        """并发获取多个 PR 的时间线"""
+        logger.info(f"并发获取 {owner}/{repo} {len(pr_numbers)} 个 PR 时间线")
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def _fetch(pr_num):
+            async with semaphore:
+                result = await self.fetch_pull_timeline(owner, repo, pr_num)
+                await asyncio.sleep(self.request_delay)
+                return result
+
+        results = await asyncio.gather(*[_fetch(n) for n in pr_numbers], return_exceptions=True)
+        return self._collect_batch_results(pr_numbers, results, "events")
+
+    def _collect_batch_results(self, pr_numbers: List[int], results: List,
+                               data_key: str) -> Dict[str, Any]:
+        """汇总批量并发获取结果"""
+        success_count = 0
+        failed_count = 0
+        final_results = []
+
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                failed_count += 1
+                final_results.append({
+                    "owner": "", "repo": "", "pull_number": pr_numbers[i],
+                    data_key: [], "total": 0, "error": str(r),
+                })
+            else:
+                final_results.append(r)
+                if r.get("error") is None:
+                    success_count += 1
+                else:
+                    failed_count += 1
+
+        return {
+            "results": final_results,
+            "total_prs": len(pr_numbers),
+            "success_count": success_count,
+            "failed_count": failed_count,
+        }
+
+    # ========================
+    # 数据格式化方法
+    # ========================
+
     def _format_pull(self, pull: Dict) -> Dict[str, Any]:
         """格式化 PR 数据"""
         user = pull.get("user", {})
@@ -451,6 +857,158 @@ class AtomGitService:
                 formatted["pipeline_info"] = pipeline_info
 
         return formatted
+
+    def _format_pull_detail(self, pr: Dict) -> Dict[str, Any]:
+        """格式化 PR 详细信息"""
+        user = pr.get("user", {}) or {}
+        username = user.get("login", "")
+        head = pr.get("head", {}) or {}
+        base = pr.get("base", {}) or {}
+        milestone = pr.get("milestone") or {}
+
+        return {
+            "number": pr.get("number"),
+            "title": pr.get("title"),
+            "body": pr.get("body"),
+            "state": pr.get("state"),
+            "draft": pr.get("draft", False),
+            "user": {
+                "login": username,
+                "id": user.get("id"),
+                "avatar_url": user.get("avatar_url"),
+                "type": user.get("type", "User"),
+            },
+            "labels": [
+                {"name": l.get("name", l), "color": l.get("color", "")}
+                if isinstance(l, dict) else {"name": l, "color": ""}
+                for l in pr.get("labels", [])
+            ],
+            "assignees": [
+                {"login": a.get("login"), "avatar_url": a.get("avatar_url")}
+                for a in (pr.get("assignees") or [])
+            ],
+            "requested_reviewers": [
+                {"login": r.get("login"), "avatar_url": r.get("avatar_url")}
+                for r in (pr.get("requested_reviewers") or [])
+            ],
+            "milestone": {
+                "number": milestone.get("number"),
+                "title": milestone.get("title"),
+                "state": milestone.get("state"),
+            } if milestone else None,
+            "head": {
+                "ref": head.get("ref"),
+                "sha": head.get("sha"),
+                "label": head.get("label"),
+            },
+            "base": {
+                "ref": base.get("ref"),
+                "sha": base.get("sha"),
+                "label": base.get("label"),
+            },
+            "created_at": pr.get("created_at"),
+            "updated_at": pr.get("updated_at"),
+            "closed_at": pr.get("closed_at"),
+            "merged_at": pr.get("merged_at"),
+            "mergeable": pr.get("mergeable"),
+            "merged": pr.get("merged", False),
+            "merge_commit_sha": pr.get("merge_commit_sha"),
+            "commits": pr.get("commits"),
+            "additions": pr.get("additions"),
+            "deletions": pr.get("deletions"),
+            "changed_files": pr.get("changed_files"),
+            "comments": pr.get("comments", 0),
+            "review_comments": pr.get("review_comments", 0),
+            "html_url": pr.get("html_url"),
+        }
+
+    def _format_review(self, review: Dict) -> Dict[str, Any]:
+        """格式化 Review 数据"""
+        user = review.get("user", {}) or {}
+        username = user.get("login", "")
+        return {
+            "id": review.get("id"),
+            "review_id": review.get("id"),
+            "user": username,
+            "user_id": user.get("id"),
+            "user_type": user.get("type", "User"),
+            "avatar_url": user.get("avatar_url"),
+            "state": review.get("state"),
+            "body": review.get("body"),
+            "submitted_at": review.get("submitted_at"),
+            "commit_id": review.get("commit_id"),
+            "author_association": review.get("author_association"),
+            "html_url": review.get("html_url"),
+        }
+
+    def _format_commit(self, commit: Dict) -> Dict[str, Any]:
+        """格式化 Commit 数据"""
+        commit_data = commit.get("commit", {}) or {}
+        author = commit_data.get("author", {}) or {}
+        committer = commit_data.get("committer", {}) or {}
+        return {
+            "sha": commit.get("sha", ""),
+            "message": commit_data.get("message", ""),
+            "author_name": author.get("name", ""),
+            "author_email": author.get("email", ""),
+            "author_date": author.get("date", ""),
+            "committer_name": committer.get("name", ""),
+            "committer_date": committer.get("date", ""),
+            "url": commit.get("html_url", ""),
+            "verified": commit_data.get("verification", {}).get("verified", False)
+            if commit_data.get("verification") else False,
+        }
+
+    def _format_file(self, f: Dict) -> Dict[str, Any]:
+        """格式化变更文件数据"""
+        return {
+            "filename": f.get("filename", ""),
+            "status": f.get("status", ""),
+            "additions": f.get("additions", 0),
+            "deletions": f.get("deletions", 0),
+            "changes": f.get("changes", 0),
+            "sha": f.get("sha", ""),
+            "patch": f.get("patch", ""),
+        }
+
+    def _format_timeline_event(self, event: Dict) -> Dict[str, Any]:
+        """格式化时间线事件"""
+        actor = event.get("actor") or event.get("user") or {}
+        return {
+            "id": event.get("id"),
+            "event": event.get("event"),
+            "actor": actor.get("login"),
+            "actor_id": actor.get("id"),
+            "commit_id": event.get("commit_id"),
+            "created_at": event.get("created_at"),
+            "url": event.get("html_url") or event.get("url"),
+            "label": (event.get("label") or {}).get("name") if event.get("label") else None,
+            "state": event.get("state"),
+        }
+
+    def _format_issue(self, issue: Dict) -> Dict[str, Any]:
+        """格式化 Issue 数据"""
+        user = issue.get("user", {}) or {}
+        return {
+            "number": issue.get("number"),
+            "title": issue.get("title"),
+            "body": (issue.get("body") or "")[:500],
+            "state": issue.get("state"),
+            "user": user.get("login"),
+            "user_id": user.get("id"),
+            "labels": [
+                l.get("name", l) if isinstance(l, dict) else l
+                for l in (issue.get("labels") or [])
+            ],
+            "assignees": [
+                a.get("login") for a in (issue.get("assignees") or [])
+            ],
+            "comments_count": issue.get("comments", 0),
+            "created_at": issue.get("created_at"),
+            "updated_at": issue.get("updated_at"),
+            "closed_at": issue.get("closed_at"),
+            "html_url": issue.get("html_url"),
+        }
 
     def _extract_pipeline_info(self, body: str) -> Optional[Dict[str, Any]]:
         """
