@@ -264,4 +264,20 @@ export const getProxyConfig = () => api.get('/config/proxy')
 export const updateProxyConfig = (proxy) => api.put('/config/proxy', null, { params: { proxy } })
 export const getAppConfig = () => api.get('/config')
 
+// ====================
+// GitCode 平台 (gitcode.net)
+// ====================
+export const getGitCodeMrs = (owner, repo, params) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}`, { params })
+export const getGitCodeMrComments = (owner, repo, mrIid) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}/${mrIid}/comments`)
+export const getGitCodeMrDetail = (owner, repo, mrIid) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}/${mrIid}/detail`)
+export const getGitCodeMrChanges = (owner, repo, mrIid) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}/${mrIid}/changes`)
+export const getGitCodeBatchComments = (owner, repo, params) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}/comments`, { params })
+export const getGitCodeBatchDetails = (owner, repo, params) =>
+  api.get(`/gitcode/mrs/${owner}/${repo}/details`, { params })
+
 export default api
