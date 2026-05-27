@@ -33,7 +33,7 @@ def register_github_routes(router, cache, github_service, db):
 
         if db is not None:
             try:
-                await db.save_pr_data(owner, repo, result)
+                await db.save_pr_data(owner, repo, result, platform="github")
             except Exception as e:
                 logger.error(f"保存到数据库失败: {e}")
 
@@ -86,7 +86,7 @@ def register_github_routes(router, cache, github_service, db):
                 cache.set(cache_key, result)
             if db is not None:
                 try:
-                    await db.save_pr_data(project.owner, project.repo, result)
+                    await db.save_pr_data(project.owner, project.repo, result, platform="github")
                 except Exception as e:
                     logger.error(f"保存到数据库失败: {e}")
             return result
@@ -201,7 +201,7 @@ def register_github_routes(router, cache, github_service, db):
         """获取单个 PR 的详细信息"""
         result = await github_service.fetch_pr_detail(owner, repo, pr_number)
         if db is not None and result["error"] is None:
-            await db.save_pr_detail(owner, repo, pr_number, result)
+            await db.save_pr_detail(owner, repo, pr_number, result, platform="github")
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.post("/github/prs/detail/batch")
@@ -236,7 +236,7 @@ def register_github_routes(router, cache, github_service, db):
         """获取单个 PR 的 Reviews"""
         result = await github_service.fetch_pr_reviews(owner, repo, pr_number)
         if db is not None and result["error"] is None:
-            await db.save_pr_reviews(owner, repo, pr_number, result)
+            await db.save_pr_reviews(owner, repo, pr_number, result, platform="github")
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/prs/{owner}/{repo}/reviews", response_model=MultiPRCollectionResponse)
@@ -260,7 +260,7 @@ def register_github_routes(router, cache, github_service, db):
         """获取单个 PR 的 Commits"""
         result = await github_service.fetch_pr_commits(owner, repo, pr_number)
         if db is not None and result["error"] is None:
-            await db.save_pr_commits(owner, repo, pr_number, result)
+            await db.save_pr_commits(owner, repo, pr_number, result, platform="github")
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/prs/{owner}/{repo}/commits", response_model=MultiPRCollectionResponse)
@@ -284,7 +284,7 @@ def register_github_routes(router, cache, github_service, db):
         """获取单个 PR 的变更文件列表"""
         result = await github_service.fetch_pr_files(owner, repo, pr_number)
         if db is not None and result["error"] is None:
-            await db.save_pr_files(owner, repo, pr_number, result["files"])
+            await db.save_pr_files(owner, repo, pr_number, result["files"], platform="github")
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/prs/{owner}/{repo}/files", response_model=MultiPRCollectionResponse)
@@ -323,7 +323,7 @@ def register_github_routes(router, cache, github_service, db):
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
         if db is not None:
-            await db.save_user_repos(username, result)
+            await db.save_user_repos(username, result, platform="github")
         return {"data": result, "timestamp": datetime.now().isoformat()}
 
     @router.post("/github/users/profiles")
@@ -334,7 +334,7 @@ def register_github_routes(router, cache, github_service, db):
             raise HTTPException(status_code=400, detail="请提供用户名列表")
         result = await github_service.fetch_user_profiles_batch(usernames)
         if db is not None and result.get("profiles"):
-            await db.save_user_profiles_batch(result["profiles"])
+            await db.save_user_profiles_batch(result["profiles"], platform="github")
         return {**result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/prs/{owner}/{repo}/commenters/profiles")
@@ -359,7 +359,7 @@ def register_github_routes(router, cache, github_service, db):
             return {"profiles": [], "total": 0, "success_count": 0, "failed_count": 0, "timestamp": datetime.now().isoformat()}
         result = await github_service.fetch_user_profiles_batch(usernames)
         if db is not None and result.get("profiles"):
-            await db.save_user_profiles_batch(result["profiles"])
+            await db.save_user_profiles_batch(result["profiles"], platform="github")
         return {**result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/github/issues/{owner}/{repo}")
@@ -368,7 +368,7 @@ def register_github_routes(router, cache, github_service, db):
         result = await github_service.fetch_issues(owner, repo, max_count=max_count, start_page=start_page, state=state)
         if db is not None and result.get("error") is None:
             try:
-                await db.save_issues(owner, repo, result)
+                await db.save_issues(owner, repo, result, platform="github")
             except Exception as e:
                 logger.error(f"保存 Issues 到数据库失败: {e}")
         return {"source": "api", "data": result, "timestamp": datetime.now().isoformat()}
@@ -379,7 +379,7 @@ def register_github_routes(router, cache, github_service, db):
         result = await github_service.fetch_issue_timeline(owner, repo, issue_number)
         if db is not None and result.get("error") is None:
             try:
-                await db.save_issue_timeline(owner, repo, issue_number, result)
+                await db.save_issue_timeline(owner, repo, issue_number, result, platform="github")
             except Exception as e:
                 logger.error(f"保存 Issue Timeline 到数据库失败: {e}")
         return {"data": result, "timestamp": datetime.now().isoformat()}
@@ -408,7 +408,7 @@ def register_github_routes(router, cache, github_service, db):
             for r in result.get("results", []):
                 if r.get("error") is None:
                     try:
-                        await db.save_issue_timeline(owner, repo, r["issue_number"], r)
+                        await db.save_issue_timeline(owner, repo, r["issue_number"], r, platform="github")
                     except Exception:
                         pass
         return {**result, "timestamp": datetime.now().isoformat()}

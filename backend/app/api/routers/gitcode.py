@@ -31,7 +31,7 @@ def register_gitcode_routes(router, gitcode_service, db):
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
         if db is not None:
-            await db.save_pr_comments(owner, repo, mr_iid, {**result, "platform": "gitcode"})
+            await db.save_pr_comments(owner, repo, mr_iid, {**result, "platform": "gitcode"}, platform="gitcode")
         return {**result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/gitcode/mrs/{owner}/{repo}/{mr_iid}/detail")
@@ -43,7 +43,7 @@ def register_gitcode_routes(router, gitcode_service, db):
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result["error"])
         if db is not None:
-            await db.save_pr_detail(owner, repo, mr_iid, {**result, "platform": "gitcode"})
+            await db.save_pr_detail(owner, repo, mr_iid, {**result, "platform": "gitcode"}, platform="gitcode")
         return {**result, "timestamp": datetime.now().isoformat()}
 
     @router.get("/gitcode/mrs/{owner}/{repo}/{mr_iid}/changes")
@@ -73,5 +73,5 @@ def register_gitcode_routes(router, gitcode_service, db):
         if db is not None:
             for item in results:
                 if item.get("error") is None:
-                    await db.save_pr_detail(owner, repo, item["mr_iid"], {**item, "platform": "gitcode"})
+                    await db.save_pr_detail(owner, repo, item["mr_iid"], {**item, "platform": "gitcode"}, platform="gitcode")
         return {"owner": owner, "repo": repo, "results": results, "total_mrs": len(results), "timestamp": datetime.now().isoformat()}

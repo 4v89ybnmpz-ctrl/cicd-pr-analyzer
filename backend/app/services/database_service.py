@@ -62,6 +62,29 @@ class DatabaseService:
             logger.warning(f"密码解密过程出错: {e}，使用原密码")
             return password
 
+    # 平台集合映射：不同平台的数据存入不同集合，避免混淆
+    _PLATFORM_PREFIXES = {
+        "github": "",        # github 保持原集合名（向后兼容）
+        "atomgit": "atomgit_",
+        "gitcode": "gitcode_",
+    }
+
+    _PLATFORM_COLLECTIONS = {
+        "pr_data", "pr_comments", "pr_timeline", "pr_details",
+        "pr_reviews", "pr_commits", "pr_files", "issues",
+        "issue_timelines", "cicd_results", "registered_projects",
+        "user_profiles", "user_contributed_repos",
+        "git_log_summaries", "git_log_commits",
+        "notifications_config", "notifications_history",
+    }
+
+    def _coll(self, name: str, platform: str = "github") -> Any:
+        """获取平台对应的集合。github 用原名，其他平台加前缀。"""
+        if self.db is None:
+            return None
+        prefix = self._PLATFORM_PREFIXES.get(platform, "")
+        return self.db[f"{prefix}{name}"]
+
     async def connect(self) -> bool:
         """异步连接数据库"""
         if not DATABASE_AVAILABLE:
@@ -89,11 +112,11 @@ class DatabaseService:
             self.client.close()
             logger.info("数据库连接已关闭")
 
-    async def save_pr_data(self, owner: str, repo: str, pr_data: Dict[str, Any]) -> bool:
+    async def save_pr_data(self, owner: str, repo: str, pr_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_data']
+            collection = self._coll('pr_data')
             prs = pr_data.get("prs", [])
             now = datetime.now().isoformat()
             operations = []
@@ -105,6 +128,7 @@ class DatabaseService:
                     "owner": owner,
                     "repo": repo,
                     "pr_number": pr_number,
+                    "platform": platform,
                     "title": pr.get("title"),
                     "user": pr.get("user"),
                     "state": pr.get("state"),
@@ -115,7 +139,7 @@ class DatabaseService:
                 }
                 operations.append(
                     collection.update_one(
-                        {"owner": owner, "repo": repo, "pr_number": pr_number},
+                        {"owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform},
                         {"$set": document},
                         upsert=True,
                     )
@@ -128,13 +152,13 @@ class DatabaseService:
             logger.error(f"保存 PR 数据失败: {e}")
             return False
 
-    async def update_pr_data(self, owner: str, repo: str, github_service) -> Dict[str, Any]:
+    async def update_pr_data(self, owner: str, repo: str, github_service, platform: str = "github") -> Dict[str, Any]:
         """增量更新 PR 数据：对比 updated_at，有变化则替换，无则新增"""
         if self.db is None:
             return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
         try:
-            collection = self.db['pr_data']
-            cursor = collection.find({"owner": owner, "repo": repo}, {"pr_number": 1, "updated_at": 1, "_id": 0})
+            collection = self._coll('pr_data')
+            cursor = collection.find({"owner": owner, "repo": repo, "platform": platform}, {"pr_number": 1, "updated_at": 1, "_id": 0})
             old_docs = await cursor.to_list(length=None)
             old_map = {d["pr_number"]: d.get("updated_at") for d in old_docs}
             old_numbers = set(old_map.keys())
@@ -155,13 +179,14 @@ class DatabaseService:
                     if old_map[pr_number] != new_updated:
                         document = {
                             "owner": owner, "repo": repo, "pr_number": pr_number,
+                            "platform": platform,
                             "title": pr.get("title"), "user": pr.get("user"),
                             "state": pr.get("state"), "created_at": pr.get("created_at"),
                             "updated_at": new_updated, "url": pr.get("url"),
                             "saved_at": now,
                         }
                         operations.append(collection.update_one(
-                            {"owner": owner, "repo": repo, "pr_number": pr_number},
+                            {"owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform},
                             {"$set": document},
                         ))
                         updated += 1
@@ -170,13 +195,14 @@ class DatabaseService:
                 else:
                     document = {
                         "owner": owner, "repo": repo, "pr_number": pr_number,
+                        "platform": platform,
                         "title": pr.get("title"), "user": pr.get("user"),
                         "state": pr.get("state"), "created_at": pr.get("created_at"),
                         "updated_at": new_updated, "url": pr.get("url"),
                         "saved_at": now,
                     }
                     operations.append(collection.update_one(
-                        {"owner": owner, "repo": repo, "pr_number": pr_number},
+                        {"owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform},
                         {"$set": document},
                         upsert=True,
                     ))
@@ -195,7 +221,7 @@ class DatabaseService:
         if self.db is None:
             return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
         try:
-            collection = self.db['issues']
+            collection = self._coll('issues')
             cursor = collection.find({"owner": owner, "repo": repo}, {"number": 1, "updated_at": 1, "_id": 0})
             old_docs = await cursor.to_list(length=None)
             old_map = {d["number"]: d.get("updated_at") for d in old_docs}
@@ -239,18 +265,18 @@ class DatabaseService:
             logger.error(f"更新 Issues 失败: {e}")
             return {"error": str(e), "updated": 0, "added": 0, "unchanged": 0}
 
-    async def update_comments(self, owner: str, repo: str, github_service) -> Dict[str, Any]:
+    async def update_comments(self, owner: str, repo: str, github_service, platform: str = "github") -> Dict[str, Any]:
         """增量更新 PR 评论数据：获取数据库中已有 PR，重新拉取评论"""
         if self.db is None:
             return {"error": "数据库未连接", "updated": 0, "added": 0, "unchanged": 0}
         try:
-            pr_data = await self.get_pr_data(owner, repo)
+            pr_data = await self.get_pr_data(owner, repo, platform=platform)
             if not pr_data:
                 return {"error": "无 PR 数据，请先获取 PR", "updated": 0, "added": 0, "unchanged": 0}
             pr_numbers = [pr["number"] for pr in pr_data.get("prs", [])]
 
-            collection = self.db['pr_comments']
-            cursor = collection.find({"owner": owner, "repo": repo}, {"comment_id": 1, "updated_at": 1, "_id": 0})
+            collection = self._coll('pr_comments')
+            cursor = collection.find({"owner": owner, "repo": repo, "platform": platform}, {"comment_id": 1, "updated_at": 1, "_id": 0})
             old_docs = await cursor.to_list(length=None)
             old_map = {d["comment_id"]: d.get("updated_at") for d in old_docs}
 
@@ -274,6 +300,7 @@ class DatabaseService:
                             if old_map[comment_id] != new_updated:
                                 document = {
                                     "owner": owner, "repo": repo, "pr_number": pr_num,
+                                    "platform": platform,
                                     "comment_id": comment_id,
                                     "user": comment.get("user"),
                                     "user_id": comment.get("user_id"),
@@ -288,7 +315,7 @@ class DatabaseService:
                                     "saved_at": now,
                                 }
                                 operations.append(collection.update_one(
-                                    {"comment_id": comment_id}, {"$set": document}
+                                    {"comment_id": comment_id, "platform": platform}, {"$set": document}
                                 ))
                                 total_updated += 1
                             else:
@@ -296,6 +323,7 @@ class DatabaseService:
                         else:
                             document = {
                                 "owner": owner, "repo": repo, "pr_number": pr_num,
+                                "platform": platform,
                                 "comment_id": comment_id,
                                 "user": comment.get("user"),
                                 "user_id": comment.get("user_id"),
@@ -310,7 +338,7 @@ class DatabaseService:
                                 "saved_at": now,
                             }
                             operations.append(collection.update_one(
-                                {"comment_id": comment_id}, {"$set": document}, upsert=True
+                                {"comment_id": comment_id, "platform": platform}, {"$set": document}, upsert=True
                             ))
                             total_added += 1
                     if operations:
@@ -324,11 +352,14 @@ class DatabaseService:
             logger.error(f"更新评论失败: {e}")
             return {"error": str(e), "updated": 0, "added": 0, "unchanged": 0}
 
-    async def get_pr_data(self, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+    async def get_pr_data(self, owner: str, repo: str, platform: str = None) -> Optional[Dict[str, Any]]:
         if self.db is None:
             return None
         try:
-            cursor = self.db['pr_data'].find({"owner": owner, "repo": repo}, {"_id": 0})
+            query = {"owner": owner, "repo": repo}
+            if platform is not None:
+                query["platform"] = platform
+            cursor = self._coll('pr_data').find(query, {"_id": 0})
             docs = await cursor.to_list(length=None)
             if not docs:
                 return None
@@ -348,15 +379,18 @@ class DatabaseService:
             logger.error(f"获取 PR 数据失败: {e}")
             return None
 
-    async def list_pr_data(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def list_pr_data(self, limit: int = 100, platform: str = None) -> List[Dict[str, Any]]:
         if self.db is None:
             return []
         try:
-            pipeline = [
+            pipeline = []
+            if platform is not None:
+                pipeline.append({"$match": {"platform": platform}})
+            pipeline.extend([
                 {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "total": {"$sum": 1}}},
                 {"$limit": limit},
-            ]
-            cursor = self.db['pr_data'].aggregate(pipeline)
+            ])
+            cursor = self._coll('pr_data').aggregate(pipeline)
             results = []
             async for doc in cursor:
                 key = doc["_id"]
@@ -370,7 +404,7 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            result = await self.db['pr_data'].delete_many({"owner": owner, "repo": repo})
+            result = await self._coll('pr_data').delete_many({"owner": owner, "repo": repo})
             if result.deleted_count > 0:
                 logger.info(f"PR 数据已删除: {owner}/{repo}, 共 {result.deleted_count} 条")
                 return True
@@ -387,7 +421,7 @@ class DatabaseService:
             if not login:
                 return False
             now = datetime.now().isoformat()
-            await self.db['user_profiles'].update_one(
+            await self._coll('user_profiles').update_one(
                 {"login": login},
                 {"$set": {**profile, "saved_at": now}},
                 upsert=True,
@@ -408,7 +442,7 @@ class DatabaseService:
                 if not login:
                     continue
                 operations.append(
-                    self.db['user_profiles'].update_one(
+                    self._coll('user_profiles').update_one(
                         {"login": login},
                         {"$set": {**p, "saved_at": now}},
                         upsert=True,
@@ -427,7 +461,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['user_profiles']
+            collection = self._coll('user_profiles')
             total = await collection.count_documents({})
             skip = (page - 1) * size
             cursor = collection.find({}, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
@@ -443,7 +477,7 @@ class DatabaseService:
             return False
         try:
             now = datetime.now().isoformat()
-            collection = self.db['user_contributed_repos']
+            collection = self._coll('user_contributed_repos')
             operations = []
             for repo in repos_data.get("repos", []):
                 document = {**repo, "username": username, "saved_at": now}
@@ -470,9 +504,9 @@ class DatabaseService:
             query = {}
             if username:
                 query["username"] = username
-            total = await self.db['user_contributed_repos'].count_documents(query)
+            total = await self._coll('user_contributed_repos').count_documents(query)
             skip = (page - 1) * size
-            cursor = self.db['user_contributed_repos'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            cursor = self._coll('user_contributed_repos').find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
             data = await cursor.to_list(length=size)
             return {"data": data, "total": total, "page": page, "size": size,
                     "total_pages": (total + size - 1) // size if size > 0 else 0}
@@ -480,11 +514,11 @@ class DatabaseService:
             logger.error(f"查询用户参与项目失败: {e}")
             return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
 
-    async def save_issues(self, owner: str, repo: str, issues_data: Dict[str, Any]) -> bool:
+    async def save_issues(self, owner: str, repo: str, issues_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['issues']
+            collection = self._coll('issues')
             issues = issues_data.get("issues", [])
             now = datetime.now().isoformat()
             operations = []
@@ -492,10 +526,10 @@ class DatabaseService:
                 number = issue.get("number")
                 if number is None:
                     continue
-                document = {**issue, "owner": owner, "repo": repo, "saved_at": now}
+                document = {**issue, "owner": owner, "repo": repo, "platform": platform, "saved_at": now}
                 operations.append(
                     collection.update_one(
-                        {"owner": owner, "repo": repo, "number": number},
+                        {"owner": owner, "repo": repo, "number": number, "platform": platform},
                         {"$set": document},
                         upsert=True,
                     )
@@ -512,7 +546,7 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['issues'].find_one({"owner": owner, "repo": repo, "number": number}, {"_id": 0})
+            return await self._coll('issues').find_one({"owner": owner, "repo": repo, "number": number}, {"_id": 0})
         except Exception as e:
             logger.error(f"获取 Issue 数据失败: {e}")
             return None
@@ -520,7 +554,7 @@ class DatabaseService:
     async def list_issues(self, owner: str = None, repo: str = None,
                            page: int = 1, size: int = 20,
                            sort_by: str = "created_at", sort_order: int = -1,
-                           state: str = None) -> Dict[str, Any]:
+                           state: str = None, platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
@@ -531,9 +565,11 @@ class DatabaseService:
                 query["repo"] = repo
             if state:
                 query["state"] = state
-            total = await self.db['issues'].count_documents(query)
+            if platform is not None:
+                query["platform"] = platform
+            total = await self._coll('issues').count_documents(query)
             skip = (page - 1) * size
-            cursor = self.db['issues'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            cursor = self._coll('issues').find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
             data = await cursor.to_list(length=size)
             return {"data": data, "total": total, "page": page, "size": size,
                     "total_pages": (total + size - 1) // size if size > 0 else 0}
@@ -541,11 +577,11 @@ class DatabaseService:
             logger.error(f"查询 Issues 列表失败: {e}")
             return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
 
-    async def save_issue_timeline(self, owner: str, repo: str, issue_number: int, timeline_data: Dict[str, Any]) -> bool:
+    async def save_issue_timeline(self, owner: str, repo: str, issue_number: int, timeline_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['issue_timelines']
+            collection = self._coll('issue_timelines')
             events = timeline_data.get("events", [])
             is_pr = timeline_data.get("is_pr", False)
             now = datetime.now().isoformat()
@@ -556,6 +592,7 @@ class DatabaseService:
                     continue
                 document = {
                     "owner": owner, "repo": repo, "issue_number": issue_number,
+                    "platform": platform,
                     "is_pr": is_pr,
                     "event_id": str(event_id),
                     "event_type": event.get("event_type"),
@@ -580,7 +617,7 @@ class DatabaseService:
                 }
                 operations.append(
                     collection.update_one(
-                        {"owner": owner, "repo": repo, "event_id": str(event_id)},
+                        {"owner": owner, "repo": repo, "event_id": str(event_id), "platform": platform},
                         {"$set": document},
                         upsert=True,
                     )
@@ -595,7 +632,8 @@ class DatabaseService:
 
     async def list_issue_timelines(self, owner: str = None, repo: str = None, issue_number: int = None,
                                     page: int = 1, size: int = 20,
-                                    sort_by: str = "created_at", sort_order: int = -1) -> Dict[str, Any]:
+                                    sort_by: str = "created_at", sort_order: int = -1,
+                                    platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
@@ -606,9 +644,11 @@ class DatabaseService:
                 query["repo"] = repo
             if issue_number:
                 query["issue_number"] = issue_number
-            total = await self.db['issue_timelines'].count_documents(query)
+            if platform is not None:
+                query["platform"] = platform
+            total = await self._coll('issue_timelines').count_documents(query)
             skip = (page - 1) * size
-            cursor = self.db['issue_timelines'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            cursor = self._coll('issue_timelines').find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
             data = await cursor.to_list(length=size)
             return {"data": data, "total": total, "page": page, "size": size,
                     "total_pages": (total + size - 1) // size if size > 0 else 0}
@@ -616,11 +656,11 @@ class DatabaseService:
             logger.error(f"查询 Issue Timeline 失败: {e}")
             return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
 
-    async def save_pr_comments(self, owner: str, repo: str, pr_number: int, comments_data: Dict[str, Any]) -> bool:
+    async def save_pr_comments(self, owner: str, repo: str, pr_number: int, comments_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_comments']
+            collection = self._coll('pr_comments')
             comments = comments_data.get("comments", [])
             now = datetime.now().isoformat()
             operations = []
@@ -632,6 +672,7 @@ class DatabaseService:
                     "owner": owner,
                     "repo": repo,
                     "pr_number": pr_number,
+                    "platform": platform,
                     "comment_id": str(comment_id),
                     "user": comment.get("user"),
                     "user_id": comment.get("user_id"),
@@ -647,7 +688,7 @@ class DatabaseService:
                 }
                 operations.append(
                     collection.update_one(
-                        {"owner": owner, "repo": repo, "comment_id": str(comment_id)},
+                        {"owner": owner, "repo": repo, "comment_id": str(comment_id), "platform": platform},
                         {"$set": document},
                         upsert=True,
                     )
@@ -660,11 +701,14 @@ class DatabaseService:
             logger.error(f"保存 PR 评论数据失败: {e}")
             return False
 
-    async def get_pr_comments(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+    async def get_pr_comments(self, owner: str, repo: str, pr_number: int, platform: str = None) -> Optional[Dict[str, Any]]:
         if self.db is None:
             return None
         try:
-            cursor = self.db['pr_comments'].find({"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0})
+            query = {"owner": owner, "repo": repo, "pr_number": pr_number}
+            if platform is not None:
+                query["platform"] = platform
+            cursor = self._coll('pr_comments').find(query, {"_id": 0})
             docs = await cursor.to_list(length=None)
             if not docs:
                 return None
@@ -688,17 +732,17 @@ class DatabaseService:
             logger.error(f"获取 PR 评论数据失败: {e}")
             return None
 
-    async def save_pr_timeline(self, owner: str, repo: str, pr_number: int, timeline_data: Dict[str, Any]) -> bool:
+    async def save_pr_timeline(self, owner: str, repo: str, pr_number: int, timeline_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_timeline']
+            collection = self._coll('pr_timeline')
             document = {
-                "owner": owner, "repo": repo, "pr_number": pr_number, "data": timeline_data,
+                "owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform, "data": timeline_data,
                 "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat()
             }
             await collection.update_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number},
+                {"owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform},
                 {"$set": document}, upsert=True
             )
             logger.info(f"PR 时间线数据已保存: {owner}/{repo} PR#{pr_number}")
@@ -707,28 +751,31 @@ class DatabaseService:
             logger.error(f"保存 PR 时间线数据失败: {e}")
             return False
 
-    async def get_pr_timeline(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+    async def get_pr_timeline(self, owner: str, repo: str, pr_number: int, platform: str = None) -> Optional[Dict[str, Any]]:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_timeline'].find_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
+            query = {"owner": owner, "repo": repo, "pr_number": pr_number}
+            if platform is not None:
+                query["platform"] = platform
+            return await self._coll('pr_timeline').find_one(
+                query, {"_id": 0}
             )
         except Exception as e:
             logger.error(f"获取 PR 时间线数据失败: {e}")
             return None
 
-    async def save_pr_detail(self, owner: str, repo: str, pr_number: int, detail_data: Dict[str, Any]) -> bool:
+    async def save_pr_detail(self, owner: str, repo: str, pr_number: int, detail_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_details']
+            collection = self._coll('pr_details')
             document = {
-                "owner": owner, "repo": repo, "pr_number": pr_number, "data": detail_data,
+                "owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform, "data": detail_data,
                 "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat()
             }
             await collection.update_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number},
+                {"owner": owner, "repo": repo, "pr_number": pr_number, "platform": platform},
                 {"$set": document}, upsert=True
             )
             logger.info(f"PR 详细信息数据已保存: {owner}/{repo} PR#{pr_number}")
@@ -737,25 +784,37 @@ class DatabaseService:
             logger.error(f"保存 PR 详细信息数据失败: {e}")
             return False
 
-    async def get_pr_detail(self, owner: str, repo: str, pr_number: int) -> Optional[Dict[str, Any]]:
+    async def get_pr_detail(self, owner: str, repo: str, pr_number: int, platform: str = None) -> Optional[Dict[str, Any]]:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_details'].find_one(
-                {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
+            query = {"owner": owner, "repo": repo, "pr_number": pr_number}
+            if platform is not None:
+                query["platform"] = platform
+            return await self._coll('pr_details').find_one(
+                query, {"_id": 0}
             )
         except Exception as e:
             logger.error(f"获取 PR 详细信息数据失败: {e}")
             return None
 
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self, platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"error": "数据库未连接"}
         try:
             collection_names = await self.db.list_collection_names()
+            query = {}
+            if platform is not None:
+                query["platform"] = platform
 
             async def _count(name):
-                return await self.db[name].count_documents({}) if name in collection_names else 0
+                coll = self._coll(name)
+                if coll is not None:
+                    try:
+                        return await coll.count_documents(query)
+                    except Exception:
+                        return 0
+                return 0
 
             pr_count = await _count('pr_data')
             pr_details_count = await _count('pr_details')
@@ -784,16 +843,19 @@ class DatabaseService:
 
     async def list_pr_comments(self, owner: str = None, repo: str = None,
                                page: int = 1, size: int = 20,
-                               sort_by: str = "created_at", sort_order: int = -1) -> Dict[str, Any]:
+                               sort_by: str = "created_at", sort_order: int = -1,
+                               platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_comments']
+            collection = self._coll('pr_comments')
             query = {}
             if owner:
                 query["owner"] = owner
             if repo:
                 query["repo"] = repo
+            if platform is not None:
+                query["platform"] = platform
             total = await collection.count_documents(query)
             skip = (page - 1) * size
             cursor = collection.find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
@@ -806,16 +868,19 @@ class DatabaseService:
 
     async def list_pr_timeline(self, owner: str = None, repo: str = None,
                                page: int = 1, size: int = 20,
-                               sort_by: str = "updated_at", sort_order: int = -1) -> Dict[str, Any]:
+                               sort_by: str = "updated_at", sort_order: int = -1,
+                               platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_timeline']
+            collection = self._coll('pr_timeline')
             query = {}
             if owner:
                 query["owner"] = owner
             if owner and repo:
                 query["repo"] = repo
+            if platform is not None:
+                query["platform"] = platform
             total = await collection.count_documents(query)
             skip = (page - 1) * size
             cursor = collection.find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
@@ -829,11 +894,12 @@ class DatabaseService:
     async def list_pr_details(self, owner: str = None, repo: str = None,
                               page: int = 1, size: int = 20,
                               sort_by: str = "updated_at", sort_order: int = -1,
-                              state: str = None, start_time: str = None, end_time: str = None) -> Dict[str, Any]:
+                              state: str = None, start_time: str = None, end_time: str = None,
+                              platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_details']
+            collection = self._coll('pr_details')
             query = {}
             if owner:
                 query["owner"] = owner
@@ -841,6 +907,8 @@ class DatabaseService:
                 query["repo"] = repo
             if state:
                 query["data.state"] = state
+            if platform is not None:
+                query["platform"] = platform
             if start_time or end_time:
                 time_query = {}
                 if start_time:
@@ -859,11 +927,11 @@ class DatabaseService:
             return {"data": [], "total": 0, "page": page, "size": size, "error": str(e)}
 
     async def search_pr_details(self, keyword: str, owner: str = None, repo: str = None,
-                                page: int = 1, size: int = 20) -> Dict[str, Any]:
+                                page: int = 1, size: int = 20, platform: str = None) -> Dict[str, Any]:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_details']
+            collection = self._coll('pr_details')
             query = {"$or": [
                 {"data.title": {"$regex": keyword, "$options": "i"}},
                 {"data.body": {"$regex": keyword, "$options": "i"}}
@@ -872,6 +940,8 @@ class DatabaseService:
                 query["owner"] = owner
             if owner and repo:
                 query["repo"] = repo
+            if platform is not None:
+                query["platform"] = platform
             total = await collection.count_documents(query)
             skip = (page - 1) * size
             cursor = collection.find(query, {"_id": 0}).sort("updated_at", -1).skip(skip).limit(size)
@@ -886,7 +956,7 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_reviews']
+            collection = self._coll('pr_reviews')
             document = {
                 "owner": owner, "repo": repo, "pr_number": pr_number, "data": reviews_data,
                 "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat()
@@ -905,7 +975,7 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_reviews'].find_one(
+            return await self._coll('pr_reviews').find_one(
                 {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
             )
         except Exception as e:
@@ -918,7 +988,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_reviews']
+            collection = self._coll('pr_reviews')
             query = {}
             if owner:
                 query["owner"] = owner
@@ -938,7 +1008,7 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_commits']
+            collection = self._coll('pr_commits')
             document = {
                 "owner": owner, "repo": repo, "pr_number": pr_number, "data": commits_data,
                 "created_at": datetime.now().isoformat(), "updated_at": datetime.now().isoformat()
@@ -957,7 +1027,7 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_commits'].find_one(
+            return await self._coll('pr_commits').find_one(
                 {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
             )
         except Exception as e:
@@ -970,7 +1040,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['pr_commits']
+            collection = self._coll('pr_commits')
             query = {}
             if owner:
                 query["owner"] = owner
@@ -990,7 +1060,7 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            collection = self.db['cicd_results']
+            collection = self._coll('cicd_results')
             filter_query = {"owner": result_data.get("owner"), "repo": result_data.get("repo")}
             comment_id = result_data.get("comment_id")
             filter_query["comment_id"] = comment_id if comment_id else None
@@ -1021,7 +1091,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": [], "total": 0, "page": page, "size": size}
         try:
-            collection = self.db['cicd_results']
+            collection = self._coll('cicd_results')
             query = {"owner": owner, "repo": repo}
             if pr_number is not None:
                 query["pr_number"] = pr_number
@@ -1051,7 +1121,7 @@ class DatabaseService:
         if self.db is None:
             return {"error": "数据库未连接"}
         try:
-            collection = self.db['cicd_results']
+            collection = self._coll('cicd_results')
             match = {"owner": owner, "repo": repo}
             if start_date or end_date:
                 time_query = {}
@@ -1106,7 +1176,7 @@ class DatabaseService:
         if self.db is None:
             return []
         try:
-            collection = self.db['cicd_results']
+            collection = self._coll('cicd_results')
             match = {"owner": owner, "repo": repo, "analyzed_at": {"$ne": None}}
             if start_date or end_date:
                 time_query = {}
@@ -1157,7 +1227,7 @@ class DatabaseService:
         if self.db is None:
             return {"error": "数据库未连接"}
         try:
-            collection = self.db['cicd_results']
+            collection = self._coll('cicd_results')
             match = {"owner": owner, "repo": repo, "build_status": "failed"}
             if start_date or end_date:
                 time_query = {}
@@ -1240,12 +1310,13 @@ class DatabaseService:
             collection_names = await self.db.list_collection_names()
 
             async def _group_count(collection_name):
-                if collection_name not in collection_names:
+                coll = self._coll(collection_name)
+                if coll is None:
                     return {}
                 pipeline = [
                     {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "count": {"$sum": 1}}}
                 ]
-                cursor = self.db[collection_name].aggregate(pipeline)
+                cursor = coll.aggregate(pipeline)
                 result = {}
                 async for doc in cursor:
                     key = f"{doc['_id']['owner']}/{doc['_id']['repo']}"
@@ -1267,13 +1338,13 @@ class DatabaseService:
             for m in [pr_data_counts, comments_counts, issues_counts, timeline_counts, details_counts, reviews_counts, pr_commits_counts, git_log_counts]:
                 all_projects.update(m.keys())
 
-            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+            async for doc in self._coll('registered_projects').find({}, {"owner": 1, "repo": 1, "_id": 0}):
                 all_projects.add(f"{doc['owner']}/{doc['repo']}")
 
             # 批量读取已缓存的 GitHub 统计和同步状态
             github_stats_map = {}
             sync_status_map = {}
-            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "github_stats": 1, "sync_status": 1, "_id": 0}):
+            async for doc in self._coll('registered_projects').find({}, {"owner": 1, "repo": 1, "github_stats": 1, "sync_status": 1, "_id": 0}):
                 pk = f"{doc['owner']}/{doc['repo']}"
                 if doc.get("github_stats"):
                     github_stats_map[pk] = doc["github_stats"]
@@ -1296,10 +1367,11 @@ class DatabaseService:
 
                 last_updated = None
                 for coll_name in ["pr_data", "pr_comments", "issues", "issue_timelines", "pr_details", "git_log_summaries", "git_log_commits"]:
-                    if coll_name not in collection_names:
-                        continue
                     try:
-                        agg_result = await self.db[coll_name].aggregate([
+                        coll = self._coll(coll_name)
+                        if coll is None:
+                            continue
+                        agg_result = await coll.aggregate([
                             {"$match": {"owner": owner, "repo": repo}},
                             {"$sort": {"saved_at": -1}},
                             {"$limit": 1},
@@ -1392,7 +1464,7 @@ class DatabaseService:
         if self.db is None:
             return
         try:
-            await self.db['registered_projects'].update_one(
+            await self._coll('registered_projects').update_one(
                 {"owner": owner, "repo": repo},
                 {"$set": {f"sync_status.{dimension}": status}},
             )
@@ -1417,7 +1489,7 @@ class DatabaseService:
                 "updated_at": datetime.now().isoformat(),
             }
 
-            await self.db['registered_projects'].update_one(
+            await self._coll('registered_projects').update_one(
                 {"owner": owner, "repo": repo},
                 {"$set": {"github_stats": gh_stats}},
                 upsert=True,
@@ -1433,7 +1505,7 @@ class DatabaseService:
             return {"results": [], "error": "数据库未连接"}
         try:
             projects = []
-            async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+            async for doc in self._coll('registered_projects').find({}, {"owner": 1, "repo": 1, "_id": 0}):
                 projects.append((doc["owner"], doc["repo"]))
 
             results = []
@@ -1463,12 +1535,12 @@ class DatabaseService:
         try:
             commits = data.pop("commits", [])
             summary = {**data, "commit_count": len(commits), "saved_at": datetime.now().isoformat()}
-            await self.db['git_log_summaries'].update_one(
+            await self._coll('git_log_summaries').update_one(
                 {"owner": owner, "repo": repo},
                 {"$set": summary},
                 upsert=True,
             )
-            collection = self.db['git_log_commits']
+            collection = self._coll('git_log_commits')
             operations = []
             for c in commits:
                 doc = {"owner": owner, "repo": repo, **c}
@@ -1491,7 +1563,7 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['git_log_summaries'].find_one(
+            return await self._coll('git_log_summaries').find_one(
                 {"owner": owner, "repo": repo}, {"_id": 0}
             )
         except Exception as e:
@@ -1510,9 +1582,9 @@ class DatabaseService:
                 query["author_name"] = {"$regex": author, "$options": "i"}
             if branch:
                 query["branches"] = branch
-            total = await self.db['git_log_commits'].count_documents(query)
+            total = await self._coll('git_log_commits').count_documents(query)
             skip = (page - 1) * size
-            cursor = self.db['git_log_commits'].find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
+            cursor = self._coll('git_log_commits').find(query, {"_id": 0}).sort(sort_by, sort_order).skip(skip).limit(size)
             data = await cursor.to_list(length=size)
             return {"data": data, "total": total, "page": page, "size": size,
                     "total_pages": (total + size - 1) // size if size > 0 else 0}
@@ -1530,22 +1602,22 @@ class DatabaseService:
             if owner and repo:
                 query["repo"] = repo
 
-            pr_data_count = await self.db['pr_data'].count_documents(query)
-            pr_comments_count = await self.db['pr_comments'].count_documents(query)
-            pr_timeline_count = await self.db['pr_timeline'].count_documents(query)
-            pr_details_count = await self.db['pr_details'].count_documents(query)
+            pr_data_count = await self._coll('pr_data').count_documents(query)
+            pr_comments_count = await self._coll('pr_comments').count_documents(query)
+            pr_timeline_count = await self._coll('pr_timeline').count_documents(query)
+            pr_details_count = await self._coll('pr_details').count_documents(query)
 
             pipeline = [
                 {"$match": query} if query else {"$match": {}},
                 {"$group": {"_id": {"owner": "$owner", "repo": "$repo"}, "count": {"$sum": 1}}}
             ]
-            by_repo = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+            by_repo = await self._coll('pr_details').aggregate(pipeline).to_list(length=None)
 
             state_pipeline = [
                 {"$match": query} if query else {"$match": {}},
                 {"$group": {"_id": "$data.state", "count": {"$sum": 1}}}
             ]
-            by_state = await self.db['pr_details'].aggregate(state_pipeline).to_list(length=None)
+            by_state = await self._coll('pr_details').aggregate(state_pipeline).to_list(length=None)
 
             return {
                 "pr_data_count": pr_data_count, "pr_comments_count": pr_comments_count,
@@ -1618,17 +1690,17 @@ class DatabaseService:
         if time_filter:
             details_query["data.created_at"] = time_filter
 
-        total_prs = await self.db['pr_details'].count_documents(details_query)
+        total_prs = await self._coll('pr_details').count_documents(details_query)
 
         # 从 pr_reviews 获取有 review 的 PR 数
         reviews_query = {"owner": owner, "repo": repo}
-        prs_with_review = await self.db['pr_reviews'].count_documents(reviews_query)
+        prs_with_review = await self._coll('pr_reviews').count_documents(reviews_query)
 
         # 计算平均 reviewer 数（用聚合替代全量加载）
         if prs_with_review > 0:
             try:
                 # 先尝试 data 为 array 的格式
-                agg_result = await self.db['pr_reviews'].aggregate([
+                agg_result = await self._coll('pr_reviews').aggregate([
                     {"$match": reviews_query},
                     {"$project": {"review_count": {"$size": {"$ifNull": ["$data", []]}}}},
                     {"$group": {"_id": None, "avg": {"$avg": "$review_count"}}},
@@ -1637,7 +1709,7 @@ class DatabaseService:
                     avg_reviewers = round(agg_result[0]["avg"], 2)
                 else:
                     # data 为 dict 格式，回退到采样
-                    sample_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=100)
+                    sample_docs = await self._coll('pr_reviews').find(reviews_query, {"_id": 0}).to_list(length=100)
                     review_counts = []
                     for doc in sample_docs:
                         reviews_list = self._extract_reviews_list(doc.get("data"))
@@ -1666,7 +1738,7 @@ class DatabaseService:
         reviews_query = {"owner": owner, "repo": repo}
 
         # 获取所有 review 文档
-        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+        review_docs = await self._coll('pr_reviews').find(reviews_query, {"_id": 0}).to_list(length=None)
 
         if not review_docs:
             return {
@@ -1680,7 +1752,7 @@ class DatabaseService:
         # 获取对应 PR 的创建时间
         pr_numbers = [doc["pr_number"] for doc in review_docs]
         pr_created_map = {}
-        async for detail in self.db['pr_details'].find(
+        async for detail in self._coll('pr_details').find(
             {"owner": owner, "repo": repo, "pr_number": {"$in": pr_numbers}},
             {"pr_number": 1, "data.created_at": 1, "_id": 0}
         ):
@@ -1763,7 +1835,7 @@ class DatabaseService:
         """计算 Review 深度: 评论长度、有内容占比"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+        review_docs = await self._coll('pr_reviews').find(reviews_query, {"_id": 0}).to_list(length=None)
 
         all_reviews = []
         for doc in review_docs:
@@ -1794,7 +1866,7 @@ class DatabaseService:
         """计算 Review 状态分布"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+        review_docs = await self._coll('pr_reviews').find(reviews_query, {"_id": 0}).to_list(length=None)
 
         by_state = {}
         for doc in review_docs:
@@ -1816,7 +1888,7 @@ class DatabaseService:
         """计算 Top Reviewer 统计"""
         reviews_query = {"owner": owner, "repo": repo}
 
-        review_docs = await self.db['pr_reviews'].find(reviews_query, {"_id": 0}).to_list(length=None)
+        review_docs = await self._coll('pr_reviews').find(reviews_query, {"_id": 0}).to_list(length=None)
 
         reviewer_map = {}
         for doc in review_docs:
@@ -1984,7 +2056,7 @@ class DatabaseService:
                 {"$sort": {"_id": 1}},
             ]
 
-            raw = await self.db['pr_reviews'].aggregate(pipeline).to_list(length=None)
+            raw = await self._coll('pr_reviews').aggregate(pipeline).to_list(length=None)
 
             trends = []
             for r in raw:
@@ -2089,7 +2161,7 @@ class DatabaseService:
             query["data.created_at"] = time_filter
 
         try:
-            docs = await self.db['pr_details'].find(
+            docs = await self._coll('pr_details').find(
                 query, {"data.created_at": 1, "data.merged_at": 1, "_id": 0}
             ).to_list(length=None)
         except Exception:
@@ -2153,7 +2225,7 @@ class DatabaseService:
         ]
 
         try:
-            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=1)
+            result = await self._coll('pr_details').aggregate(pipeline).to_list(length=1)
         except Exception:
             result = []
 
@@ -2226,7 +2298,7 @@ class DatabaseService:
         ]
 
         try:
-            contributors = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+            contributors = await self._coll('pr_details').aggregate(pipeline).to_list(length=None)
         except Exception:
             contributors = []
 
@@ -2264,7 +2336,7 @@ class DatabaseService:
             query["created_at"] = time_filter
 
         try:
-            docs = await self.db['issues'].find(
+            docs = await self._coll('issues').find(
                 query, {"created_at": 1, "closed_at": 1, "_id": 0}
             ).to_list(length=None)
         except Exception:
@@ -2415,7 +2487,7 @@ class DatabaseService:
                 {"$sort": {"_id": 1}},
             ]
 
-            raw = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+            raw = await self._coll('pr_details').aggregate(pipeline).to_list(length=None)
 
             trends = []
             for r in raw:
@@ -2636,7 +2708,7 @@ class DatabaseService:
             {"$group": {"_id": "$data.user.login"}},
         ]
         try:
-            result = await self.db['pr_details'].aggregate(pipeline).to_list(length=None)
+            result = await self._coll('pr_details').aggregate(pipeline).to_list(length=None)
             return len([r for r in result if r["_id"]])
         except Exception:
             return 0
@@ -2687,7 +2759,7 @@ class DatabaseService:
         if self.db is None:
             return False
         try:
-            collection = self.db['pr_files']
+            collection = self._coll('pr_files')
             document = {
                 "owner": owner, "repo": repo, "pr_number": pr_number,
                 "data": files_data,
@@ -2708,7 +2780,7 @@ class DatabaseService:
         if self.db is None:
             return None
         try:
-            return await self.db['pr_files'].find_one(
+            return await self._coll('pr_files').find_one(
                 {"owner": owner, "repo": repo, "pr_number": pr_number}, {"_id": 0}
             )
         except Exception as e:
@@ -2742,11 +2814,11 @@ class DatabaseService:
                     pr_query["data.created_at"] = time_cond
 
                 valid_pr_numbers = set()
-                async for doc in self.db['pr_details'].find(pr_query, {"pr_number": 1, "_id": 0}):
+                async for doc in self._coll('pr_details').find(pr_query, {"pr_number": 1, "_id": 0}):
                     valid_pr_numbers.add(doc["pr_number"])
                 query["pr_number"] = {"$in": list(valid_pr_numbers)}
 
-            docs = await self.db['pr_files'].find(query, {"_id": 0}).to_list(length=None)
+            docs = await self._coll('pr_files').find(query, {"_id": 0}).to_list(length=None)
 
             if not docs:
                 return {
@@ -3183,13 +3255,13 @@ class DatabaseService:
             # 兼容两种数据格式: data.detail.xxx (NVIDIA/cccl) 和 data.xxx (test-org)
             # 先用顶层 created_at 做粗筛（记录入库时间），再用 PR 的 created_at 精确过滤
             pr_query = {"owner": owner, "repo": repo}
-            pr_docs = await self.db['pr_details'].find(pr_query, {"_id": 0}).to_list(length=None)
+            pr_docs = await self._coll('pr_details').find(pr_query, {"_id": 0}).to_list(length=None)
 
             # 获取对应的 pr_files
             pr_numbers = [doc["pr_number"] for doc in pr_docs]
             files_map = {}
             if pr_numbers:
-                async for fdoc in self.db['pr_files'].find(
+                async for fdoc in self._coll('pr_files').find(
                     {"owner": owner, "repo": repo, "pr_number": {"$in": pr_numbers}},
                     {"pr_number": 1, "data": 1, "_id": 0}
                 ):
@@ -3873,7 +3945,7 @@ class DatabaseService:
 
             # PR 创建活动
             if 'pr_data' in collection_names:
-                cursor = self.db['pr_data'].find(
+                cursor = self._coll('pr_data').find(
                     {}, {"_id": 0, "owner": 1, "repo": 1, "number": 1, "title": 1, "user": 1, "state": 1, "created_at": 1}
                 ).sort("created_at", -1).limit(limit)
                 async for doc in cursor:
@@ -3890,7 +3962,7 @@ class DatabaseService:
 
             # 评论活动
             if 'pr_comments' in collection_names:
-                cursor = self.db['pr_comments'].find(
+                cursor = self._coll('pr_comments').find(
                     {}, {"_id": 0, "owner": 1, "repo": 1, "pr_number": 1, "user": 1, "body": 1, "created_at": 1}
                 ).sort("created_at", -1).limit(limit)
                 async for doc in cursor:
@@ -3907,7 +3979,7 @@ class DatabaseService:
 
             # Issue 活动
             if 'issues' in collection_names:
-                cursor = self.db['issues'].find(
+                cursor = self._coll('issues').find(
                     {}, {"_id": 0, "owner": 1, "repo": 1, "number": 1, "title": 1, "user": 1, "state": 1, "created_at": 1, "closed_at": 1}
                 ).sort("created_at", -1).limit(limit)
                 async for doc in cursor:
@@ -3943,7 +4015,7 @@ class DatabaseService:
             pipeline_pr = [
                 {"$group": {"_id": "$user", "pr_count": {"$sum": 1}, "projects": {"$addToSet": {"$concat": ["$owner", "/", "$repo"]}}}},
             ]
-            async for doc in self.db['pr_data'].aggregate(pipeline_pr):
+            async for doc in self._coll('pr_data').aggregate(pipeline_pr):
                 user = doc["_id"]
                 if not user or user.endswith("[bot]") or "[bot]" in (user or ""):
                     continue
@@ -3962,7 +4034,7 @@ class DatabaseService:
             pipeline_comments = [
                 {"$group": {"_id": "$user", "comment_count": {"$sum": 1}}},
             ]
-            async for doc in self.db['pr_comments'].aggregate(pipeline_comments):
+            async for doc in self._coll('pr_comments').aggregate(pipeline_comments):
                 user = doc["_id"]
                 if not user or "[bot]" in (user or ""):
                     continue
@@ -3978,7 +4050,7 @@ class DatabaseService:
             pipeline_issues = [
                 {"$group": {"_id": "$user", "issue_count": {"$sum": 1}}},
             ]
-            async for doc in self.db['issues'].aggregate(pipeline_issues):
+            async for doc in self._coll('issues').aggregate(pipeline_issues):
                 user = doc["_id"]
                 if not user or "[bot]" in (user or ""):
                     continue
@@ -4014,7 +4086,7 @@ class DatabaseService:
             # 获取项目列表
             if not projects:
                 projects = []
-                async for doc in self.db['registered_projects'].find({}, {"owner": 1, "repo": 1, "_id": 0}):
+                async for doc in self._coll('registered_projects').find({}, {"owner": 1, "repo": 1, "_id": 0}):
                     projects.append(f"{doc['owner']}/{doc['repo']}")
 
             if not projects:
@@ -4074,7 +4146,7 @@ class DatabaseService:
             config_data["config_id"] = config_id
             config_data["created_at"] = config_data.get("created_at") or now
             config_data["updated_at"] = now
-            await self.db['notifications_config'].update_one(
+            await self._coll('notifications_config').update_one(
                 {"config_id": config_id},
                 {"$set": config_data},
                 upsert=True,
@@ -4091,13 +4163,13 @@ class DatabaseService:
             return {"data": None, "error": "数据库未连接"}
         try:
             updates["updated_at"] = datetime.now().isoformat()
-            result = await self.db['notifications_config'].update_one(
+            result = await self._coll('notifications_config').update_one(
                 {"config_id": config_id},
                 {"$set": updates},
             )
             if result.matched_count == 0:
                 return {"data": None, "error": "配置不存在"}
-            doc = await self.db['notifications_config'].find_one({"config_id": config_id})
+            doc = await self._coll('notifications_config').find_one({"config_id": config_id})
             if doc:
                 doc["_id"] = str(doc["_id"])
             return {"data": doc, "error": None}
@@ -4110,7 +4182,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": None, "error": "数据库未连接"}
         try:
-            await self.db['notifications_config'].delete_one({"config_id": config_id})
+            await self._coll('notifications_config').delete_one({"config_id": config_id})
             return {"data": {"deleted": True, "config_id": config_id}, "error": None}
         except Exception as e:
             logger.error(f"删除通知配置失败: {e}")
@@ -4122,7 +4194,7 @@ class DatabaseService:
             return {"data": [], "error": "数据库未连接"}
         try:
             configs = []
-            async for doc in self.db['notifications_config'].find().sort("created_at", -1):
+            async for doc in self._coll('notifications_config').find().sort("created_at", -1):
                 doc["_id"] = str(doc["_id"])
                 configs.append(doc)
             return {"data": configs, "error": None}
@@ -4135,7 +4207,7 @@ class DatabaseService:
         if self.db is None:
             return {"data": None, "error": "数据库未连接"}
         try:
-            doc = await self.db['notifications_config'].find_one({"config_id": config_id})
+            doc = await self._coll('notifications_config').find_one({"config_id": config_id})
             if doc:
                 doc["_id"] = str(doc["_id"])
             return {"data": doc, "error": None}
@@ -4154,7 +4226,7 @@ class DatabaseService:
         try:
             history_data["history_id"] = history_data.get("history_id") or uuid.uuid4().hex[:8]
             history_data["sent_at"] = datetime.now().isoformat()
-            await self.db['notifications_history'].insert_one(history_data)
+            await self._coll('notifications_history').insert_one(history_data)
             return history_data["history_id"]
         except Exception as e:
             logger.error(f"保存通知历史失败: {e}")
@@ -4171,9 +4243,9 @@ class DatabaseService:
                 query["config_id"] = config_id
             if status:
                 query["status"] = status
-            total = await self.db['notifications_history'].count_documents(query)
+            total = await self._coll('notifications_history').count_documents(query)
             items = []
-            async for doc in self.db['notifications_history'].find(query).sort("sent_at", -1).skip((page - 1) * size).limit(size):
+            async for doc in self._coll('notifications_history').find(query).sort("sent_at", -1).skip((page - 1) * size).limit(size):
                 doc["_id"] = str(doc["_id"])
                 items.append(doc)
             return {"data": items, "total": total, "page": page, "size": size, "error": None}
@@ -4294,7 +4366,7 @@ class DatabaseService:
                     {"$match": {"owner": owner, "repo": repo}},
                     {"$group": {"_id": "$user", "pr_count": {"$sum": 1}}},
                 ]
-                async for doc in self.db['pr_data'].aggregate(pipeline):
+                async for doc in self._coll('pr_data').aggregate(pipeline):
                     user = doc["_id"]
                     if not user or "[bot]" in (user or ""):
                         continue
