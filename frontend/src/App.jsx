@@ -20,6 +20,7 @@ import {
   HeatMapOutlined,
   CodeOutlined,
   SettingOutlined,
+  SwapOutlined,
 } from '@ant-design/icons'
 import Dashboard from './pages/Dashboard'
 import PrList from './pages/PrList'
@@ -41,7 +42,10 @@ import ProjectHealth from './pages/ProjectHealth'
 import TrendAlerts from './pages/TrendAlerts'
 import CodeHeatmap from './pages/CodeHeatmap'
 import CodeInsight from './pages/CodeInsight'
-import LlmConfig from './pages/LlmConfig'
+import Settings from './pages/Settings'
+import NotificationHistory from './pages/NotificationHistory'
+import DataExport from './pages/DataExport'
+import ProjectCompare from './pages/ProjectCompare'
 
 const { Header, Sider, Content } = Layout
 
@@ -62,21 +66,31 @@ const menuItems = [
   { key: 'code-heatmap', icon: <HeatMapOutlined />, label: '变更热力图' },
   { key: 'code-insight', icon: <CodeOutlined />, label: '变更洞察' },
   { key: 'agent-studio', icon: <RobotOutlined />, label: 'Agent 工作室' },
-  { key: 'llm-config', icon: <SettingOutlined />, label: 'AI 配置' },
+  { key: 'data-export', icon: <SettingOutlined />, label: '数据导出' },
+  { key: 'notification-history', icon: <BellOutlined />, label: '通知历史' },
+  { key: 'project-compare', icon: <SwapOutlined />, label: '多仓库对比' },
   { key: 'aggregate', icon: <BarChartOutlined />, label: '聚合统计' },
   { key: 'tasks', icon: <ThunderboltOutlined />, label: '任务监控' },
+  { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ]
 
+// 旧 key 映射到 settings 页面
+const SETTINGS_KEYS = new Set(['llm-config', 'notification-config', 'webhook-manager'])
+
 function App() {
-  const [page, setPage] = useState(() => localStorage.getItem('currentPage') || 'dashboard')
+  const [page, setPage] = useState(() => {
+    const saved = localStorage.getItem('currentPage') || 'dashboard'
+    return SETTINGS_KEYS.has(saved) ? 'settings' : saved
+  })
   const [prDataFilter, setPrDataFilter] = useState(null)
   const [userReposUsername, setUserReposUsername] = useState('')
   const visitedRef = useRef(new Set([localStorage.getItem('currentPage') || 'dashboard']))
 
   const navigate = (key, username, extra) => {
-    setPage(key)
-    localStorage.setItem('currentPage', key)
-    visitedRef.current.add(key)
+    const target = SETTINGS_KEYS.has(key) ? 'settings' : key
+    setPage(target)
+    localStorage.setItem('currentPage', target)
+    visitedRef.current.add(target)
     if (username) setUserReposUsername(username)
     if (extra && extra.owner && extra.repo) setPrDataFilter({ owner: extra.owner, repo: extra.repo })
   }
@@ -106,7 +120,10 @@ function App() {
     'code-heatmap': <CodeHeatmap />,
     'code-insight': <CodeInsight onNavigate={navigate} />,
     'agent-studio': <AgentStudio onNavigate={navigate} />,
-    'llm-config': <LlmConfig />,
+    'settings': <Settings />,
+    'data-export': <DataExport />,
+    'notification-history': <NotificationHistory />,
+    'project-compare': <ProjectCompare />,
     'tasks': <Tasks />,
     'user-repos': <UserRepos username={userReposUsername} onBack={() => setPage('profiles')} />,
     'aggregate': <Aggregate />,
