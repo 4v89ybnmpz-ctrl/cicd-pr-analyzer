@@ -68,6 +68,9 @@ data/
 # Scripts 目录（与 backend 同级）
 scripts/
 
+# 外部依赖项目
+external/
+
 # OS
 .DS_Store
 Thumbs.db

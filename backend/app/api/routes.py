@@ -20,6 +20,8 @@ from app.api.routers import (
     register_notification_routes,
     register_webhook_routes,
     register_compare_routes,
+    register_cannbot_routes,
+    register_terminal_routes,
 )
 from app.api.routers.async_tasks import register_async_task_routes
 from app.api.routers.git import register_git_routes
@@ -66,6 +68,12 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
 
     # 多仓库对比路由
     register_compare_routes(router, db)
+
+    # CANNBot Skills 路由
+    register_cannbot_routes(router)
+
+    # WebSocket 终端路由
+    register_terminal_routes(router)
 
     logger.info("所有路由注册完成")
     return router

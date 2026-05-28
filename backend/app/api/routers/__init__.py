@@ -14,6 +14,8 @@ from .export import register_export_routes
 from .notifications import register_notification_routes
 from .webhooks import register_webhook_routes
 from .compare import register_compare_routes
+from .cannbot_skills import register_cannbot_routes
+from .terminal import register_terminal_routes
 
 __all__ = [
     'register_base_routes',
@@ -30,4 +32,6 @@ __all__ = [
     'register_notification_routes',
     'register_webhook_routes',
     'register_compare_routes',
+    'register_cannbot_routes',
+    'register_terminal_routes',
 ]
