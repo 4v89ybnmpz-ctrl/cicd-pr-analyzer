@@ -66,6 +66,7 @@ import AtomGitPullFiles from './pages/atomgit/PullFiles'
 import AtomGitPullTimeline from './pages/atomgit/PullTimeline'
 import AtomGitIssueList from './pages/atomgit/IssueList'
 import AtomGitOverview from './pages/atomgit/Overview'
+import CannbotSkills from './pages/CannbotSkills'
 
 const { Header, Sider, Content } = Layout
 
@@ -152,6 +153,7 @@ const ATOMGIT_MENU = [
 
 // ==================== 跨平台共享菜单 ====================
 const SHARED_MENU = [
+  { key: 'cannbot-skills', icon: <RobotOutlined />, label: 'CANN 技能库' },
   { key: 'shared-system', icon: <ToolOutlined />, label: '系统管理',
     children: [
       { key: 'tasks', icon: <ThunderboltOutlined />, label: '任务监控' },
@@ -316,6 +318,7 @@ function App() {
     'tasks': <Tasks />,
     'data-export': <DataExport />,
     'notification-history': <NotificationHistory />,
+    'cannbot-skills': <CannbotSkills />,
   }
 
   // 合并当前平台页面 + 共享页面

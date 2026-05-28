@@ -322,4 +322,27 @@ export const getAtomGitIssues = (owner, repo, params) =>
 export const getAtomGitIssueDetail = (owner, repo, issueNumber) =>
   api.get(`/atomgit/issues/${owner}/${repo}/${issueNumber}`)
 
+// ====================
+// CANNBot Skills
+// ====================
+export const getCannbotStatus = () => api.get('/cannbot/status')
+export const getCannbotSkills = () => api.get('/cannbot/skills')
+export const getCannbotSkillDetail = (skillPath) =>
+  api.get(`/cannbot/skills/${skillPath}`)
+export const getCannbotSkillFile = (filePath) =>
+  api.get(`/cannbot/skill-file/${filePath}`)
+export const cloneCannbotSkills = () =>
+  api.post('/cannbot/clone', null, { timeout: 120000 })
+export const updateCannbotSkills = () =>
+  api.post('/cannbot/update', null, { timeout: 120000 })
+export const getCannbotStats = () => api.get('/cannbot/stats')
+export const getCannbotEvaluation = () =>
+  api.get('/cannbot/evaluation', { timeout: 120000 })
+export const getCannbotChangelog = () => api.get('/cannbot/changelog')
+export const getCannbotScenarios = () => api.get('/cannbot/scenarios')
+export const installCannbotScenario = (data) =>
+  api.post('/cannbot/install-scenario', data, { timeout: 120000 })
+export const checkCannbotInstall = (scenarioPath) =>
+  api.get(`/cannbot/install-check/${scenarioPath}`)
+
 export default api
