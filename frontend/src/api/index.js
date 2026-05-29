@@ -345,4 +345,29 @@ export const installCannbotScenario = (data) =>
 export const checkCannbotInstall = (scenarioPath) =>
   api.get(`/cannbot/install-check/${scenarioPath}`)
 
+// ====================
+// CANNBot Workflow Simulation
+// ====================
+export const getWorkflowDefinitions = () =>
+  api.get('/cannbot/workflow/definitions')
+export const getWorkflowDefinition = (pluginId) =>
+  api.get(`/cannbot/workflow/${pluginId}/definition`)
+export const simulateWorkflow = (data) =>
+  api.post('/cannbot/workflow/simulate', data, { timeout: 300000 })
+export const simulateWorkflowStream = (pluginId, persona) =>
+  // SSE 实时仿真流，返回 EventSource
+  new EventSource(`/api/cannbot/workflow/simulate-stream?plugin_id=${encodeURIComponent(pluginId)}&persona=${encodeURIComponent(persona)}`)
+export const simulateWorkflowBatch = () =>
+  api.post('/cannbot/workflow/simulate-batch', null, { timeout: 600000 })
+export const getWorkflowSimulation = (simId) =>
+  api.get(`/cannbot/workflow/simulation/${simId}`)
+export const getWorkflowSimulations = (params) =>
+  api.get('/cannbot/workflow/simulations', { params })
+export const getWorkflowComparison = () =>
+  api.get('/cannbot/workflow/comparison')
+export const getWorkflowAntipatterns = () =>
+  api.get('/cannbot/workflow/antipatterns')
+export const exportWorkflowReport = (data) =>
+  api.post('/cannbot/workflow/export', data, { responseType: 'blob', timeout: 60000 })
+
 export default api

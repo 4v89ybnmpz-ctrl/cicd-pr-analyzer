@@ -323,3 +323,327 @@ class ReportExporter:
                     os.remove(filepath)
         except Exception as e:
             logger.warning(f"清理导出文件失败: {e}")
+
+    # ==================== 工作流仿真报告导出 ====================
+
+    def export_simulation_pdf(self, summary: Dict[str, Any], step_results: List[Dict[str, Any]]) -> str:
+        """导出工作流仿真 PDF 报告"""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib.colors import HexColor
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+
+        self._cleanup_old_exports()
+
+        plugin_name = summary.get("plugin_name", "unknown")
+        sim_id = summary.get("simulation_id", "unknown")
+        filename = f"simulation_{plugin_name}_{sim_id}_{int(time.time())}.pdf"
+        filepath = os.path.join(EXPORT_DIR, filename)
+
+        doc = SimpleDocTemplate(
+            filepath, pagesize=A4,
+            leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+        )
+        styles = getSampleStyleSheet()
+
+        # 中文字体
+        try:
+            font_path = "/System/Library/Fonts/PingFang.ttc"
+            if os.path.exists(font_path):
+                pdfmetrics.registerFont(TTFont("PingFang", font_path))
+                cn_font = "PingFang"
+            else:
+                cn_font = "Helvetica"
+        except Exception:
+            cn_font = "Helvetica"
+
+        title_style = ParagraphStyle("SimTitle", parent=styles["Title"], fontName=cn_font, fontSize=18, spaceAfter=12)
+        heading_style = ParagraphStyle("SimH2", parent=styles["Heading2"], fontName=cn_font, fontSize=14, spaceAfter=8, textColor=HexColor("#1890ff"))
+        body_style = ParagraphStyle("SimBody", parent=styles["Normal"], fontName=cn_font, fontSize=10, spaceAfter=6)
+        small_style = ParagraphStyle("SimSmall", parent=styles["Normal"], fontName=cn_font, fontSize=8, spaceAfter=4, textColor=HexColor("#666666"))
+
+        story = []
+
+        # (a) 报告头部
+        story.append(Paragraph(f"工作流仿真报告 — {plugin_name}", title_style))
+        meta_text = (
+            f"角色: {summary.get('persona', 'N/A')} | "
+            f"仿真 ID: {sim_id} | "
+            f"时间: {summary.get('compared_at', 'N/A')}"
+        )
+        story.append(Paragraph(meta_text, body_style))
+        story.append(Spacer(1, 12))
+
+        # (b) 统计概览
+        story.append(Paragraph("统计概览", heading_style))
+        total_skills = sum(
+            len(s.get("skills_used", [])) + len(s.get("skills_missing", []))
+            for s in step_results
+        )
+        used_skills = sum(len(s.get("skills_used", [])) for s in step_results)
+        coverage = f"{round(used_skills / total_skills * 100)}%" if total_skills > 0 else "N/A"
+
+        stats_data = [
+            ["总通过率", f"{round(summary.get('overall_pass_rate', 0) * 100)}%"],
+            ["断点总数", str(summary.get("total_breakpoints", 0))],
+            ["CRITICAL 断点", str(summary.get("critical_breakpoints", 0))],
+            ["Skill 覆盖率", coverage],
+            ["匹配反模式", str(len(summary.get("antipatterns_matched", [])))],
+            ["Token 消耗", str(summary.get("total_tokens", 0))],
+            ["预估成本", f"${summary.get('estimated_cost_usd', 0)}"],
+            ["步骤数", str(len(step_results))],
+        ]
+        stats_table = Table(stats_data, colWidths=[6 * cm, 10 * cm])
+        stats_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), cn_font),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("BACKGROUND", (0, 0), (0, -1), HexColor("#f0f5ff")),
+            ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#e8e8e8")),
+        ]))
+        story.append(stats_table)
+        story.append(Spacer(1, 16))
+
+        # (c) 断点列表
+        all_breakpoints = []
+        for s in step_results:
+            for bp in s.get("breakpoints", []):
+                all_breakpoints.append({**bp, "step_name": s.get("step_name", "")})
+
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        all_breakpoints.sort(key=lambda b: severity_order.get(b.get("severity", "LOW"), 9))
+
+        if all_breakpoints:
+            story.append(Paragraph("断点列表", heading_style))
+            bp_header = ["步骤", "严重性", "类别", "描述", "建议"]
+            bp_rows = [bp_header]
+            for bp in all_breakpoints[:50]:
+                desc = (bp.get("description", "") or "")[:80]
+                rec = (bp.get("recommendation", "") or "")[:60]
+                bp_rows.append([
+                    bp.get("step_name", ""),
+                    bp.get("severity", ""),
+                    bp.get("category", ""),
+                    desc,
+                    rec,
+                ])
+            bp_table = Table(bp_rows, colWidths=[2.5 * cm, 2 * cm, 3 * cm, 5 * cm, 3.5 * cm])
+            bp_style = [
+                ("FONTNAME", (0, 0), (-1, -1), cn_font),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("BACKGROUND", (0, 0), (-1, 0), HexColor("#1890ff")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#ffffff")),
+                ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#e8e8e8")),
+            ]
+            for idx, bp in enumerate(all_breakpoints[:50], 1):
+                sev = bp.get("severity", "")
+                if sev == "CRITICAL":
+                    bp_style.append(("BACKGROUND", (0, idx), (-1, idx), HexColor("#fff1f0")))
+                elif sev == "HIGH":
+                    bp_style.append(("BACKGROUND", (0, idx), (-1, idx), HexColor("#fff7e6")))
+            bp_table.setStyle(TableStyle(bp_style))
+            story.append(bp_table)
+            story.append(Spacer(1, 16))
+
+        # (d) 分步详情
+        story.append(Paragraph("分步详情", heading_style))
+        for s in step_results:
+            pass_pct = round(s.get("simulated_pass_rate", 0) * 100)
+            story.append(Paragraph(
+                f"{s.get('step_name', '')} (通过率: {pass_pct}%)",
+                ParagraphStyle("StepH", parent=styles["Heading3"], fontName=cn_font, fontSize=11, textColor=HexColor("#333333")),
+            ))
+
+            if s.get("skills_used"):
+                story.append(Paragraph(f"Skills Used: {', '.join(s['skills_used'])}", small_style))
+            if s.get("skills_missing"):
+                story.append(Paragraph(f"Skills Missing: {', '.join(s['skills_missing'])}", small_style))
+
+            for bp in s.get("breakpoints", []):
+                sev_color = "#f5222d" if bp.get("severity") == "CRITICAL" else "#fa8c16" if bp.get("severity") == "HIGH" else "#faad14"
+                story.append(Paragraph(
+                    f"<font color='{sev_color}'>[{bp.get('severity', '')}]</font> "
+                    f"<font color='#999999'>[{bp.get('category', '')}]</font> "
+                    f"{bp.get('description', '')}",
+                    small_style,
+                ))
+
+            llm_summary = (s.get("llm_response_summary", "") or "")[:200]
+            if llm_summary:
+                story.append(Paragraph(f"LLM: {llm_summary}", small_style))
+            story.append(Spacer(1, 8))
+
+        # (e) Skill 热力图
+        heatmap = summary.get("skill_heatmap", {})
+        if heatmap:
+            story.append(PageBreak())
+            story.append(Paragraph("Skill 利用热力图", heading_style))
+            # 收集所有 skill 名称
+            all_skills = sorted(set(sk for step_heat in heatmap.values() for sk in step_heat.keys()))
+            step_names = []
+            for s in step_results:
+                sid = s.get("step_id", "")
+                if sid in heatmap:
+                    step_names.append(s.get("step_name", sid))
+
+            hm_header = ["Skill"] + step_names
+            hm_rows = [hm_header]
+            for skill in all_skills:
+                row = [skill]
+                for s in step_results:
+                    sid = s.get("step_id", "")
+                    val = heatmap.get(sid, {}).get(skill, 0)
+                    row.append(f"{round(val * 100)}%" if val > 0 else "-")
+                hm_rows.append(row)
+
+            col_w = min(3 * cm, 16 * cm / max(len(hm_header), 1))
+            hm_table = Table(hm_rows, colWidths=[4 * cm] + [col_w] * len(step_names))
+            hm_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), cn_font),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0), HexColor("#1890ff")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#ffffff")),
+                ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#e8e8e8")),
+            ]))
+            story.append(hm_table)
+            story.append(Spacer(1, 16))
+
+        # (f) 匹配反模式
+        antipatterns = summary.get("antipatterns_matched", [])
+        if antipatterns:
+            story.append(Paragraph("匹配的反模式", heading_style))
+            for ap in antipatterns:
+                sev = ap.get("severity", "")
+                sev_color = "#f5222d" if sev == "CRITICAL" else "#fa8c16" if sev == "HIGH" else "#faad14"
+                suscept = round(ap.get("susceptibility", 0) * 100)
+                story.append(Paragraph(
+                    f"<font color='{sev_color}'>[{sev}]</font> {ap.get('name', '')} — 易感性: {suscept}%",
+                    body_style,
+                ))
+                if ap.get("mitigation"):
+                    story.append(Paragraph(f"建议: {ap['mitigation']}", small_style))
+                story.append(Spacer(1, 4))
+
+        doc.build(story)
+        logger.info(f"仿真 PDF 导出完成: {filename}")
+        return filepath
+
+    def export_simulation_markdown(self, summary: Dict[str, Any], step_results: List[Dict[str, Any]]) -> str:
+        """导出工作流仿真 Markdown 报告"""
+        self._cleanup_old_exports()
+
+        plugin_name = summary.get("plugin_name", "unknown")
+        sim_id = summary.get("simulation_id", "unknown")
+
+        lines = []
+        lines.append(f"# 工作流仿真报告 — {plugin_name}\n")
+
+        # 基本信息
+        lines.append("## 基本信息\n")
+        lines.append("| 字段 | 值 |")
+        lines.append("|------|-----|")
+        lines.append(f"| 插件 | {plugin_name} |")
+        lines.append(f"| 角色 | {summary.get('persona', 'N/A')} |")
+        lines.append(f"| 仿真 ID | {sim_id} |")
+        lines.append(f"| 时间 | {summary.get('compared_at', 'N/A')} |")
+        lines.append("")
+
+        # 统计概览
+        total_skills = sum(
+            len(s.get("skills_used", [])) + len(s.get("skills_missing", []))
+            for s in step_results
+        )
+        used_skills = sum(len(s.get("skills_used", [])) for s in step_results)
+        coverage = f"{round(used_skills / total_skills * 100)}%" if total_skills > 0 else "N/A"
+
+        lines.append("## 统计概览\n")
+        lines.append("| 指标 | 值 |")
+        lines.append("|------|-----|")
+        lines.append(f"| 总通过率 | {round(summary.get('overall_pass_rate', 0) * 100)}% |")
+        lines.append(f"| 断点总数 | {summary.get('total_breakpoints', 0)} |")
+        lines.append(f"| CRITICAL 断点 | {summary.get('critical_breakpoints', 0)} |")
+        lines.append(f"| Skill 覆盖率 | {coverage} |")
+        lines.append(f"| 匹配反模式 | {len(summary.get('antipatterns_matched', []))} |")
+        lines.append(f"| Token 消耗 | {summary.get('total_tokens', 0):,} |")
+        lines.append(f"| 预估成本 | ${summary.get('estimated_cost_usd', 0)} |")
+        lines.append("")
+
+        # 断点列表
+        all_breakpoints = []
+        for s in step_results:
+            for bp in s.get("breakpoints", []):
+                all_breakpoints.append({**bp, "step_name": s.get("step_name", "")})
+
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        all_breakpoints.sort(key=lambda b: severity_order.get(b.get("severity", "LOW"), 9))
+
+        if all_breakpoints:
+            lines.append("## 断点列表\n")
+            lines.append("| 步骤 | 严重性 | 类别 | 描述 | 建议 |")
+            lines.append("|------|--------|------|------|------|")
+            for bp in all_breakpoints:
+                desc = bp.get("description", "").replace("|", "\\|")[:80]
+                rec = bp.get("recommendation", "").replace("|", "\\|")[:60]
+                lines.append(f"| {bp.get('step_name', '')} | **{bp.get('severity', '')}** | {bp.get('category', '')} | {desc} | {rec} |")
+            lines.append("")
+
+        # 步骤详情
+        lines.append("## 步骤详情\n")
+        for s in step_results:
+            pass_pct = round(s.get("simulated_pass_rate", 0) * 100)
+            lines.append(f"### {s.get('step_name', '')} (通过率: {pass_pct}%)\n")
+
+            if s.get("skills_used"):
+                lines.append(f"- **Skills Used**: {', '.join(s['skills_used'])}")
+            if s.get("skills_missing"):
+                lines.append(f"- **Skills Missing**: {', '.join(s['skills_missing'])}")
+
+            for bp in s.get("breakpoints", []):
+                lines.append(f"- [{bp.get('severity', '')}] [{bp.get('category', '')}] {bp.get('description', '')}")
+                if bp.get("recommendation"):
+                    lines.append(f"  - 建议: {bp['recommendation']}")
+
+            llm_summary = (s.get("llm_response_summary", "") or "")[:300]
+            if llm_summary:
+                lines.append(f"\n> LLM 回复: {llm_summary}\n")
+            lines.append("")
+
+        # Skill 热力图
+        heatmap = summary.get("skill_heatmap", {})
+        if heatmap:
+            lines.append("## Skill 利用热力图\n")
+            all_skills = sorted(set(sk for step_heat in heatmap.values() for sk in step_heat.keys()))
+            step_header = ["Skill"] + [s.get("step_name", s.get("step_id", "")) for s in step_results if s.get("step_id", "") in heatmap]
+            lines.append("| " + " | ".join(step_header) + " |")
+            lines.append("| " + " | ".join(["------"] * len(step_header)) + " |")
+            for skill in all_skills:
+                vals = [skill]
+                for s in step_results:
+                    sid = s.get("step_id", "")
+                    val = heatmap.get(sid, {}).get(skill, 0)
+                    vals.append(f"{round(val * 100)}%" if val > 0 else "-")
+                lines.append("| " + " | ".join(vals) + " |")
+            lines.append("")
+
+        # 匹配反模式
+        antipatterns = summary.get("antipatterns_matched", [])
+        if antipatterns:
+            lines.append("## 匹配的反模式\n")
+            for ap in antipatterns:
+                suscept = round(ap.get("susceptibility", 0) * 100)
+                lines.append(f"### {ap.get('name', '')} [{ap.get('severity', '')}]\n")
+                lines.append(f"- 易感性: {suscept}%")
+                if ap.get("mitigation"):
+                    lines.append(f"- 建议: {ap['mitigation']}")
+                lines.append("")
+
+        # 写入文件
+        filename = f"simulation_{plugin_name}_{sim_id}_{int(time.time())}.md"
+        filepath = os.path.join(EXPORT_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        logger.info(f"仿真 Markdown 导出完成: {filename}")
+        return filepath

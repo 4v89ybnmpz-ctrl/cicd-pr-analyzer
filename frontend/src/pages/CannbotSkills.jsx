@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Card, Tag, Row, Col, Button, Spin, Empty, Drawer, Typography, Space,
   Input, message, Tooltip, Statistic, Progress, Tabs, Segmented, Timeline,
+  Select, Dropdown,
 } from 'antd'
 import {
   SyncOutlined, DownloadOutlined, FolderOutlined, FileTextOutlined,
@@ -9,7 +10,8 @@ import {
   InfoCircleOutlined,
   CloudOutlined, AppstoreOutlined, DashboardOutlined, AuditOutlined,
   ToolOutlined, RocketOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  StarOutlined,
+  StarOutlined, ExperimentOutlined, FilePdfOutlined, FileMarkdownOutlined,
+  DownOutlined,
 } from '@ant-design/icons'
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip,
@@ -20,7 +22,12 @@ import {
   getCannbotSkillFile, cloneCannbotSkills, updateCannbotSkills,
   getCannbotStats, getCannbotEvaluation, getCannbotChangelog,
   getCannbotScenarios, installCannbotScenario, checkCannbotInstall,
+  getWorkflowDefinitions, simulateWorkflowStream, exportWorkflowReport,
+  getWorkflowSimulations, getWorkflowSimulation,
 } from '../api'
+import WorkflowSimPanel from '../components/WorkflowSimPanel'
+import BreakpointTimeline from '../components/BreakpointTimeline'
+import SkillHeatmapChart from '../components/SkillHeatmapChart'
 
 const { Title, Text, Paragraph } = Typography
 const { Search } = Input
@@ -231,6 +238,11 @@ export default function CannbotSkills() {
           key: 'test',
           label: <span><ThunderboltOutlined /> Skill 测试</span>,
           children: <TestTab scenarios={scenarios} />,
+        },
+        {
+          key: 'workflow-sim',
+          label: <span><ExperimentOutlined /> 工作流仿真</span>,
+          children: <WorkflowSimTab />,
         },
       ]} />
 
@@ -1267,6 +1279,536 @@ function EmbeddedTerminal({ cwd, tool, examplePrompt }) {
             style={{ height: 420, background: '#1e1e1e', borderRadius: 6, padding: 4, overflow: 'hidden' }}
           />
         </div>
+      )}
+    </div>
+  )
+}
+
+// ==================== 工作流仿真 Tab ====================
+
+function WorkflowSimTab() {
+  const [definitions, setDefinitions] = useState([])
+  const [selectedPlugin, setSelectedPlugin] = useState(null)
+  const [persona, setPersona] = useState('intermediate')
+  const [stepResults, setStepResults] = useState([])        // 逐步累积的步骤结果
+  const [summary, setSummary] = useState(null)              // 最终汇总
+  const [selectedStepId, setSelectedStepId] = useState(null)
+  const [simulating, setSimulating] = useState(false)
+  const [currentStepInfo, setCurrentStepInfo] = useState(null) // 当前正在执行的步骤
+  const [totalSteps, setTotalSteps] = useState(0)
+  const [defsLoading, setDefsLoading] = useState(false)
+  const [logs, setLogs] = useState([])                      // 实时日志
+  const [exporting, setExporting] = useState(false)
+  const [historyList, setHistoryList] = useState([])          // 历史仿真列表
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyDetailLoading, setHistoryDetailLoading] = useState(false)
+  const esRef = useRef(null)
+
+  // 加载工作流定义列表
+  useEffect(() => {
+    setDefsLoading(true)
+    getWorkflowDefinitions()
+      .then(res => setDefinitions(res.data?.plugins || []))
+      .catch(() => {})
+      .finally(() => setDefsLoading(false))
+  }, [])
+
+  // 清理 SSE 连接
+  useEffect(() => {
+    return () => { if (esRef.current) esRef.current.close() }
+  }, [])
+
+  // 加载历史仿真列表
+  const loadHistory = useCallback(() => {
+    setHistoryLoading(true)
+    getWorkflowSimulations({ limit: 30 })
+      .then(res => setHistoryList(res.data?.simulations || []))
+      .catch(() => {})
+      .finally(() => setHistoryLoading(false))
+  }, [])
+
+  useEffect(() => { loadHistory() }, [loadHistory])
+
+  // 加载历史仿真详情
+  const loadHistoryDetail = useCallback(async (simId) => {
+    setHistoryDetailLoading(true)
+    try {
+      const res = await getWorkflowSimulation(simId)
+      const data = res.data
+      setStepResults(data.steps || [])
+      setSummary(data)
+      setSelectedStepId(null)
+      setSimulating(false)
+      setCurrentStepInfo(null)
+      setLogs([])
+      message.success('历史仿真加载成功')
+    } catch (e) {
+      message.error('加载失败: ' + (e._friendlyMsg || e.message))
+    } finally {
+      setHistoryDetailLoading(false)
+    }
+  }, [])
+
+  const addLog = useCallback((type, text) => {
+    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, text }])
+  }, [])
+
+  // 启动 SSE 实时仿真
+  const handleSimulate = useCallback(() => {
+    if (!selectedPlugin) { message.warning('请先选择插件'); return }
+
+    // 重置状态
+    setStepResults([])
+    setSummary(null)
+    setSelectedStepId(null)
+    setCurrentStepInfo(null)
+    setLogs([])
+    setSimulating(true)
+
+    // 关闭旧连接
+    if (esRef.current) esRef.current.close()
+
+    const es = simulateWorkflowStream(selectedPlugin, persona)
+    esRef.current = es
+
+    es.addEventListener('start', (e) => {
+      const data = JSON.parse(e.data)
+      setTotalSteps(data.total_steps)
+      addLog('info', `开始仿真: ${data.plugin_name} (${data.total_steps} 步, 角色: ${data.persona})`)
+    })
+
+    es.addEventListener('step_start', (e) => {
+      const data = JSON.parse(e.data)
+      setCurrentStepInfo(data)
+      setSelectedStepId(data.step_id)
+      addLog('info', `[${data.step_index + 1}/${data.total}] 仿真 ${data.step_name}...`)
+    })
+
+    es.addEventListener('step_done', (e) => {
+      const stepData = JSON.parse(e.data)
+      setStepResults(prev => [...prev, stepData])
+      setSelectedStepId(stepData.step_id)
+
+      const bpCount = stepData.breakpoints?.length || 0
+      const passPct = Math.round((stepData.simulated_pass_rate || 0) * 100)
+      if (bpCount > 0) {
+        const critical = stepData.breakpoints.filter(b => b.severity === 'CRITICAL').length
+        addLog('warn', `${stepData.step_name} 完成 — 通过率 ${passPct}%, ${bpCount} 个断点${critical > 0 ? ` (${critical} CRITICAL)` : ''}`)
+      } else {
+        addLog('success', `${stepData.step_name} 完成 — 通过率 ${passPct}%`)
+      }
+    })
+
+    es.addEventListener('summary', (e) => {
+      const data = JSON.parse(e.data)
+      setSummary(data)
+      setSimulating(false)
+      setCurrentStepInfo(null)
+      addLog('info', `仿真完成 — 总通过率 ${Math.round(data.overall_pass_rate * 100)}%, ${data.total_breakpoints} 个断点, Token: ${data.total_tokens?.toLocaleString()}`)
+      message.success('仿真完成')
+      loadHistory()
+      es.close()
+    })
+
+    es.addEventListener('error', (e) => {
+      // SSE error event or connection error
+      if (e.data) {
+        try {
+          const data = JSON.parse(e.data)
+          addLog('error', `错误: ${data.error}`)
+          message.error(data.error)
+        } catch { /* ignore */ }
+      }
+      setSimulating(false)
+      setCurrentStepInfo(null)
+      es.close()
+    })
+
+    es.onerror = () => {
+      if (simulating) {
+        addLog('error', '连接断开')
+        message.error('仿真连接断开')
+      }
+      setSimulating(false)
+      setCurrentStepInfo(null)
+    }
+  }, [selectedPlugin, persona, addLog, simulating])
+
+  // 导出报告
+  const handleExport = useCallback(async (format) => {
+    if (!summary || stepResults.length === 0) {
+      message.warning('请先完成仿真后再导出')
+      return
+    }
+    setExporting(true)
+    try {
+      const res = await exportWorkflowReport({
+        format,
+        summary,
+        step_results: stepResults,
+      })
+      const ext = format === 'pdf' ? 'pdf' : 'md'
+      const filename = `simulation_${summary.plugin_name || 'report'}_${summary.simulation_id || Date.now()}.${ext}`
+      const url = URL.createObjectURL(res.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      message.success('报告导出成功')
+    } catch (e) {
+      message.error(`导出失败: ${e._friendlyMsg || e.message}`)
+    } finally {
+      setExporting(false)
+    }
+  }, [summary, stepResults])
+
+  // 所有断点汇总
+  const allBreakpoints = stepResults.flatMap(s => s.breakpoints || [])
+  const skillCoverage = (() => {
+    let total = 0, used = 0
+    stepResults.forEach(s => {
+      total += (s.skills_missing?.length || 0) + (s.skills_used?.length || 0)
+      used += s.skills_used?.length || 0
+    })
+    return total > 0 ? Math.round(used / total * 100) : 0
+  })()
+
+  // 选中的步骤详情
+  const selectedStep = stepResults.find(s => s.step_id === selectedStepId)
+  const doneCount = stepResults.length
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* 控制栏 */}
+      <Card size="small">
+        <Row gutter={12} align="middle">
+          <Col>
+            <Text strong>插件:</Text>
+            <Select
+              style={{ width: 240, marginLeft: 8 }}
+              placeholder="选择插件"
+              loading={defsLoading}
+              value={selectedPlugin}
+              onChange={setSelectedPlugin}
+              options={definitions.map(d => ({
+                value: d.plugin_id,
+                label: `${d.plugin_name} (${d.steps_count} 步)`,
+              }))}
+            />
+          </Col>
+          <Col>
+            <Text strong>角色:</Text>
+            <Segmented
+              style={{ marginLeft: 8 }}
+              value={persona}
+              onChange={setPersona}
+              options={[
+                { label: '新手', value: 'novice' },
+                { label: '中级', value: 'intermediate' },
+                { label: '资深', value: 'experienced' },
+              ]}
+            />
+          </Col>
+          <Col>
+            <Button
+              type="primary"
+              icon={<ExperimentOutlined />}
+              loading={simulating}
+              onClick={handleSimulate}
+              disabled={!selectedPlugin}
+            >
+              {simulating ? '仿真中...' : '启动仿真'}
+            </Button>
+          </Col>
+          {simulating && totalSteps > 0 && (
+            <Col span={6}>
+              <Progress
+                percent={Math.round(doneCount / totalSteps * 100)}
+                size="small"
+                format={() => `${doneCount}/${totalSteps} 步`}
+              />
+            </Col>
+          )}
+          {summary && (
+            <Col>
+              <Tag color="blue">Token: {summary.total_tokens?.toLocaleString()}</Tag>
+              <Tag color="green">成本: ${summary.estimated_cost_usd}</Tag>
+            </Col>
+          )}
+          {summary && (
+            <Col>
+              <Dropdown menu={{
+                items: [
+                  { key: 'pdf', label: '导出 PDF', icon: <FilePdfOutlined /> },
+                  { key: 'markdown', label: '导出 Markdown', icon: <FileMarkdownOutlined /> },
+                ],
+                onClick: ({ key }) => handleExport(key),
+              }}>
+                <Button icon={<DownloadOutlined />} loading={exporting}>
+                  导出报告 <DownOutlined />
+                </Button>
+              </Dropdown>
+            </Col>
+          )}
+        </Row>
+      </Card>
+
+      {/* 实时仿真过程 */}
+      {(simulating || stepResults.length > 0) && (
+        <Card
+          title={
+            <span>
+              <ExperimentOutlined style={{ marginRight: 8 }} />
+              仿真过程 {simulating && <Spin size="small" style={{ marginLeft: 8 }} />}
+            </span>
+          }
+          size="small"
+        >
+          {/* DAG 图 */}
+          {stepResults.length > 0 && (
+            <WorkflowSimPanel
+              steps={stepResults}
+              selectedStepId={selectedStepId}
+              onStepClick={setSelectedStepId}
+            />
+          )}
+
+          {/* 当前步骤指示 */}
+          {simulating && currentStepInfo && (
+            <div style={{ marginTop: 12, padding: '8px 12px', background: '#e6f7ff', borderRadius: 6, borderLeft: '3px solid #1890ff' }}>
+              <Spin size="small" style={{ marginRight: 8 }} />
+              <Text strong>正在仿真: {currentStepInfo.step_name}</Text>
+              <Text type="secondary" style={{ marginLeft: 8 }}>
+                ({currentStepInfo.step_index + 1}/{currentStepInfo.total})
+              </Text>
+            </div>
+          )}
+
+          {/* 选中步骤的详情 */}
+          {selectedStep && (
+            <div style={{ marginTop: 12, padding: 12, background: '#fafafa', borderRadius: 6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text strong style={{ fontSize: 14 }}>{selectedStep.step_name}</Text>
+                <Tag color={selectedStep.simulated_pass_rate >= 0.7 ? 'success' : 'error'}>
+                  通过率 {Math.round((selectedStep.simulated_pass_rate || 0) * 100)}%
+                </Tag>
+              </div>
+              <Progress
+                percent={Math.round((selectedStep.simulated_pass_rate || 0) * 100)}
+                size="small"
+                strokeColor={selectedStep.simulated_pass_rate >= 0.7 ? '#52c41a' : '#ff4d4f'}
+                style={{ marginBottom: 10 }}
+              />
+              {selectedStep.skills_used?.length > 0 && (
+                <div style={{ marginBottom: 6 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>使用 Skills: </Text>
+                  {selectedStep.skills_used.map(s => (
+                    <Tag key={s} color="green" style={{ fontSize: 11 }}>{s}</Tag>
+                  ))}
+                </div>
+              )}
+              {selectedStep.skills_missing?.length > 0 && (
+                <div style={{ marginBottom: 6 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>缺失 Skills: </Text>
+                  {selectedStep.skills_missing.map(s => (
+                    <Tag key={s} color="red" style={{ fontSize: 11 }}>{s}</Tag>
+                  ))}
+                </div>
+              )}
+              {selectedStep.breakpoints?.length > 0 && (
+                <div style={{ marginBottom: 6 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>断点 ({selectedStep.breakpoints.length}):</Text>
+                  {selectedStep.breakpoints.map((bp, i) => (
+                    <div key={i} style={{ marginLeft: 8, marginTop: 4, fontSize: 12 }}>
+                      <Tag color={bp.severity === 'CRITICAL' ? 'error' : bp.severity === 'HIGH' ? 'warning' : ''} style={{ fontSize: 10 }}>
+                        {bp.severity}
+                      </Tag>
+                      <Tag style={{ fontSize: 10 }}>{bp.category}</Tag>
+                      <span>{bp.description}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {selectedStep.llm_response_summary && (
+                <div style={{ marginTop: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>LLM 回复:</Text>
+                  <Paragraph
+                    type="secondary"
+                    ellipsis={{ rows: 4, expandable: true, symbol: '展开全部' }}
+                    style={{ fontSize: 12, marginTop: 4, background: '#fff', padding: 8, borderRadius: 4, border: '1px solid #e8e8e8' }}
+                  >
+                    {selectedStep.llm_response_summary}
+                  </Paragraph>
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* 实时日志 */}
+      {(simulating || logs.length > 0) && (
+        <Card title="仿真日志" size="small">
+          <div style={{ maxHeight: 200, overflowY: 'auto', background: '#1e1e1e', borderRadius: 6, padding: 8, fontFamily: 'monospace', fontSize: 12 }}>
+            {logs.map((log, i) => (
+              <div key={i} style={{ marginBottom: 2 }}>
+                <span style={{ color: '#888' }}>[{log.time}]</span>{' '}
+                <span style={{ color: log.type === 'error' ? '#ff4d4f' : log.type === 'warn' ? '#faad14' : log.type === 'success' ? '#52c41a' : '#1890ff' }}>
+                  {log.text}
+                </span>
+              </div>
+            ))}
+            {simulating && (
+              <div style={{ color: '#888' }}>
+                <Spin size="small" style={{ marginRight: 4 }} />等待下一步...
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* 统计卡片 (完成后) */}
+      {summary && (
+        <Row gutter={12}>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="总体通过率"
+                value={Math.round(summary.overall_pass_rate * 100)}
+                suffix="%"
+                valueStyle={{ color: summary.overall_pass_rate >= 0.7 ? '#52c41a' : '#ff4d4f' }}
+              />
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="断点总数"
+                value={summary.total_breakpoints}
+                suffix={`(${summary.critical_breakpoints} CRITICAL)`}
+                valueStyle={{ color: summary.total_breakpoints > 0 ? '#fa541c' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic title="Skill 覆盖率" value={skillCoverage} suffix="%" />
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="匹配反模式"
+                value={summary.antipatterns_matched?.length || 0}
+                valueStyle={{ color: '#722ed1' }}
+              />
+            </Card>
+          </Col>
+        </Row>
+      )}
+
+      {/* 断点时间线 */}
+      {allBreakpoints.length > 0 && (
+        <Card title={`断点列表 (${allBreakpoints.length})`} size="small">
+          <BreakpointTimeline breakpoints={allBreakpoints} maxHeight={300} />
+        </Card>
+      )}
+
+      {/* Skill 热力图 */}
+      {summary?.skill_heatmap && Object.keys(summary.skill_heatmap).length > 0 && (
+        <Card title="Skill 利用热力图" size="small">
+          <SkillHeatmapChart heatmap={summary.skill_heatmap} steps={stepResults} />
+        </Card>
+      )}
+
+      {/* 反模式匹配 */}
+      {summary?.antipatterns_matched?.length > 0 && (
+        <Card title="匹配的反模式" size="small">
+          {summary.antipatterns_matched.map((ap, i) => (
+            <div key={i} style={{
+              marginBottom: 8, padding: '8px 12px',
+              background: '#fffbe6', borderLeft: `3px solid ${ap.severity === 'CRITICAL' ? '#ff4d4f' : ap.severity === 'HIGH' ? '#fa541c' : '#faad14'}`,
+              borderRadius: 4,
+            }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <Tag color={ap.severity === 'CRITICAL' ? 'error' : 'warning'}>{ap.severity}</Tag>
+                <Text strong>{ap.name}</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>易感性: {Math.round(ap.susceptibility * 100)}%</Text>
+              </div>
+              <Text type="secondary" style={{ fontSize: 12 }}>{ap.mitigation}</Text>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* 历史仿真记录 */}
+      {historyList.length > 0 && (
+        <Card
+          title={
+            <span>
+              <ClockCircleOutlined style={{ marginRight: 8 }} />
+              历史仿真记录
+              <Button type="link" size="small" onClick={loadHistory} loading={historyLoading} style={{ marginLeft: 8 }}>刷新</Button>
+            </span>
+          }
+          size="small"
+        >
+          <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+            {historyList.map((sim) => {
+              const passPct = Math.round((sim.overall_pass_rate || 0) * 100)
+              const passColor = passPct >= 70 ? '#52c41a' : passPct >= 50 ? '#faad14' : '#ff4d4f'
+              return (
+                <div
+                  key={sim.simulation_id}
+                  onClick={() => loadHistoryDetail(sim.simulation_id)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '8px 12px', marginBottom: 4, borderRadius: 6,
+                    background: summary?.simulation_id === sim.simulation_id ? '#e6f7ff' : '#fafafa',
+                    borderLeft: `3px solid ${passColor}`,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Text strong ellipsis style={{ fontSize: 13 }}>{sim.plugin_name}</Text>
+                      <Tag style={{ fontSize: 11 }}>{sim.persona}</Tag>
+                      {sim.critical_breakpoints > 0 && (
+                        <Tag color="error" style={{ fontSize: 10 }}>{sim.critical_breakpoints} CRITICAL</Tag>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
+                      {sim.compared_at ? new Date(sim.compared_at).toLocaleString() : ''} · {sim.steps_count} 步 · Token {sim.total_tokens?.toLocaleString()}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 16, fontWeight: 600, color: passColor }}>{passPct}%</div>
+                    <div style={{ fontSize: 10, color: '#999' }}>通过率</div>
+                  </div>
+                  <Button
+                    type="link" size="small" loading={historyDetailLoading}
+                    onClick={(e) => { e.stopPropagation(); loadHistoryDetail(sim.simulation_id) }}
+                  >
+                    查看
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+        </Card>
+      )}
+
+      {/* 空状态 */}
+      {!simulating && stepResults.length === 0 && (
+        <Card>
+          <Empty
+            description="选择插件和角色后点击「启动仿真」，LLM 将实时模拟开发者走完整个工作流"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        </Card>
       )}
     </div>
   )
