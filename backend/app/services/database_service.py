@@ -4392,3 +4392,60 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"贡献者重叠分析失败: {e}")
             return {"contributors": [], "error": str(e)}
+
+    # ==================== 工作流仿真 ====================
+
+    async def save_workflow_simulation(self, result: dict) -> bool:
+        """保存仿真结果"""
+        if self.db is None:
+            return False
+        try:
+            await self.db["workflow_simulations"].update_one(
+                {"simulation_id": result.get("simulation_id")},
+                {"$set": result},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"保存工作流仿真失败: {e}")
+            return False
+
+    async def get_workflow_simulations(self, plugin_id: str = None,
+                                        limit: int = 20) -> list:
+        """查询仿真历史"""
+        if self.db is None:
+            return []
+        try:
+            query = {"plugin_id": plugin_id} if plugin_id else {}
+            cursor = self.db["workflow_simulations"].find(
+                query, {"_id": 0}
+            ).sort("compared_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"查询工作流仿真失败: {e}")
+            return []
+
+    async def get_latest_simulation(self, plugin_id: str) -> Optional[dict]:
+        """获取最新仿真"""
+        if self.db is None:
+            return None
+        try:
+            return await self.db["workflow_simulations"].find_one(
+                {"plugin_id": plugin_id}, {"_id": 0},
+                sort=[("compared_at", -1)],
+            )
+        except Exception as e:
+            logger.error(f"查询最新仿真失败: {e}")
+            return None
+
+    async def get_simulation_by_id(self, simulation_id: str) -> Optional[dict]:
+        """按 simulation_id 获取仿真结果"""
+        if self.db is None:
+            return None
+        try:
+            return await self.db["workflow_simulations"].find_one(
+                {"simulation_id": simulation_id}, {"_id": 0},
+            )
+        except Exception as e:
+            logger.error(f"查询仿真结果失败 [{simulation_id}]: {e}")
+            return None
