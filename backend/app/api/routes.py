@@ -23,6 +23,7 @@ from app.api.routers import (
     register_cannbot_routes,
     register_terminal_routes,
     register_workflow_simulation_routes,
+    register_ops_dev_session_routes,
 )
 from app.api.routers.async_tasks import register_async_task_routes
 from app.api.routers.git import register_git_routes
@@ -78,6 +79,9 @@ def create_router(cache, github_service, db, config_manager, gitcode_service=Non
 
     # 工作流仿真路由
     register_workflow_simulation_routes(router, db, exporter)
+
+    # 算子辅助开发 V2 路由
+    register_ops_dev_session_routes(router, db)
 
     logger.info("所有路由注册完成")
     return router

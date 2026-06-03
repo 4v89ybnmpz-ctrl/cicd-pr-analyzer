@@ -4449,3 +4449,58 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"查询仿真结果失败 [{simulation_id}]: {e}")
             return None
+
+    # ==================== 算子辅助开发会话 ====================
+
+    async def save_ops_dev_session(self, data: dict) -> bool:
+        """保存算子开发会话（upsert by session_id）"""
+        if self.db is None:
+            return False
+        try:
+            await self.db["ops_dev_sessions"].update_one(
+                {"session_id": data.get("session_id")},
+                {"$set": data},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"保存算子开发会话失败: {e}")
+            return False
+
+    async def get_ops_dev_sessions(self, limit: int = 30) -> list:
+        """查询算子开发会话列表（按 created_at 降序）"""
+        if self.db is None:
+            return []
+        try:
+            cursor = self.db["ops_dev_sessions"].find(
+                {}, {"_id": 0}
+            ).sort("created_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"查询算子开发会话列表失败: {e}")
+            return []
+
+    async def get_ops_dev_session(self, session_id: str) -> Optional[dict]:
+        """按 session_id 获取算子开发会话"""
+        if self.db is None:
+            return None
+        try:
+            return await self.db["ops_dev_sessions"].find_one(
+                {"session_id": session_id}, {"_id": 0},
+            )
+        except Exception as e:
+            logger.error(f"查询算子开发会话失败 [{session_id}]: {e}")
+            return None
+
+    async def delete_ops_dev_session(self, session_id: str) -> bool:
+        """删除算子开发会话"""
+        if self.db is None:
+            return False
+        try:
+            result = await self.db["ops_dev_sessions"].delete_one(
+                {"session_id": session_id},
+            )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"删除算子开发会话失败 [{session_id}]: {e}")
+            return False

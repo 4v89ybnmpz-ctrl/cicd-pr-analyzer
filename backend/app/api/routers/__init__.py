@@ -17,6 +17,7 @@ from .compare import register_compare_routes
 from .cannbot_skills import register_cannbot_routes
 from .terminal import register_terminal_routes
 from .workflow_simulation import register_workflow_simulation_routes
+from .ops_dev_session import register_ops_dev_session_routes
 
 __all__ = [
     'register_base_routes',
@@ -36,4 +37,5 @@ __all__ = [
     'register_cannbot_routes',
     'register_terminal_routes',
     'register_workflow_simulation_routes',
+    'register_ops_dev_session_routes',
 ]
