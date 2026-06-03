@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pathlib import Path
 from datetime import datetime, timezone
 import asyncio
+import json
 import logging
 import os
 import re
@@ -409,12 +410,12 @@ def _collect_install_artifacts(config_dir: str, project_dir: str, tool: str) -> 
                 result["configFiles"].append({"name": fname, "path": str(fpath)})
                 break
 
-    # 检测 manifest
-    manifest_path = config_path / "cannbot-manifest.json"
-    if manifest_path.exists():
+    # 检测 manifest（多种文件名：cannbot-manifest.json、{plugin}-manifest.json）
+    manifest_files = list(config_path.glob("*-manifest.json"))
+    for manifest_path in manifest_files:
         try:
-            import json
             result["manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+            break
         except Exception:
             pass
 
@@ -825,32 +826,42 @@ def register_cannbot_routes(router: APIRouter):
         else:
             target_dir = str(PROJECT_ROOT)
 
-        # 检测脚本是否支持路径参数（有些脚本有 Unknown argument 兜底会报错）
+        # 检测脚本是否支持路径参数
+        # 条件：脚本中引用了 INSTALL_PATH 变量，说明脚本会在内部使用路径参数
+        # 注意：即使脚本有 "Unknown argument" 的兜底提示，只要它使用了 INSTALL_PATH
+        # 就说明它支持把最后一个非关键字参数解析为安装路径
         script_text = script.read_text(encoding="utf-8", errors="replace")
-        supports_path_arg = "INSTALL_PATH" in script_text and "Unknown argument" not in script_text
+        supports_path_arg = "INSTALL_PATH" in script_text
+
+        # 所有脚本都以 cwd=scenario_dir 执行，因为脚本内部用 SCRIPT_DIR
+        # (即 BASH_SOURCE 所在目录) 做相对路径解析 (如 ../../ops)
+        cwd_dir = str(scenario_dir)
 
         # 构建命令
         if supports_path_arg:
             # 支持 install_path 参数的脚本：bash init.sh [level] [tool] [path]
             cmd = ["bash", str(script), level, tool, target_dir]
-            cwd_dir = str(scenario_dir)
         else:
-            # 不支持路径参数的脚本：只传 level + tool，通过 cwd 控制安装位置
+            # 不支持路径参数的脚本：只传 level + tool
+            # 脚本内部会用 $PWD 作为安装基础目录
             cmd = ["bash", str(script), level, tool]
-            # project 级别：cwd 设为目标项目目录（脚本会用 $PWD 作为安装基础）
-            cwd_dir = target_dir
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd_dir,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            # 自动确认安装脚本的交互提示（"是否继续？ [y/N]"）
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=b"y\n"), timeout=120
+            )
             output = stdout.decode("utf-8", errors="replace")
             errors = stderr.decode("utf-8", errors="replace")
 
-            # 解析安装后的实际路径
+            # 解析安装后的实际路径：优先检测 target_dir，其次检测 scenario_dir
+            # 有些脚本（如 triton）不支持 INSTALL_PATH，project 级安装到 PLUGIN_ROOT/.claude
             tool_config_dirs = {
                 "claude": [".claude"],
                 "cursor": [".cursor"],
@@ -860,8 +871,24 @@ def register_cannbot_routes(router: APIRouter):
             config_dir_name = tool_config_dirs.get(tool, [f".{tool}"])[0]
             actual_config_dir = str(Path(target_dir) / config_dir_name)
 
-            # 检测安装产物
+            # 检测安装产物：先检测目标目录，验证 manifest.team 匹配当前场景
+            scenario_id = scenario_path.split("/")[-1]
             artifacts = _collect_install_artifacts(actual_config_dir, target_dir, tool)
+            # 如果目标目录的 manifest 不匹配当前场景，或没有产物，尝试检测插件源码目录
+            art_manifest_match = (
+                artifacts.get("manifest") and artifacts["manifest"].get("team") == scenario_id
+            )
+            if not art_manifest_match:
+                # 脚本可能将产物安装到了 PLUGIN_ROOT 下（如 triton 的 project 级安装）
+                fallback_dir = str(scenario_dir / config_dir_name)
+                fallback_artifacts = _collect_install_artifacts(fallback_dir, str(scenario_dir), tool)
+                fb_manifest_match = (
+                    fallback_artifacts.get("manifest") and fallback_artifacts["manifest"].get("team") == scenario_id
+                )
+                if fb_manifest_match or (not artifacts["skills"] and not artifacts["agents"]
+                                          and (fallback_artifacts["skills"] or fallback_artifacts["agents"])):
+                    artifacts = fallback_artifacts
+                    actual_config_dir = fallback_dir
 
             return {
                 "success": proc.returncode == 0,
@@ -910,6 +937,9 @@ def register_cannbot_routes(router: APIRouter):
             },
         }
 
+        # 场景目录名用于匹配 manifest.team
+        scenario_id = scenario_path.split("/")[-1]
+
         results = {}
         for tool_name, level_dirs in tools_config.items():
             project_artifacts = []
@@ -921,7 +951,9 @@ def register_cannbot_routes(router: APIRouter):
                 art = _collect_install_artifacts(str(config_dir), str(PROJECT_ROOT), tool_name)
                 art["level"] = "project"
                 if art["exists"] and (art["skills"] or art["agents"]):
-                    installed = True
+                    # 必须有 manifest 且 team 匹配才算 installed
+                    if art.get("manifest") and art["manifest"].get("team") == scenario_id:
+                        installed = True
                 project_artifacts.append(art)
 
             # 全局级检测
@@ -929,8 +961,25 @@ def register_cannbot_routes(router: APIRouter):
                 art = _collect_install_artifacts(str(config_dir), str(home), tool_name)
                 art["level"] = "global"
                 if art["exists"] and (art["skills"] or art["agents"]):
-                    installed = True
+                    if art.get("manifest") and art["manifest"].get("team") == scenario_id:
+                        installed = True
                 global_artifacts.append(art)
+
+            # 插件源码目录检测（某些脚本 project 级安装到 PLUGIN_ROOT/.claude）
+            config_dir_names = {
+                "claude": ".claude",
+                "cursor": ".cursor",
+                "opencode": ".opencode",
+            }
+            cdn = config_dir_names.get(tool_name, f".{tool_name}")
+            plugin_config_dir = scenario_dir / cdn
+            if plugin_config_dir.is_dir():
+                art = _collect_install_artifacts(str(plugin_config_dir), str(scenario_dir), tool_name)
+                art["level"] = "plugin"
+                if art["exists"] and (art["skills"] or art["agents"]):
+                    if art.get("manifest") and art["manifest"].get("team") == scenario_id:
+                        installed = True
+                project_artifacts.append(art)
 
             results[tool_name] = {
                 "installed": installed,
@@ -939,3 +988,245 @@ def register_cannbot_routes(router: APIRouter):
             }
 
         return {"scenario": scenario_path, "tools": results}
+
+    # ==================== 插件白名单解析 ====================
+
+    def _parse_plugin_whitelist(scenario_path: str) -> dict:
+        """解析插件的 INCLUDED_SKILLS 和 INCLUDED_AGENT_PATTERN"""
+        scenario_dir = CANNBOT_DIR / scenario_path
+        script = scenario_dir / "install.sh" if (scenario_dir / "install.sh").exists() else scenario_dir / "init.sh"
+        if not script.exists():
+            return {"skills": [], "agents": [], "agent_pattern": ""}
+
+        text = script.read_text(encoding="utf-8", errors="replace")
+        skills = []
+        agents = []
+        agent_pattern = ""
+
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("INCLUDED_SKILLS="):
+                raw = line.split("=", 1)[1].strip('"').strip("'")
+                skills = [s.strip() for s in raw.split() if s.strip()]
+            elif line.startswith("INCLUDED_AGENT_PATTERN="):
+                agent_pattern = line.split("=", 1)[1].strip('"').strip("'")
+
+        # 从 agents/ 目录获取实际 agent 文件列表
+        agents_dir = scenario_dir / "agents"
+        if agents_dir.is_dir():
+            agents = sorted(f.stem for f in agents_dir.iterdir() if f.is_file() and f.suffix == ".md")
+
+        return {"skills": skills, "agents": agents, "agent_pattern": agent_pattern}
+
+    # ==================== 一致性校验 ====================
+
+    @router.get("/cannbot/install-verify/{scenario_path:path}")
+    async def verify_install(scenario_path: str, tool: str = "claude"):
+        """校验已安装插件的 skills/agents 是否与白名单一致"""
+        if not CANNBOT_DIR.exists():
+            raise HTTPException(status_code=404, detail="仓库尚未 clone")
+
+        scenario_dir = CANNBOT_DIR / scenario_path
+        if not scenario_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"场景目录不存在: {scenario_path}")
+
+        scenario_id = scenario_path.split("/")[-1]
+        whitelist = _parse_plugin_whitelist(scenario_path)
+
+        # 找到该场景已安装的产物目录
+        home = Path.home()
+        config_dir_names = {"claude": ".claude", "cursor": ".cursor", "opencode": ".opencode"}
+        cdn = config_dir_names.get(tool, f".{tool}")
+        candidates = [
+            PROJECT_ROOT / cdn,       # 项目级
+            home / cdn,               # 全局级
+            scenario_dir / cdn,       # 插件目录（triton 等场景）
+        ]
+
+        installed_art = None
+        for config_dir in candidates:
+            art = _collect_install_artifacts(str(config_dir), str(PROJECT_ROOT), tool)
+            if art["exists"] and (art["skills"] or art["agents"]):
+                m = art.get("manifest")
+                if m and m.get("team") == scenario_id:
+                    installed_art = art
+                    break
+                if not m and not installed_art:
+                    installed_art = art
+
+        if not installed_art:
+            return {
+                "scenario": scenario_path,
+                "installed": False,
+                "whitelist": whitelist,
+                "actual": {"skills": [], "agents": []},
+                "match": None,
+            }
+
+        actual_skill_names = [s["name"] for s in installed_art.get("skills", [])]
+        actual_agent_names = [a["name"] for a in installed_art.get("agents", [])]
+
+        # 对比：白名单中的每一项是否在已安装列表中
+        skills_expected = set(whitelist["skills"])
+        skills_found = set(actual_skill_names)
+        skills_missing = sorted(skills_expected - skills_found)
+        skills_extra = sorted(skills_found - skills_expected)
+
+        agents_expected = set(whitelist["agents"])
+        agents_found = set(actual_agent_names)
+        agents_missing = sorted(agents_expected - agents_found)
+        agents_extra = sorted(agents_found - agents_expected)
+
+        skills_match = len(skills_missing) == 0 and len(skills_expected) > 0
+        agents_match = len(agents_missing) == 0 and len(agents_expected) >= 0
+
+        return {
+            "scenario": scenario_path,
+            "installed": True,
+            "installDir": installed_art["configDir"],
+            "whitelist": whitelist,
+            "actual": {"skills": actual_skill_names, "agents": actual_agent_names},
+            "match": {
+                "skills_match": skills_match,
+                "agents_match": agents_match,
+                "skills_missing": skills_missing,
+                "skills_extra": skills_extra,
+                "agents_missing": agents_missing,
+                "agents_extra": agents_extra,
+                "expected_skills_count": len(skills_expected),
+                "actual_skills_count": len(skills_found),
+                "expected_agents_count": len(agents_expected),
+                "actual_agents_count": len(agents_found),
+            },
+        }
+
+    # ==================== 卸载 ====================
+
+    @router.post("/cannbot/uninstall-scenario")
+    async def uninstall_cannbot_scenario(request: dict):
+        """卸载指定场景：根据 manifest 找到安装目录，删除白名单范围内的 skills/agents"""
+        scenario_path = request.get("scenario_path", "")
+        tool = request.get("tool", "claude")
+        if not scenario_path:
+            raise HTTPException(status_code=400, detail="缺少 scenario_path")
+
+        scenario_id = scenario_path.split("/")[-1]
+        scenario_dir = CANNBOT_DIR / scenario_path
+        whitelist = _parse_plugin_whitelist(scenario_path)
+
+        # 定位安装目录（与 verify 逻辑一致）
+        home = Path.home()
+        config_dir_names = {"claude": ".claude", "cursor": ".cursor", "opencode": ".opencode"}
+        cdn = config_dir_names.get(tool, f".{tool}")
+        candidates = [
+            PROJECT_ROOT / cdn,
+            home / cdn,
+            scenario_dir / cdn,
+        ]
+
+        target_dir = None
+        fallback_dir = None
+        for config_dir in candidates:
+            art = _collect_install_artifacts(str(config_dir), str(PROJECT_ROOT), tool)
+            if art["exists"] and (art["skills"] or art["agents"]):
+                m = art.get("manifest")
+                if m and m.get("team") == scenario_id:
+                    target_dir = Path(config_dir)
+                    break
+                # 无 manifest 但有 skills/agents 的目录作为 fallback
+                if not fallback_dir:
+                    fallback_dir = Path(config_dir)
+
+        # 如果没有匹配 manifest 的目录，使用 fallback（有产物的第一个目录）
+        if not target_dir and fallback_dir:
+            target_dir = fallback_dir
+
+        if not target_dir:
+            raise HTTPException(status_code=404, detail=f"未找到场景 {scenario_id} 的安装目录")
+
+        removed_skills = []
+        removed_agents = []
+        removed_configs = []
+        errors_list = []
+
+        # 删除白名单内的 skills
+        skills_dir = target_dir / "skills"
+        if skills_dir.is_dir():
+            for skill_name in whitelist["skills"]:
+                for item in skills_dir.iterdir():
+                    if item.name == skill_name:
+                        try:
+                            if item.is_symlink() or item.is_file():
+                                item.unlink()
+                            elif item.is_dir():
+                                import shutil
+                                shutil.rmtree(str(item))
+                            removed_skills.append(skill_name)
+                        except Exception as e:
+                            errors_list.append(f"删除 skill {skill_name} 失败: {e}")
+                        break
+
+        # 删除白名单匹配的 agents
+        agents_dir = target_dir / "agents"
+        if agents_dir.is_dir():
+            agent_pattern = whitelist.get("agent_pattern", "")
+            for agent_name in whitelist["agents"]:
+                for item in agents_dir.iterdir():
+                    match_name = item.stem if item.suffix == ".md" else item.name
+                    if match_name == agent_name:
+                        try:
+                            if item.is_symlink() or item.is_file():
+                                item.unlink()
+                            elif item.is_dir():
+                                import shutil
+                                shutil.rmtree(str(item))
+                            removed_agents.append(agent_name)
+                        except Exception as e:
+                            errors_list.append(f"删除 agent {agent_name} 失败: {e}")
+                        break
+
+        # 删除 manifest
+        manifest_files = list(target_dir.glob("*-manifest.json"))
+        for mf in manifest_files:
+            try:
+                m_data = json.loads(mf.read_text(encoding="utf-8"))
+                if m_data.get("team") == scenario_id:
+                    mf.unlink()
+                    removed_configs.append(mf.name)
+            except Exception:
+                pass
+
+        # 删除 workflows 链接（如果是该场景的）
+        workflows_link = target_dir / "workflows"
+        if workflows_link.is_symlink():
+            try:
+                link_target = os.readlink(str(workflows_link))
+                if scenario_id in link_target:
+                    workflows_link.unlink()
+                    removed_configs.append("workflows")
+            except Exception:
+                pass
+
+        # 删除 CLAUDE.md / AGENTS.md（如果是该场景的）
+        for cfg_name in ["CLAUDE.md", "AGENTS.md"]:
+            cfg_path = target_dir / cfg_name
+            if not cfg_path.exists():
+                # project 级可能在 PROJECT_ROOT 下
+                cfg_path = PROJECT_ROOT / cfg_name
+            if cfg_path.exists() and cfg_path.is_file():
+                try:
+                    content = cfg_path.read_text(encoding="utf-8", errors="replace")
+                    if scenario_id in content:
+                        cfg_path.unlink()
+                        removed_configs.append(cfg_name)
+                except Exception:
+                    pass
+
+        return {
+            "success": len(errors_list) == 0,
+            "scenario": scenario_path,
+            "removed_skills": removed_skills,
+            "removed_agents": removed_agents,
+            "removed_configs": removed_configs,
+            "errors": errors_list,
+        }
