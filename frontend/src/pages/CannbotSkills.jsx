@@ -11,7 +11,7 @@ import {
   CloudOutlined, AppstoreOutlined, DashboardOutlined, AuditOutlined,
   ToolOutlined, RocketOutlined, CheckCircleOutlined, ClockCircleOutlined,
   StarOutlined, ExperimentOutlined, FilePdfOutlined, FileMarkdownOutlined,
-  DownOutlined,
+  DownOutlined, DeleteOutlined, WarningOutlined, SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip,
@@ -22,10 +22,11 @@ import {
   getCannbotSkillFile, cloneCannbotSkills, updateCannbotSkills,
   getCannbotStats, getCannbotEvaluation, getCannbotChangelog,
   getCannbotScenarios, installCannbotScenario, checkCannbotInstall,
+  verifyCannbotInstall, uninstallCannbotScenario,
   getWorkflowDefinitions, simulateWorkflowStream, exportWorkflowReport,
   getWorkflowSimulations, getWorkflowSimulation,
 } from '../api'
-import WorkflowSimPanel from '../components/WorkflowSimPanel'
+import OpsDevSession from './OpsDevSession'
 import BreakpointTimeline from '../components/BreakpointTimeline'
 import SkillHeatmapChart from '../components/SkillHeatmapChart'
 
@@ -243,6 +244,11 @@ export default function CannbotSkills() {
           key: 'workflow-sim',
           label: <span><ExperimentOutlined /> 工作流仿真</span>,
           children: <WorkflowSimTab />,
+        },
+        {
+          key: 'ops-dev',
+          label: <span><CodeOutlined /> 算子开发 V2</span>,
+          children: <OpsDevSession />,
         },
       ]} />
 
@@ -709,6 +715,10 @@ function TestTab({ scenarios }) {
   const [checkResult, setCheckResult] = useState(null)
   const [checking, setChecking] = useState(false)
   const [currentStep, setCurrentStep] = useState(0) // 0=选择, 1=安装中, 2=成功, 3=失败
+  const [uninstalling, setUninstalling] = useState(false)
+  const [verifyResult, setVerifyResult] = useState(null)
+  const [verifying, setVerifying] = useState(false)
+  const justUninstalled = useRef(false)
 
   const toolLabels = { claude: 'Claude Code', cursor: 'Cursor', trae: 'Trae', opencode: 'OpenCode' }
   const toolInstallHints = {
@@ -758,16 +768,65 @@ function TestTab({ scenarios }) {
   // 选择场景时自动检测
   useEffect(() => { if (selectedScenario) doCheck() }, [selectedScenario])
 
+  // 一致性校验
+  const doVerify = async () => {
+    if (!selectedScenario) return
+    setVerifying(true)
+    try {
+      const res = await verifyCannbotInstall(selectedScenario, selectedTool)
+      setVerifyResult(res.data)
+    } catch { message.error('校验失败') }
+    finally { setVerifying(false) }
+  }
+
+  // 卸载
+  const handleUninstall = async () => {
+    if (!selectedScenario) return
+    setUninstalling(true)
+    try {
+      const res = await uninstallCannbotScenario({
+        scenario_path: selectedScenario,
+        tool: selectedTool,
+      })
+      if (res.data.success) {
+        message.success(`已卸载: ${res.data.removed_skills.length} skills, ${res.data.removed_agents.length} agents`)
+        setVerifyResult(null)
+        setInstallResult(null)
+        setCheckResult(null)
+        setCurrentStep(0)
+        justUninstalled.current = true
+        doCheck()
+      } else {
+        message.warning(`卸载完成但有错误: ${res.data.errors?.join('; ')}`)
+        setCheckResult(null)
+        setInstallResult(null)
+        setCurrentStep(0)
+        justUninstalled.current = true
+        doCheck()
+      }
+    } catch (e) {
+      message.error(e.response?.data?.detail || '卸载失败')
+    } finally { setUninstalling(false) }
+  }
+
   // 检测完成后判断是否自动跳步
   useEffect(() => {
-    if (!checkResult || currentStep !== 0 || !selectedScenario) return
+    if (!checkResult || currentStep !== 0 || !selectedScenario || justUninstalled.current) {
+      justUninstalled.current = false
+      return
+    }
     const toolInfo = checkResult.tools?.[selectedTool]
     if (toolInfo?.installed) {
       setCurrentStep(2)
       if (!installResult) {
-        // 从项目级和全局级中找到有实际 skills/agents 的那个
+        // 优先匹配当前场景的安装产物（通过 manifest.team 与 scenario 目录名比对）
+        const scenarioId = selectedScenario.split('/').pop()
         const allArts = [...(toolInfo.project || []), ...(toolInfo.global || [])]
-        const realArt = allArts.find(a => a.exists && (a.skills?.length > 0 || a.agents?.length > 0))
+        const existing = allArts.filter(a => a.exists && (a.skills?.length > 0 || a.agents?.length > 0))
+        // 优先找 manifest.team 匹配当前场景的
+        let realArt = existing.find(a => a.manifest?.team === scenarioId)
+        // 其次取第一个
+        if (!realArt) realArt = existing[0]
         setInstallResult({
           success: true,
           installDir: realArt?.configDir || '',
@@ -939,6 +998,18 @@ function TestTab({ scenarios }) {
                   跳过安装，直接使用
                 </Button>
               )}
+              {checkResult?.tools?.[selectedTool]?.installed && (
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  loading={uninstalling}
+                  onClick={handleUninstall}
+                  block
+                  style={{ marginTop: 8 }}
+                >
+                  卸载此场景
+                </Button>
+              )}
             </Card>
           </Col>
           <Col xs={24} md={14}>
@@ -946,6 +1017,9 @@ function TestTab({ scenarios }) {
               <Space>
                 <span>安装状态</span>
                 <Button size="small" icon={<AuditOutlined />} loading={checking} onClick={doCheck} disabled={!selectedScenario}>刷新</Button>
+                {checkResult?.tools?.[selectedTool]?.installed && (
+                  <Button size="small" icon={<SafetyCertificateOutlined />} loading={verifying} onClick={doVerify}>校验一致性</Button>
+                )}
               </Space>
             }>
               {checking ? (
@@ -973,6 +1047,76 @@ function TestTab({ scenarios }) {
         </Row>
       )}
 
+      {/* 一致性校验结果（Step 0 和 Step 2 都展示） */}
+      {verifyResult && verifyResult.installed && verifyResult.match && (
+        <Card size="small" title={<Space><SafetyCertificateOutlined />一致性校验 — {currentScenarioObj?.name}</Space>} style={{ marginTop: 16 }}
+          extra={<Tag color={verifyResult.match.skills_match && verifyResult.match.agents_match ? 'green' : 'orange'}>
+            {verifyResult.match.skills_match && verifyResult.match.agents_match ? '全部匹配' : '存在差异'}
+          </Tag>}>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Text strong>Skills</Text>
+              <div style={{ marginTop: 4 }}>
+                <Space size={4}>
+                  <Tag color={verifyResult.match.skills_match ? 'green' : 'orange'}>
+                    白名单: {verifyResult.match.expected_skills_count}
+                  </Tag>
+                  <Tag color={verifyResult.match.actual_skills_count === verifyResult.match.expected_skills_count ? 'green' : 'orange'}>
+                    已安装: {verifyResult.match.actual_skills_count}
+                  </Tag>
+                </Space>
+              </div>
+              {verifyResult.match.skills_missing.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <Text type="danger" style={{ fontSize: 12 }}>缺失 ({verifyResult.match.skills_missing.length}):</Text>
+                  <div style={{ marginTop: 2 }}>
+                    {verifyResult.match.skills_missing.map(s => <Tag key={s} color="red" style={{ fontSize: 11, margin: 1 }}>{s}</Tag>)}
+                  </div>
+                </div>
+              )}
+              {verifyResult.match.skills_extra.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <Text type="warning" style={{ fontSize: 12 }}>多余 ({verifyResult.match.skills_extra.length}):</Text>
+                  <div style={{ marginTop: 2 }}>
+                    {verifyResult.match.skills_extra.slice(0, 10).map(s => <Tag key={s} color="orange" style={{ fontSize: 11, margin: 1 }}>{s}</Tag>)}
+                    {verifyResult.match.skills_extra.length > 10 && <Tag style={{ fontSize: 11 }}>+{verifyResult.match.skills_extra.length - 10}</Tag>}
+                  </div>
+                </div>
+              )}
+            </Col>
+            <Col span={12}>
+              <Text strong>Agents</Text>
+              <div style={{ marginTop: 4 }}>
+                <Space size={4}>
+                  <Tag color={verifyResult.match.agents_match ? 'green' : 'orange'}>
+                    白名单: {verifyResult.match.expected_agents_count}
+                  </Tag>
+                  <Tag color={verifyResult.match.actual_agents_count === verifyResult.match.expected_agents_count ? 'green' : 'orange'}>
+                    已安装: {verifyResult.match.actual_agents_count}
+                  </Tag>
+                </Space>
+              </div>
+              {verifyResult.match.agents_missing.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <Text type="danger" style={{ fontSize: 12 }}>缺失:</Text>
+                  <div style={{ marginTop: 2 }}>
+                    {verifyResult.match.agents_missing.map(a => <Tag key={a} color="red" style={{ fontSize: 11, margin: 1 }}>{a}</Tag>)}
+                  </div>
+                </div>
+              )}
+              {verifyResult.match.agents_extra.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <Text type="warning" style={{ fontSize: 12 }}>多余:</Text>
+                  <div style={{ marginTop: 2 }}>
+                    {verifyResult.match.agents_extra.map(a => <Tag key={a} color="orange" style={{ fontSize: 11, margin: 1 }}>{a}</Tag>)}
+                  </div>
+                </div>
+              )}
+            </Col>
+          </Row>
+        </Card>
+      )}
+
       {/* ===== Step 2: 安装成功 → 启动指引 ===== */}
       {currentStep === 2 && (
         <div>
@@ -994,7 +1138,9 @@ function TestTab({ scenarios }) {
                       Skills: {installResult.artifacts.skills?.length || 0} / Agents: {installResult.artifacts.agents?.length || 0}
                     </Text>
                   )}
-                  <Button size="small" onClick={() => setCurrentStep(0)}>重新安装</Button>
+                  <Button size="small" icon={<SafetyCertificateOutlined />} loading={verifying} onClick={doVerify}>校验一致性</Button>
+                  <Button size="small" danger icon={<DeleteOutlined />} loading={uninstalling} onClick={handleUninstall}>卸载</Button>
+                  <Button size="small" onClick={() => { setCurrentStep(0); setInstallResult(null) }}>重新安装</Button>
                 </Space>
               </Col>
             </Row>

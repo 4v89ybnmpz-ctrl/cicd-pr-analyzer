@@ -344,6 +344,10 @@ export const installCannbotScenario = (data) =>
   api.post('/cannbot/install-scenario', data, { timeout: 120000 })
 export const checkCannbotInstall = (scenarioPath) =>
   api.get(`/cannbot/install-check/${scenarioPath}`)
+export const verifyCannbotInstall = (scenarioPath, tool = 'claude') =>
+  api.get(`/cannbot/install-verify/${scenarioPath}`, { params: { tool } })
+export const uninstallCannbotScenario = (data) =>
+  api.post('/cannbot/uninstall-scenario', data, { timeout: 60000 })
 
 // ====================
 // CANNBot Workflow Simulation
@@ -369,5 +373,23 @@ export const getWorkflowAntipatterns = () =>
   api.get('/cannbot/workflow/antipatterns')
 export const exportWorkflowReport = (data) =>
   api.post('/cannbot/workflow/export', data, { responseType: 'blob', timeout: 60000 })
+
+// ====================
+// 算子辅助开发 V2
+// ====================
+export const createOpsDevSession = (data) => api.post('/cannbot/ops-dev/sessions', data)
+export const getOpsDevSessions = (params) => api.get('/cannbot/ops-dev/sessions', { params })
+export const getOpsDevSession = (id) => api.get(`/cannbot/ops-dev/sessions/${id}`)
+export const deleteOpsDevSession = (id) => api.delete(`/cannbot/ops-dev/sessions/${id}`)
+export const executeOpsDevStep = (id, stepId) =>
+  api.post(`/cannbot/ops-dev/sessions/${id}/steps/${stepId}/execute`, null, { timeout: 300000 })
+export const stopOpsDevStep = (id, stepId) =>
+  api.post(`/cannbot/ops-dev/sessions/${id}/steps/${stepId}/stop`)
+export const exportOpsDevSession = (id, format = 'markdown') =>
+  api.get(`/cannbot/ops-dev/sessions/${id}/export`, { params: { format }, responseType: 'blob', timeout: 60000 })
+export const superviseOpsDevSession = (id) =>
+  api.post(`/cannbot/ops-dev/sessions/${id}/supervise`, null, { timeout: 120000 })
+export const streamOpsDevSession = (id) =>
+  new EventSource(`/api/cannbot/ops-dev/sessions/${id}/stream`)
 
 export default api
