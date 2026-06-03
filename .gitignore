@@ -85,6 +85,7 @@ htmlcov/
 
 # QA 文档
 *_qa.md
+cannbot-skills-qa.md
 
 # Temporary
 *.tmp
