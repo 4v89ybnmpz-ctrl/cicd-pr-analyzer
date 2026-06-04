@@ -4504,3 +4504,72 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"删除算子开发会话失败 [{session_id}]: {e}")
             return False
+
+    # ==================== 工作流仿真 V2 ====================
+
+    async def save_workflow_sim_v2_session(self, data: dict) -> bool:
+        """保存 V2 仿真会话（upsert by session_id）"""
+        if self.db is None:
+            return False
+        try:
+            await self.db["workflow_sim_v2_sessions"].update_one(
+                {"session_id": data.get("session_id")},
+                {"$set": data},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"保存 V2 仿真会话失败: {e}")
+            return False
+
+    async def get_workflow_sim_v2_sessions(self, limit: int = 30) -> list:
+        """查询 V2 仿真会话列表（按 created_at 降序）"""
+        if self.db is None:
+            return []
+        try:
+            cursor = self.db["workflow_sim_v2_sessions"].find(
+                {}, {"_id": 0}
+            ).sort("created_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"查询 V2 仿真会话失败: {e}")
+            return []
+
+    async def get_workflow_sim_v2_session(self, session_id: str) -> Optional[dict]:
+        """按 session_id 获取 V2 仿真会话"""
+        if self.db is None:
+            return None
+        try:
+            return await self.db["workflow_sim_v2_sessions"].find_one(
+                {"session_id": session_id}, {"_id": 0},
+            )
+        except Exception as e:
+            logger.error(f"查询 V2 仿真会话失败 [{session_id}]: {e}")
+            return None
+
+    async def update_workflow_sim_v2_session(self, session_id: str, update: dict) -> bool:
+        """部分更新 V2 仿真会话"""
+        if self.db is None:
+            return False
+        try:
+            await self.db["workflow_sim_v2_sessions"].update_one(
+                {"session_id": session_id},
+                {"$set": update},
+            )
+            return True
+        except Exception as e:
+            logger.error(f"更新 V2 仿真会话失败 [{session_id}]: {e}")
+            return False
+
+    async def delete_workflow_sim_v2_session(self, session_id: str) -> bool:
+        """删除 V2 仿真会话"""
+        if self.db is None:
+            return False
+        try:
+            result = await self.db["workflow_sim_v2_sessions"].delete_one(
+                {"session_id": session_id},
+            )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"删除 V2 仿真会话失败 [{session_id}]: {e}")
+            return False
