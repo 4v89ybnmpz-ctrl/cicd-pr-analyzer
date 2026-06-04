@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, Component, useMemo } from 'react'
 import {
   Card, Tag, Row, Col, Button, Spin, Empty, Drawer, Typography, Space,
   Input, message, Tooltip, Statistic, Progress, Tabs, Segmented, Timeline,
@@ -26,7 +26,9 @@ import {
   getWorkflowDefinitions, simulateWorkflowStream, exportWorkflowReport,
   getWorkflowSimulations, getWorkflowSimulation,
 } from '../api'
+import WorkflowSimV2Tab from './WorkflowSimV2Tab'
 import OpsDevSession from './OpsDevSession'
+import WorkflowSimPanel from '../components/WorkflowSimPanel'
 import BreakpointTimeline from '../components/BreakpointTimeline'
 import SkillHeatmapChart from '../components/SkillHeatmapChart'
 
@@ -57,8 +59,22 @@ export default function CannbotSkills() {
   const [changelog, setChangelog] = useState(null)
   const [scenarios, setScenarios] = useState([])
   const [loading, setLoading] = useState(false)
+  const [evalLoading, setEvalLoading] = useState(false)
   const [actionLoading, setActionLoading] = useState('')
-  const [activeTab, setActiveTab] = useState('overview')
+  const [activeTab, setActiveTabState] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('tab') || 'overview'
+  })
+  const setActiveTab = useCallback((key) => {
+    setActiveTabState(key)
+    const url = new URL(window.location)
+    if (key === 'overview') {
+      url.searchParams.delete('tab')
+    } else {
+      url.searchParams.set('tab', key)
+    }
+    window.history.replaceState(null, '', url)
+  }, [])
 
   // 详情 Drawer
   const [selectedSkill, setSelectedSkill] = useState(null)
@@ -76,22 +92,31 @@ export default function CannbotSkills() {
   const loadAll = useCallback(async () => {
     setLoading(true)
     try {
-      const [statusRes, statsRes, evalRes, logRes, sceneRes] = await Promise.all([
+      // 核心数据优先加载（轻量请求）
+      const [statusRes, statsRes, logRes, sceneRes] = await Promise.all([
         getCannbotStatus(),
         getCannbotStats().catch(() => ({ data: null })),
-        getCannbotEvaluation().catch(() => ({ data: null })),
         getCannbotChangelog().catch(() => ({ data: null })),
         getCannbotScenarios().catch(() => ({ data: { scenarios: [] } })),
       ])
       setStatus(statusRes.data)
       if (statsRes.data) setStats(statsRes.data)
-      if (evalRes.data) setEvaluation(evalRes.data)
       if (logRes.data) setChangelog(logRes.data)
       if (sceneRes.data) setScenarios(sceneRes.data.scenarios || [])
     } catch (e) {
       message.error(e._friendlyMsg || '加载失败')
     } finally {
       setLoading(false)
+    }
+    // evaluation 请求很重（全量 git log + N 个目录递归遍历），单独异步加载
+    setEvalLoading(true)
+    try {
+      const evalRes = await getCannbotEvaluation()
+      if (evalRes.data) setEvaluation(evalRes.data)
+    } catch {
+      // 静默失败，不影响页面主体
+    } finally {
+      setEvalLoading(false)
     }
   }, [])
 
@@ -209,14 +234,15 @@ export default function CannbotSkills() {
         {
           key: 'overview',
           label: <span><DashboardOutlined /> 概览</span>,
-          children: <OverviewTab stats={stats} evaluation={evaluation} changelog={changelog} />,
+          children: <OverviewTab stats={stats} evaluation={evaluation} evalLoading={evalLoading} changelog={changelog} />,
         },
         {
           key: 'evaluation',
-          label: <span><AuditOutlined /> 技能评估</span>,
+          label: <span><AuditOutlined /> 技能评估 {evalLoading && <Spin size="small" />}</span>,
           children: (
             <EvaluationTab
               evaluation={evaluation}
+              evalLoading={evalLoading}
               filtered={filteredEval}
               searchText={searchText}
               setSearchText={setSearchText}
@@ -243,7 +269,12 @@ export default function CannbotSkills() {
         {
           key: 'workflow-sim',
           label: <span><ExperimentOutlined /> 工作流仿真</span>,
-          children: <WorkflowSimTab />,
+          children: <WorkflowSimErrorBoundary><WorkflowSimTab /></WorkflowSimErrorBoundary>,
+        },
+        {
+          key: 'workflow-sim-v2',
+          label: <span><RocketOutlined /> 工作流仿真 2.0</span>,
+          children: <WorkflowSimErrorBoundary><WorkflowSimV2Tab /></WorkflowSimErrorBoundary>,
         },
         {
           key: 'ops-dev',
@@ -335,7 +366,7 @@ export default function CannbotSkills() {
 }
 
 // ==================== Tab 1: 概览 ====================
-function OverviewTab({ stats, evaluation, changelog }) {
+function OverviewTab({ stats, evaluation, evalLoading, changelog }) {
   if (!stats) return <Empty description="暂无统计数据" />
 
   const avgScore = evaluation?.summary?.avgScore || 0
@@ -416,16 +447,22 @@ function OverviewTab({ stats, evaluation, changelog }) {
         {/* 整体评分 */}
         <Col xs={24} sm={8}>
           <Card size="small" title="整体质量评分" style={{ textAlign: 'center' }}>
-            <Progress
-              type="circle"
-              percent={Math.round(avgScore)}
-              size={120}
-              strokeColor={GRADE_COLORS[avgGrade]}
-              format={() => <span style={{ fontSize: 28, fontWeight: 700, color: GRADE_COLORS[avgGrade] }}>{avgGrade}</span>}
-            />
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary">平均 {avgScore} 分 / 共 {evaluation?.summary?.totalSkills || 0} 个技能</Text>
-            </div>
+            {evalLoading && !evaluation ? (
+              <div style={{ padding: '24px 0' }}><Spin tip="评估数据加载中..." /></div>
+            ) : (
+              <>
+                <Progress
+                  type="circle"
+                  percent={Math.round(avgScore)}
+                  size={120}
+                  strokeColor={GRADE_COLORS[avgGrade]}
+                  format={() => <span style={{ fontSize: 28, fontWeight: 700, color: GRADE_COLORS[avgGrade] }}>{avgGrade}</span>}
+                />
+                <div style={{ marginTop: 8 }}>
+                  <Text type="secondary">平均 {avgScore} 分 / 共 {evaluation?.summary?.totalSkills || 0} 个技能</Text>
+                </div>
+              </>
+            )}
           </Card>
         </Col>
         {/* 等级分布 */}
@@ -476,7 +513,8 @@ function OverviewTab({ stats, evaluation, changelog }) {
 }
 
 // ==================== Tab 2: 技能评估列表 ====================
-function EvaluationTab({ evaluation, filtered, searchText, setSearchText, filterCategory, setFilterCategory, filterGrade, setFilterGrade, onOpenDetail }) {
+function EvaluationTab({ evaluation, evalLoading, filtered, searchText, setSearchText, filterCategory, setFilterCategory, filterGrade, setFilterGrade, onOpenDetail }) {
+  if (evalLoading && !evaluation) return <div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" tip="评估数据加载中（首次可能需要 10-30 秒）..." /></div>
   if (!evaluation) return <Empty description="暂无评估数据" />
 
   const categories = [{ label: '全部', value: 'all' }, ...Object.entries(CATEGORY_LABELS).map(([value, label]) => ({ label, value }))]
@@ -1431,6 +1469,31 @@ function EmbeddedTerminal({ cwd, tool, examplePrompt }) {
 }
 
 // ==================== 工作流仿真 Tab ====================
+
+class WorkflowSimErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <Card>
+          <Empty description={
+            <div>
+              <Text type="danger">工作流仿真渲染出错</Text>
+              <pre style={{ textAlign: 'left', fontSize: 12, color: '#ff4d4f', maxHeight: 200, overflow: 'auto', background: '#fafafa', padding: 12, borderRadius: 6, marginTop: 8 }}>
+                {this.state.error?.message || String(this.state.error)}
+                {'\n'}
+                {this.state.error?.stack?.slice(0, 500)}
+              </pre>
+              <Button type="primary" size="small" style={{ marginTop: 8 }} onClick={() => this.setState({ error: null })}>重试</Button>
+            </div>
+          } />
+        </Card>
+      )
+    }
+    return this.props.children
+  }
+}
 
 function WorkflowSimTab() {
   const [definitions, setDefinitions] = useState([])

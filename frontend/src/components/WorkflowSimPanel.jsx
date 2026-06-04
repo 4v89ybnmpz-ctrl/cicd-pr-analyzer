@@ -8,6 +8,8 @@ import {
   Controls,
   Background,
   MarkerType,
+  Handle,
+  Position,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Badge, Tooltip, Progress, Tag } from 'antd'
@@ -29,13 +31,15 @@ const PASS_RATE_COLORS = (rate) => {
 function StepNode({ data }) {
   const { step, passRate, breakpoints, selected, onClick } = data
   const borderColor = PASS_RATE_COLORS(passRate)
-  const criticalCount = breakpoints.filter(b => b.severity === 'CRITICAL').length
-  const highCount = breakpoints.filter(b => b.severity === 'HIGH').length
+  const safeBps = Array.isArray(breakpoints) ? breakpoints.filter(Boolean) : []
+  const criticalCount = safeBps.filter(b => b.severity === 'CRITICAL').length
+  const highCount = safeBps.filter(b => b.severity === 'HIGH').length
 
   return (
     <div
       onClick={onClick}
       style={{
+        position: 'relative',
         padding: '10px 16px',
         borderRadius: 8,
         border: `2px solid ${selected ? '#1890ff' : borderColor}`,
@@ -46,8 +50,9 @@ function StepNode({ data }) {
         transition: 'box-shadow 0.2s',
       }}
     >
+      <Handle type="target" position={Position.Left} style={{ visibility: 'hidden' }} />
       <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
-        {step.step_id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+        {(step.step_id || 'unknown').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
       </div>
       <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>{step.step_name}</div>
       <Progress
@@ -70,6 +75,7 @@ function StepNode({ data }) {
           )}
         </div>
       )}
+      <Handle type="source" position={Position.Right} style={{ visibility: 'hidden' }} />
     </div>
   )
 }
@@ -82,17 +88,18 @@ export default function WorkflowSimPanel({ steps, onStepClick, selectedStepId })
 
     return steps.map((stepResult, index) => {
       const passRate = stepResult.simulated_pass_rate ?? 0
-      const breakpoints = stepResult.breakpoints || []
+      const breakpoints = Array.isArray(stepResult.breakpoints) ? stepResult.breakpoints.filter(Boolean) : []
+      const stepId = stepResult.step_id || `step-${index}`
       return {
-        id: stepResult.step_id,
+        id: stepId,
         type: 'stepNode',
         position: { x: 220 * index, y: 0 },
         data: {
           step: stepResult,
           passRate,
           breakpoints,
-          selected: selectedStepId === stepResult.step_id,
-          onClick: () => onStepClick?.(stepResult.step_id),
+          selected: selectedStepId === stepId,
+          onClick: () => onStepClick?.(stepId),
         },
       }
     })
@@ -100,14 +107,18 @@ export default function WorkflowSimPanel({ steps, onStepClick, selectedStepId })
 
   const buildEdges = useCallback(() => {
     if (!steps || steps.length <= 1) return []
-    return steps.slice(0, -1).map((step, i) => ({
-      id: `${step.step_id}-${steps[i + 1].step_id}`,
-      source: step.step_id,
-      target: steps[i + 1].step_id,
-      animated: true,
-      markerEnd: { type: MarkerType.ArrowClosed },
-      style: { stroke: '#bbb', strokeWidth: 2 },
-    }))
+    return steps.slice(0, -1).map((step, i) => {
+      const srcId = step.step_id || `step-${i}`
+      const tgtId = steps[i + 1].step_id || `step-${i + 1}`
+      return {
+        id: `${srcId}-${tgtId}`,
+        source: srcId,
+        target: tgtId,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed },
+        style: { stroke: '#bbb', strokeWidth: 2 },
+      }
+    })
   }, [steps])
 
   const nodes = useMemo(buildNodes, [buildNodes])

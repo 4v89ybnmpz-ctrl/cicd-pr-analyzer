@@ -375,6 +375,44 @@ export const exportWorkflowReport = (data) =>
   api.post('/cannbot/workflow/export', data, { responseType: 'blob', timeout: 60000 })
 
 // ====================
+// 工作流仿真 V2 (Claude Code CLI 驱动)
+// ====================
+export const getWorkflowV2Plugins = () =>
+  api.get('/cannbot/workflow-v2/plugins')
+export const createWorkflowSimV2Session = (data) =>
+  api.post('/cannbot/workflow-v2/sessions', data)
+export const getWorkflowSimV2Sessions = (params) =>
+  api.get('/cannbot/workflow-v2/sessions', { params })
+export const getWorkflowSimV2Session = (id) =>
+  api.get(`/cannbot/workflow-v2/sessions/${id}`)
+export const startWorkflowSimV2Session = (id) =>
+  api.post(`/cannbot/workflow-v2/sessions/${id}/start`, null, { timeout: 300000 })
+export const stopWorkflowSimV2Session = (id) =>
+  api.post(`/cannbot/workflow-v2/sessions/${id}/stop`)
+export const getActiveWorkflowSimV2Session = () =>
+  api.get('/cannbot/workflow-v2/sessions/active')
+export const getSessionProcess = (id) =>
+  api.get(`/cannbot/workflow-v2/sessions/${id}/process`)
+export const listAllProcesses = () =>
+  api.get('/cannbot/workflow-v2/processes')
+export const streamWorkflowSimV2 = (id) =>
+  new EventSource(`/api/cannbot/workflow-v2/sessions/${id}/stream`)
+export const cloneWorkflowV2Repo = (data) =>
+  api.post('/cannbot/workflow-v2/clone-repo', data, { timeout: 120000 })
+export const checkWorkflowV2Repo = (targetDir) =>
+  api.get('/cannbot/workflow-v2/check-repo', { params: { target_dir: targetDir } })
+export const forkWorkflowV2Repo = (data) =>
+  api.post('/cannbot/workflow-v2/fork-repo', data, { timeout: 60000 })
+export const listWorkflowV2Branches = (workDir) =>
+  api.get('/cannbot/workflow-v2/list-branches', { params: { work_dir: workDir } })
+export const createWorkflowV2Branch = (data) =>
+  api.post('/cannbot/workflow-v2/create-branch', data)
+export const switchWorkflowV2Branch = (data) =>
+  api.post('/cannbot/workflow-v2/switch-branch', data)
+export const exportWorkflowV2Session = (id) =>
+  api.get(`/cannbot/workflow-v2/sessions/${id}/export`, { responseType: 'blob', timeout: 30000 })
+
+// ====================
 // 算子辅助开发 V2
 // ====================
 export const createOpsDevSession = (data) => api.post('/cannbot/ops-dev/sessions', data)
