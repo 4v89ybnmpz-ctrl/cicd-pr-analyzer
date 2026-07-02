@@ -102,3 +102,11 @@ id_ed25519*
 *.jks
 credentials.json
 service-account*.json
+
+# 本地配置 / 备份 / 符号链接 / 生成产物
+.claude/
+CLAUDE.md.bak.*
+asc-devkit
+pypto
+backend/exports/
+
