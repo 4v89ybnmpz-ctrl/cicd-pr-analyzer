@@ -2,6 +2,7 @@
 工作流定义解析器
 解析 CANNBot 插件的 AGENTS.md + task-prompts.md 为结构化 WorkflowDefinition
 """
+
 import os
 import re
 import logging
@@ -9,24 +10,28 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from app.models.workflow_models import (
-    WorkflowDefinition, WorkflowStep, StepPrompt, SubAgentDef,
+    WorkflowDefinition,
+    WorkflowStep,
+    StepPrompt,
+    SubAgentDef,
 )
 
 logger = logging.getLogger(__name__)
 
 # 项目根目录
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 CANNBOT_DIR = os.path.join(_PROJECT_ROOT, "external", "cannbot-skills")
 
 
 def _parse_yaml_frontmatter(text: str) -> dict:
     """解析 YAML frontmatter（--- ... --- 之间的内容），支持多行列表"""
-    match = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+    match = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
     if not match:
         return {}
     raw = match.group(1)
-    lines = raw.split('\n')
+    lines = raw.split("\n")
 
     result = {}
     current_key = None
@@ -38,7 +43,7 @@ def _parse_yaml_frontmatter(text: str) -> dict:
             continue
 
         # 多行列表项: "  - value"
-        if stripped.startswith('- ') and current_key is not None:
+        if stripped.startswith("- ") and current_key is not None:
             val = stripped[2:].strip().strip("'\"")
             current_list.append(val)
             continue
@@ -55,14 +60,16 @@ def _parse_yaml_frontmatter(text: str) -> dict:
             current_key = None
 
         # key: value 行
-        if ':' in stripped:
-            key, _, val = stripped.partition(':')
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
             key = key.strip()
             val = val.strip()
 
-            if val.startswith('[') and val.endswith(']'):
+            if val.startswith("[") and val.endswith("]"):
                 # 行内列表 [a, b, c]
-                result[key] = [v.strip().strip("'\"") for v in val[1:-1].split(',') if v.strip()]
+                result[key] = [
+                    v.strip().strip("'\"") for v in val[1:-1].split(",") if v.strip()
+                ]
             elif val:
                 result[key] = val
                 current_key = None
@@ -98,41 +105,42 @@ def parse_agents_md(plugin_dir: str) -> dict:
     # 提取 skills 列表
     skills = fm.get("skills", [])
     if isinstance(skills, str):
-        skills = [s.strip() for s in skills.split(',') if s.strip()]
+        skills = [s.strip() for s in skills.split(",") if s.strip()]
 
     # 提取 Subagent 职责表（只取"职责划分"段落的第一个表格）
     agents = []
     # 找到 Subagent/职责划分 段落
     agent_section_match = re.search(
-        r'(?:Subagent|职责划分|Subagent 职责).*?\n\|[^|]+\|[^|]+\|\n\|[-\s|]+\|\n((?:\|.*\|\n?)+)',
-        text, re.DOTALL | re.IGNORECASE,
+        r"(?:Subagent|职责划分|Subagent 职责).*?\n\|[^|]+\|[^|]+\|\n\|[-\s|]+\|\n((?:\|.*\|\n?)+)",
+        text,
+        re.DOTALL | re.IGNORECASE,
     )
     if agent_section_match:
         table_text = agent_section_match.group(1)
-        table_pattern = r'\|\s*\*?\*?(\w[\w\s\-]*)\*?\*?\s*\|\s*([^|]+)\|'
+        table_pattern = r"\|\s*\*?\*?(\w[\w\s\-]*)\*?\*?\s*\|\s*([^|]+)\|"
         for match in re.finditer(table_pattern, table_text):
-            role = match.group(1).strip().replace('**', '')
+            role = match.group(1).strip().replace("**", "")
             desc = match.group(2).strip()
-            if role in ('角色', 'Role', '---'):
+            if role in ("角色", "Role", "---"):
                 continue
             agents.append({"role": role, "description": desc})
 
     # 提取约束表
     constraints = []
-    constraint_pattern = r'\|\s*(\w+)\s*\|\s*([^|]+)\|'
+    constraint_pattern = r"\|\s*(\w+)\s*\|\s*([^|]+)\|"
     in_constraint_section = False
-    for line in text.split('\n'):
-        if '约束' in line and ('#' in line or 'Constraint' in line):
+    for line in text.split("\n"):
+        if "约束" in line and ("#" in line or "Constraint" in line):
             in_constraint_section = True
             continue
-        if in_constraint_section and line.startswith('#'):
+        if in_constraint_section and line.startswith("#"):
             in_constraint_section = False
-        if in_constraint_section and '|' in line:
+        if in_constraint_section and "|" in line:
             m = re.match(constraint_pattern, line)
             if m:
                 rule_id = m.group(1).strip()
                 rule_text = m.group(2).strip()
-                if rule_id not in ('#', 'Rule', '---') and not rule_id.startswith('-'):
+                if rule_id not in ("#", "Rule", "---") and not rule_id.startswith("-"):
                     constraints.append({"id": rule_id, "rule": rule_text})
 
     return {
@@ -153,13 +161,13 @@ def parse_workflow_steps(text: str) -> List[dict]:
 
     # 匹配多种格式的步骤行
     step_patterns = [
-        r'Step\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$',
-        r'Phase\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$',
-        r'Stage\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$',
-        r'阶段\s*(\d+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$',
+        r"Step\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$",
+        r"Phase\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$",
+        r"Stage\s+([\d.]+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$",
+        r"阶段\s*(\d+)\s*[:：]\s*(.+?)(?:\s*[（(](.+?)[）)])?\s*$",
     ]
 
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         line = line.strip()
         for pattern in step_patterns:
             m = re.match(pattern, line)
@@ -167,11 +175,13 @@ def parse_workflow_steps(text: str) -> List[dict]:
                 step_num = m.group(1)
                 step_name = m.group(2).strip()
                 agent_hint = (m.group(3) or "").strip()
-                steps.append({
-                    "step_num": step_num,
-                    "name": step_name,
-                    "agent_hint": agent_hint,
-                })
+                steps.append(
+                    {
+                        "step_num": step_num,
+                        "name": step_name,
+                        "agent_hint": agent_hint,
+                    }
+                )
                 break
 
     if not steps:
@@ -181,32 +191,77 @@ def parse_workflow_steps(text: str) -> List[dict]:
     for step in steps:
         sn = step["step_num"]
         # 查找该步骤的详细段落（支持 Step/Phase/Stage）
-        section_pattern = rf'(?:####|###)\s+(?:Step|Phase|Stage)\s+{re.escape(sn)}[：:\s]*(.*?)(?=(?:####|###)\s+(?:Step|Phase|Stage)|\Z)'
+        section_pattern = rf"(?:####|###)\s+(?:Step|Phase|Stage)\s+{re.escape(sn)}[：:\s]*(.*?)(?=(?:####|###)\s+(?:Step|Phase|Stage)|\Z)"
         match = re.search(section_pattern, text, re.DOTALL)
         if match:
             section_text = match.group(1)
 
             # 提取门禁/完成判定
-            gate_match = re.search(r'(?:完成判定|gate)[：:]\s*(.+)', section_text)
+            gate_match = re.search(r"(?:完成判定|gate)[：:]\s*(.+)", section_text)
             if gate_match:
                 step["gate"] = gate_match.group(1).strip()
 
             # 提取触发条件
-            trigger_match = re.search(r'触发条件[：:]\s*(.+)', section_text)
+            trigger_match = re.search(r"触发条件[：:]\s*(.+)", section_text)
             if trigger_match:
                 step["trigger"] = trigger_match.group(1).strip()
 
             # 提取失败处理
-            fail_matches = re.findall(r'(?:失败处理|失败)[：:]\s*(.+)', section_text)
+            fail_matches = re.findall(r"(?:失败处理|失败)[：:]\s*(.+)", section_text)
             if fail_matches:
                 step["fallback"] = fail_matches[0].strip()
 
             # 提取修复循环上限
-            loop_match = re.search(r'最多\s*(\d+)\s*轮', section_text)
+            loop_match = re.search(r"最多\s*(\d+)\s*轮", section_text)
             if loop_match:
                 step["fix_loop_bound"] = int(loop_match.group(1))
 
     return steps
+
+
+def _clean_skill_name(raw: str) -> Optional[str]:
+    """从一行 skill 引用里提取干净的 skill 名。
+
+    task-prompts.md 实际行格式如：
+        - /ascendc-precision-debug — 遇到...症状时使用
+        - ascendc-tiling-design：Tiling 设计
+    需剥掉前导 `/`、可能的 plugin 前缀（plugin:skill）、以及 ` — 描述`/`：描述` 尾巴。
+    """
+    s = raw.strip().lstrip("-").strip().lstrip("/").strip()
+    # 去 plugin 前缀（如 ops-direct-invoke-skills:ascendc-tiling-design）
+    if ":" in s:
+        s = s.rsplit(":", 1)[-1].strip()
+    m = re.match(r"([A-Za-z0-9][\w-]*)", s)
+    return m.group(1) if m else None
+
+
+def _scan_inline_skills(text: str) -> List[str]:
+    """扫描正文里隐式的 /skill-name 引用。
+
+    skill 名在 cannbot-skills 项目里命名高度规整，统一以这些前缀开头，
+    用前缀白名单过滤，避免把 /docs、/api、/matmul 这类路径/参数误判为 skill。
+    """
+    SKILL_PREFIXES = (
+        "ascendc-",
+        "ops-",
+        "npu-",
+        "pypto-",
+        "model-infer-",
+        "tilelang-",
+        "catlass-",
+        "triton-",
+        "gitcode-",
+        "cann-",
+        "torch-",
+        "aiss-",
+        "cuda2ascend-",
+    )
+    found = re.findall(r"/(?=[a-z])([\w-]+)", text or "")
+    seen: List[str] = []
+    for name in found:
+        if name.startswith(SKILL_PREFIXES) and name not in seen:
+            seen.append(name)
+    return seen
 
 
 def parse_task_prompts(task_prompts_path: str) -> Dict[str, StepPrompt]:
@@ -219,7 +274,7 @@ def parse_task_prompts(task_prompts_path: str) -> Dict[str, StepPrompt]:
     text = open(task_prompts_path, encoding="utf-8", errors="replace").read()
 
     # 按 ## Step N 分块
-    step_blocks = re.split(r'^##\s+Step\s+([\d.]+)', text, flags=re.MULTILINE)
+    step_blocks = re.split(r"^##\s+Step\s+([\d.]+)", text, flags=re.MULTILINE)
 
     result = {}
     i = 1  # step_blocks[0] 是标题前的内容
@@ -240,39 +295,54 @@ def parse_task_prompts(task_prompts_path: str) -> Dict[str, StepPrompt]:
         if prompt_match:
             prompt.prompt_template = prompt_match.group(1)[:2000]  # 截断过长内容
 
-        # 提取必读 Skill
-        required = re.findall(r'【必读\s*Skill】\s*\n((?:\s*-\s*.+\n?)+)', block_text)
+        # 提取必读 Skill（清洗为干净 skill 名）
+        required = re.findall(r"【必读\s*Skill】\s*\n((?:\s*-\s*.+\n?)+)", block_text)
         if required:
             prompt.required_skills = [
-                s.strip().lstrip('- ').strip()
-                for s in required[0].strip().split('\n')
-                if s.strip()
+                name
+                for name in (
+                    _clean_skill_name(s) for s in required[0].split("\n") if s.strip()
+                )
+                if name
             ]
 
-        # 提取推荐 Skill
-        recommended = re.findall(r'【推荐\s*Skill】\s*\n((?:\s*-\s*.+\n?)+)', block_text)
+        # 提取推荐 Skill（清洗为干净 skill 名）
+        recommended = re.findall(
+            r"【推荐\s*Skill】\s*\n((?:\s*-\s*.+\n?)+)", block_text
+        )
+        rec_names: List[str] = []
         if recommended:
-            prompt.recommended_skills = [
-                s.strip().lstrip('- ').strip()
-                for s in recommended[0].strip().split('\n')
-                if s.strip()
+            rec_names = [
+                name
+                for name in (
+                    _clean_skill_name(s)
+                    for s in recommended[0].split("\n")
+                    if s.strip()
+                )
+                if name
             ]
+
+        # 扫描正文里隐式 /skill-name 引用（plan 缺口 A），并入推荐 Skill（去重）
+        for name in _scan_inline_skills(block_text):
+            if name not in rec_names:
+                rec_names.append(name)
+        prompt.recommended_skills = rec_names
 
         # 提取验收标准
-        validation = re.findall(r'【验收标准】\s*\n((?:\s*-\s*.+\n?)+)', block_text)
+        validation = re.findall(r"【验收标准】\s*\n((?:\s*-\s*.+\n?)+)", block_text)
         if validation:
             prompt.validation_criteria = [
-                v.strip().lstrip('- ').strip()
-                for v in validation[0].strip().split('\n')
+                v.strip().lstrip("- ").strip()
+                for v in validation[0].strip().split("\n")
                 if v.strip()
             ]
 
         # 提取约束
-        constraints = re.findall(r'【约束】\s*\n((?:\s*-\s*.+\n?)+)', block_text)
+        constraints = re.findall(r"【约束】\s*\n((?:\s*-\s*.+\n?)+)", block_text)
         if constraints:
             prompt.constraints = [
-                c.strip().lstrip('- ').strip()
-                for c in constraints[0].strip().split('\n')
+                c.strip().lstrip("- ").strip()
+                for c in constraints[0].strip().split("\n")
                 if c.strip()
             ]
 
@@ -289,7 +359,7 @@ def extract_subagents(plugin_dir: str) -> List[SubAgentDef]:
 
     result = []
     for fname in sorted(os.listdir(agents_dir)):
-        if not fname.endswith('.md'):
+        if not fname.endswith(".md"):
             continue
         fpath = os.path.join(agents_dir, fname)
         text = open(fpath, encoding="utf-8", errors="replace").read()
@@ -297,20 +367,24 @@ def extract_subagents(plugin_dir: str) -> List[SubAgentDef]:
 
         skills = fm.get("skills", [])
         if isinstance(skills, str):
-            skills = [s.strip() for s in skills.split(',') if s.strip()]
+            skills = [s.strip() for s in skills.split(",") if s.strip()]
 
-        result.append(SubAgentDef(
-            name=fname.replace('.md', ''),
-            description=fm.get("description", ""),
-            mode=fm.get("mode", "subagent"),
-            skills=skills,
-            permissions={},
-        ))
+        result.append(
+            SubAgentDef(
+                name=fname.replace(".md", ""),
+                description=fm.get("description", ""),
+                mode=fm.get("mode", "subagent"),
+                skills=skills,
+                permissions={},
+            )
+        )
 
     return result
 
 
-def _build_step_from_parsed(step_info: dict, prompts: Dict[str, StepPrompt]) -> WorkflowStep:
+def _build_step_from_parsed(
+    step_info: dict, prompts: Dict[str, StepPrompt]
+) -> WorkflowStep:
     """将解析出的步骤信息转换为 WorkflowStep"""
     step_num = step_info.get("step_num", "0")
     step_key = f"step_{step_num}"
@@ -335,8 +409,22 @@ def _build_step_from_parsed(step_info: dict, prompts: Dict[str, StepPrompt]) -> 
     # 确定输出产物
     artifacts = []
     if prompt_def and prompt_def.prompt_template:
-        # 从 prompt 中提取输出文件
-        artifact_patterns = re.findall(r'operators/\{?\w+\}?/docs/(\w+\.md)', prompt_def.prompt_template)
+        tpl = prompt_def.prompt_template
+        # 优先从【输出】段落提取，避免误匹配输入引用
+        output_section = ""
+        m = re.search(r"【输出】(.*?)(?:【|##|\Z)", tpl, re.DOTALL)
+        if m:
+            output_section = m.group(1)
+        # 若无【输出】标记，从【验收标准】段落提取（含"已创建"/"都存在"等完成条件）
+        if not output_section:
+            m2 = re.search(r"【验收标准】(.*?)(?:【|##|\Z)", tpl, re.DOTALL)
+            if m2:
+                output_section = m2.group(1)
+        # 提取完整相对路径（含 {operator_name} 占位符，session 创建时替换）
+        search_text = output_section if output_section else tpl
+        artifact_patterns = re.findall(
+            r"(operators/\{?\w+\}?/docs/[\w/]+\.\w+)", search_text
+        )
         artifacts = list(set(artifact_patterns))
 
     return WorkflowStep(
@@ -388,7 +476,7 @@ def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
         wf_dir = os.path.join(plugin_dir, "workflows")
         if os.path.isdir(wf_dir):
             for wf_file in sorted(os.listdir(wf_dir)):
-                if not wf_file.endswith('.md') or wf_file == 'task-prompts.md':
+                if not wf_file.endswith(".md") or wf_file == "task-prompts.md":
                     continue
                 wf_path = os.path.join(wf_dir, wf_file)
                 wf_text = open(wf_path, encoding="utf-8", errors="replace").read()
@@ -409,23 +497,42 @@ def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
     # 如果 ASCII 流程图没提取到步骤，尝试从 task-prompts.md 构建
     if not steps and prompts:
         for step_key, prompt_def in sorted(prompts.items()):
-            steps.append(WorkflowStep(
-                step_id=step_key,
-                name=step_key.replace('_', ' '),
-                gate_condition=None,
-                dispatch_target=prompt_def.subagent_type,
-                output_artifacts=[],
-                required_skills=prompt_def.required_skills + prompt_def.recommended_skills,
-                prompt_def=prompt_def,
-            ))
+            steps.append(
+                WorkflowStep(
+                    step_id=step_key,
+                    name=step_key.replace("_", " "),
+                    gate_condition=None,
+                    dispatch_target=prompt_def.subagent_type,
+                    output_artifacts=[],
+                    required_skills=prompt_def.required_skills
+                    + prompt_def.recommended_skills,
+                    prompt_def=prompt_def,
+                )
+            )
 
     # 如果还是没有步骤，但 agents 有定义，创建通用流程
     if not steps and agent_defs:
         steps = [
-            WorkflowStep(step_id="step_1_analysis", name="需求分析", required_skills=agents_info.get("skills", [])),
-            WorkflowStep(step_id="step_2_design", name="方案设计", dispatch_target=agent_defs[0].name if agent_defs else None),
-            WorkflowStep(step_id="step_3_develop", name="开发实现", dispatch_target=agent_defs[1].name if len(agent_defs) > 1 else None),
-            WorkflowStep(step_id="step_4_review", name="审查验证", dispatch_target=agent_defs[2].name if len(agent_defs) > 2 else None),
+            WorkflowStep(
+                step_id="step_1_analysis",
+                name="需求分析",
+                required_skills=agents_info.get("skills", []),
+            ),
+            WorkflowStep(
+                step_id="step_2_design",
+                name="方案设计",
+                dispatch_target=agent_defs[0].name if agent_defs else None,
+            ),
+            WorkflowStep(
+                step_id="step_3_develop",
+                name="开发实现",
+                dispatch_target=agent_defs[1].name if len(agent_defs) > 1 else None,
+            ),
+            WorkflowStep(
+                step_id="step_4_review",
+                name="审查验证",
+                dispatch_target=agent_defs[2].name if len(agent_defs) > 2 else None,
+            ),
             WorkflowStep(step_id="step_5_report", name="完成报告"),
         ]
 
@@ -435,6 +542,7 @@ def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
     if os.path.exists(plugin_json):
         try:
             import json
+
             with open(plugin_json) as f:
                 pdata = json.load(f)
             plugin_name = pdata.get("name", plugin_id)
@@ -447,7 +555,8 @@ def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
         description=agents_info.get("description", ""),
         mode=agents_info.get("mode", "primary"),
         required_skills=agents_info.get("skills", []) or [],
-        agents=[ad.name for ad in agent_defs] or [a["role"] for a in agents_info.get("agents", [])],
+        agents=[ad.name for ad in agent_defs]
+        or [a["role"] for a in agents_info.get("agents", [])],
         agent_defs=agent_defs,
         steps=steps,
         constraints=agents_info.get("constraints", []),
@@ -467,8 +576,9 @@ def scan_all_plugins() -> List[WorkflowDefinition]:
             if not os.path.isdir(plugin_dir):
                 continue
             # 必须有 AGENTS.md 或 CLAUDE.md
-            if not os.path.exists(os.path.join(plugin_dir, "AGENTS.md")) and \
-               not os.path.exists(os.path.join(plugin_dir, "CLAUDE.md")):
+            if not os.path.exists(
+                os.path.join(plugin_dir, "AGENTS.md")
+            ) and not os.path.exists(os.path.join(plugin_dir, "CLAUDE.md")):
                 continue
             try:
                 wf = build_workflow_definition(plugin_dir)

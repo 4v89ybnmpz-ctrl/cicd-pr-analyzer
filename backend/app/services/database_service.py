@@ -112,6 +112,29 @@ class DatabaseService:
             self.client.close()
             logger.info("数据库连接已关闭")
 
+    async def _ensure_connected(self) -> bool:
+        """确保数据库已连接；若启动时 DB 未就绪（self.db 为 None），尝试重连一次。
+
+        解决场景：后端先于 MongoDB 启动时，connect() 失败导致 self.db 恒为 None，
+        后续 save/get 静默失败。仿真会话强依赖持久化，故在 v2 仿真关键路径上调用此方法自愈。
+        """
+        if self.db is not None:
+            return True
+        if not DATABASE_AVAILABLE:
+            return False
+        try:
+            if self.client is None:
+                self.client = AsyncIOMotorClient(
+                    self.connection_string, serverSelectionTimeoutMS=5000
+                )
+            await self.client.admin.command('ping')
+            self.db = self.client[self.database_name]
+            logger.info("数据库延迟重连成功")
+            return True
+        except Exception as e:
+            logger.warning(f"数据库延迟重连失败: {e}")
+            return False
+
     async def save_pr_data(self, owner: str, repo: str, pr_data: Dict[str, Any], platform: str = "github") -> bool:
         if self.db is None:
             return False
@@ -4510,6 +4533,8 @@ class DatabaseService:
     async def save_workflow_sim_v2_session(self, data: dict) -> bool:
         """保存 V2 仿真会话（upsert by session_id）"""
         if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
             return False
         try:
             await self.db["workflow_sim_v2_sessions"].update_one(
@@ -4525,6 +4550,8 @@ class DatabaseService:
     async def get_workflow_sim_v2_sessions(self, limit: int = 30) -> list:
         """查询 V2 仿真会话列表（按 created_at 降序）"""
         if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
             return []
         try:
             cursor = self.db["workflow_sim_v2_sessions"].find(
@@ -4535,8 +4562,31 @@ class DatabaseService:
             logger.error(f"查询 V2 仿真会话失败: {e}")
             return []
 
+    async def get_workflow_sim_v2_sessions_by_plugin(self, plugin_id: str, limit: int = 50) -> list:
+        """按 plugin_id 拉已完成/已停止的 V2 session，projection 排除 MB 级日志字段。
+
+        用于插件断点诊断聚合：排除 terminal_log/simulation_log/program_log/fix_log/jsonl_log
+        等大数组，只保留 steps/breakpoint_alerts/summary 等聚合必需字段。
+        """
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return []
+        try:
+            cursor = self.db["workflow_sim_v2_sessions"].find(
+                {"plugin_id": plugin_id, "status": {"$in": ["completed", "stopped", "failed"]}},
+                {"_id": 0, "terminal_log": 0, "simulation_log": 0, "program_log": 0,
+                 "fix_log": 0, "jsonl_log": 0},
+            ).sort("created_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"按 plugin_id 查询 V2 仿真会话失败 [{plugin_id}]: {e}")
+            return []
+
     async def get_workflow_sim_v2_session(self, session_id: str) -> Optional[dict]:
         """按 session_id 获取 V2 仿真会话"""
+        if self.db is None:
+            await self._ensure_connected()
         if self.db is None:
             return None
         try:
@@ -4550,6 +4600,8 @@ class DatabaseService:
     async def update_workflow_sim_v2_session(self, session_id: str, update: dict) -> bool:
         """部分更新 V2 仿真会话"""
         if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
             return False
         try:
             await self.db["workflow_sim_v2_sessions"].update_one(
@@ -4561,8 +4613,48 @@ class DatabaseService:
             logger.error(f"更新 V2 仿真会话失败 [{session_id}]: {e}")
             return False
 
+    async def append_workflow_sim_v2_log(self, session_id: str, field: str, entries: list) -> bool:
+        """$push $each 追加到 terminal_log / simulation_log / breakpoint_alerts。
+        增量持久化，避免全量 $set 覆盖历史（仿真执行与 SSE 解耦后，重连不能丢历史）。"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return False
+        if not entries:
+            return True
+        try:
+            await self.db["workflow_sim_v2_sessions"].update_one(
+                {"session_id": session_id},
+                {"$push": {field: {"$each": entries}}},
+            )
+            return True
+        except Exception as e:
+            logger.error(f"追加 V2 仿真日志失败 [{session_id}.{field}]: {e}")
+            return False
+
+    async def update_workflow_sim_v2_step(self, session_id: str, step_id: str, step_update: dict) -> bool:
+        """按 step_id 局部更新单个 step 字段（steps.$.xxx），避免全量 $set steps 覆盖并发写。"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return False
+        if not step_update:
+            return True
+        try:
+            set_doc = {f"steps.$.{k}": v for k, v in step_update.items()}
+            await self.db["workflow_sim_v2_sessions"].update_one(
+                {"session_id": session_id, "steps.step_id": step_id},
+                {"$set": set_doc},
+            )
+            return True
+        except Exception as e:
+            logger.error(f"更新 V2 仿真步骤失败 [{session_id}.{step_id}]: {e}")
+            return False
+
     async def delete_workflow_sim_v2_session(self, session_id: str) -> bool:
         """删除 V2 仿真会话"""
+        if self.db is None:
+            await self._ensure_connected()
         if self.db is None:
             return False
         try:
@@ -4573,3 +4665,52 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"删除 V2 仿真会话失败 [{session_id}]: {e}")
             return False
+
+    # ==================== 工作流仿真 V2 批量评估 ====================
+
+    async def save_workflow_sim_v2_batch(self, data: dict) -> bool:
+        """保存批量评估记录（upsert by batch_id）"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return False
+        try:
+            await self.db["workflow_sim_v2_batches"].update_one(
+                {"batch_id": data.get("batch_id")},
+                {"$set": data},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"保存 V2 批量评估失败: {e}")
+            return False
+
+    async def get_workflow_sim_v2_batch(self, batch_id: str) -> Optional[dict]:
+        """按 batch_id 获取批量评估记录"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return None
+        try:
+            return await self.db["workflow_sim_v2_batches"].find_one(
+                {"batch_id": batch_id}, {"_id": 0},
+            )
+        except Exception as e:
+            logger.error(f"查询 V2 批量评估失败 [{batch_id}]: {e}")
+            return None
+
+    async def list_workflow_sim_v2_batches(self, limit: int = 30) -> list:
+        """列出批量评估记录（按 created_at 降序）"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return []
+        try:
+            cursor = self.db["workflow_sim_v2_batches"].find(
+                {}, {"_id": 0}
+            ).sort("created_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"查询 V2 批量评估列表失败: {e}")
+            return []
+

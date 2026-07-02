@@ -989,6 +989,53 @@ def register_cannbot_routes(router: APIRouter):
 
         return {"scenario": scenario_path, "tools": results}
 
+    @router.get("/cannbot/install-check-workdir")
+    async def check_install_in_workdir(work_dir: str = "", plugin_id: str = "", tool: str = "claude"):
+        """检查指定工作目录中是否已安装某个插件"""
+        if not work_dir or not plugin_id:
+            return {"installed": False, "error": "缺少 work_dir 或 plugin_id"}
+
+        work_path = Path(work_dir)
+        scenario_id = plugin_id
+
+        # 检测工作目录下的 .claude/.cursor 等配置目录
+        tool_config_names = {
+            "claude": ".claude",
+            "cursor": ".cursor",
+            "opencode": ".opencode",
+        }
+        config_name = tool_config_names.get(tool, f".{tool}")
+        config_dir = work_path / config_name
+
+        if not config_dir.is_dir():
+            return {
+                "installed": False,
+                "plugin_id": plugin_id,
+                "work_dir": work_dir,
+                "config_dir": str(config_dir),
+                "skills": [],
+                "agents": [],
+            }
+
+        artifacts = _collect_install_artifacts(str(config_dir), str(work_path), tool)
+
+        # 判断是否已安装：有 manifest 且 team 匹配，或有 skills/agents 产物
+        manifest_match = (
+            artifacts.get("manifest") and artifacts["manifest"].get("team") == scenario_id
+        )
+        has_products = bool(artifacts.get("skills") or artifacts.get("agents"))
+
+        return {
+            "installed": manifest_match or has_products,
+            "plugin_id": plugin_id,
+            "work_dir": work_dir,
+            "config_dir": str(config_dir),
+            "skills": artifacts.get("skills", []),
+            "agents": artifacts.get("agents", []),
+            "configFiles": artifacts.get("configFiles", []),
+            "manifest": artifacts.get("manifest"),
+        }
+
     # ==================== 插件白名单解析 ====================
 
     def _parse_plugin_whitelist(scenario_path: str) -> dict:

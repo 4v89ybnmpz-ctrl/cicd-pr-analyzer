@@ -151,6 +151,39 @@ async def lifespan(app: FastAPI):
     start_monitoring(auto_recovery=auto_recovery)
     logger.info(f"服务监控已启动 (自动恢复: {auto_recovery}, watchdog 模式: {watchdog_mode})")
 
+    # 清理僵尸会话：服务重启前 status=running 的会话，其后台执行 Task 已不在，
+    # 把 running step 标 failed、session 标 stopped，避免刷新后看到永远 running 的僵尸。
+    try:
+        from datetime import datetime as _dt
+        cursor = db.db["workflow_sim_v2_sessions"].find({"status": "running"})
+        cleaned = 0
+        async for sess in cursor:
+            sid = sess.get("session_id")
+            steps = sess.get("steps", []) or []
+            changed = False
+            for s in steps:
+                if s.get("status") == "running":
+                    s["status"] = "failed"
+                    s["completed_at"] = _dt.now().isoformat()
+                    s["error_detail"] = {
+                        "category": "UNKNOWN",
+                        "root_cause": "服务重启，执行中断",
+                        "suggestion": "重新启动该会话仿真",
+                        "original_error": "process killed by backend restart",
+                    }
+                    changed = True
+            await db.update_workflow_sim_v2_session(sid, {
+                "status": "stopped",
+                "steps": steps,
+                "completed_at": _dt.now().isoformat(),
+            })
+            cleaned += 1
+            logger.info(f"[startup] 清理僵尸会话 {sid}")
+        if cleaned:
+            logger.info(f"[startup] 共清理 {cleaned} 个僵尸会话")
+    except Exception as e:
+        logger.warning(f"[startup] 僵尸会话清理失败: {e}")
+
     yield  # 应用运行中
 
     # === 关闭 ===
