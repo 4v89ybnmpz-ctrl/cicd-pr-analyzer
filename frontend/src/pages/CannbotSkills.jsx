@@ -8,7 +8,7 @@ import {
   SyncOutlined, DownloadOutlined, FolderOutlined, FileTextOutlined,
   SearchOutlined, RobotOutlined, CodeOutlined, ThunderboltOutlined,
   InfoCircleOutlined,
-  CloudOutlined, AppstoreOutlined, DashboardOutlined, AuditOutlined,
+  CloudOutlined, AppstoreOutlined, DashboardOutlined, AuditOutlined, ApartmentOutlined,
   ToolOutlined, RocketOutlined, CheckCircleOutlined, ClockCircleOutlined,
   StarOutlined, ExperimentOutlined, FilePdfOutlined, FileMarkdownOutlined,
   DownOutlined, DeleteOutlined, WarningOutlined, SafetyCertificateOutlined,
@@ -31,6 +31,7 @@ import OpsDevSession from './OpsDevSession'
 import WorkflowSimPanel from '../components/WorkflowSimPanel'
 import BreakpointTimeline from '../components/BreakpointTimeline'
 import SkillHeatmapChart from '../components/SkillHeatmapChart'
+import PluginGraphPanel from '../components/PluginGraphPanel'
 
 const { Title, Text, Paragraph } = Typography
 const { Search } = Input
@@ -260,6 +261,11 @@ export default function CannbotSkills() {
           children: (
             <InstallTab scenarios={scenarios} selectedTool={selectedTool} setSelectedTool={setSelectedTool} />
           ),
+        },
+        {
+          key: 'plugin-graph',
+          label: <span><ApartmentOutlined /> 插件架构</span>,
+          children: <PluginGraphPanel />,
         },
         {
           key: 'test',
