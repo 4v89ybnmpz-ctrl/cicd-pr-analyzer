@@ -120,6 +120,53 @@ def build_post_external_steps(start_index: int) -> list:
     ]
 
 
+# 平台注入步骤的 prompt（不属于插件 task-prompts.md，由平台写死；drive.py 替换 {work_dir}）
+PLATFORM_INSTALL_PROMPT = """你正在 {work_dir} 这个已 clone 下来的算子库工作目录中。
+这是仿真平台在执行插件开发流程之前，为你准备的「环境准备」步骤。
+
+## 任务
+1. 先用 Read/Glob 阅读该算子库根目录及 docs/ 下的文档：README、CONTRIBUTING（贡献指南）、开发文档、构建说明、环境要求等（找不到就跳过该文件，不要报错）。
+2. 从文档中识别出本算子库的开发环境要求：依赖的编程语言/编译器版本、Python/Conda 环境、系统包、CANN/Ascend 工具链、第三方库、环境变量、初始化脚本（如 source env.sh / init.sh / install.sh）等。
+3. 按文档描述安装/配置环境。可以执行文档中明确指明的安装命令或初始化脚本。如文档未指明，仅做最小必要的环境准备（如创建 venv、安装 requirements.txt 中的依赖），不要臆造命令。
+4. 完成后给出简明安装总结：识别到的开发要求、实际执行的安装步骤、最终环境状态（已就绪 / 部分就绪 / 缺失项）。
+
+## 约束
+- 严格依据文档判断要装什么，不要套用通用模板。不同算子库要求差异很大。
+- 只做"环境准备"，不要开始任何算子开发工作（那是后续插件步骤的任务）。
+- 安装命令应在 {work_dir} 下执行。
+"""
+
+
+def build_platform_steps(start_index: int = 0) -> list:
+    """平台注入步骤（不属于插件 task-prompts.md），由平台写死 prompt，进 Claude 执行。
+
+    与 external 步骤的区别：external 仅前端展示、不进 Claude；
+    platform 是真 Claude 执行步骤，prompt 由平台定义。
+    """
+    return [{
+        "step_id": "platform_install_env",
+        "step_name": "安装环境",
+        "step_type": "platform",
+        "step_category": "install_env",
+        "step_index": start_index,
+        "status": "pending",
+        "prompt_template": PLATFORM_INSTALL_PROMPT,
+        "required_skills": [],
+        "output_artifacts": [],
+        "dispatch_target": None,  # 主 Claude 自己执行，不派给 subagent
+        "fallback": None,
+        "output": "",
+        "events": [],
+        "duration_ms": 0,
+        "gate_passed": None,
+        "gate_artifacts": [],
+        "skill_compliance": None,
+        "token_usage": {},
+        "started_at": None,
+        "completed_at": None,
+    }]
+
+
 # ==================== 辅助函数 ====================
 
 
@@ -338,8 +385,8 @@ def _fill_legacy_logs(session: dict) -> dict:
     if not session.get("clone_status"):
         session["clone_status"] = "pending"
 
-    # 老会话补外部生命周期步骤（clone 前置 / NPU·CI-CD 后置），并重排为新顺序
-    plugin_steps_local = [s for s in steps if s.get("step_type") != "external"]
+    # 老会话补外部生命周期步骤（clone 前置 / NPU·CI-CD 后置）+ 平台注入步骤，并重排为新顺序
+    plugin_steps_local = [s for s in steps if s.get("step_type") not in ("external", "platform")]
     existing_ext = {s.get("step_id"): s for s in steps if s.get("step_type") == "external"}
 
     def _ext_or_new(step_id, builder):
@@ -347,18 +394,22 @@ def _fill_legacy_logs(session: dict) -> dict:
         return existing_ext.get(step_id) or builder(0)[0]
 
     pre_steps = [_ext_or_new("ext_clone", build_pre_external_steps)]
+    # 平台注入步骤：老会话当时没跑过，标 skipped（前端显示「已跳过」，不误导成未完成）
+    platform_step = None
+    if not any(s.get("step_id") == "platform_install_env" for s in steps):
+        platform_step = build_platform_steps(0)[0]
+        platform_step["status"] = "skipped"
+    else:
+        platform_step = next(s for s in steps if s.get("step_id") == "platform_install_env")
     post_steps = [
         _ext_or_new("ext_npu", lambda idx: build_post_external_steps(idx)[:1]),
         _ext_or_new("ext_cicd", lambda idx: build_post_external_steps(idx)[1:2]),
     ]
-    # 重新编号 step_index：clone=0, plugin=1..n, npu/cicd=n+1..
-    for i, s in enumerate(pre_steps):
+    # 重新编号 step_index：clone=0, platform=1, plugin=2..n+1, npu/cicd=n+2..
+    seq = pre_steps + ([platform_step] if platform_step else []) + plugin_steps_local + post_steps
+    for i, s in enumerate(seq):
         s["step_index"] = i
-    for i, s in enumerate(plugin_steps_local):
-        s["step_index"] = len(pre_steps) + i
-    for i, s in enumerate(post_steps):
-        s["step_index"] = len(pre_steps) + len(plugin_steps_local) + i
-    session["steps"] = pre_steps + plugin_steps_local + post_steps
+    session["steps"] = seq
 
     if not session.get("terminal_log"):
         terminal_log = []

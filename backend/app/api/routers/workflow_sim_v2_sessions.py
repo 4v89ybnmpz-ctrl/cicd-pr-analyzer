@@ -20,6 +20,7 @@ from .workflow_sim_v2_helpers import (
     _fill_legacy_logs,
     build_pre_external_steps,
     build_post_external_steps,
+    build_platform_steps,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,15 +188,18 @@ def register_sessions_routes(router: APIRouter, db=None):
             for s in DEFAULT_PIPELINE_STAGES
         ]
 
-        # 组装完整生命周期 steps：前置(clone) → 插件开发流程 → 后置(NPU/CI-CD)
-        # 外部步骤仅用于前端串联展示，不进 Claude 执行（drive.py 按 step_type=external 跳过）
+        # 组装完整生命周期 steps：前置(clone) → 平台注入(安装环境) → 插件开发流程 → 后置(NPU/CI-CD)
+        # - external 步骤仅前端展示、不进 Claude（drive.py 按 step_type=external 跳过）
+        # - platform 步骤进 Claude 执行，prompt 由平台写死（非插件 task-prompts.md）
         pre_steps = build_pre_external_steps(start_index=0)
+        platform_steps = build_platform_steps(start_index=len(pre_steps))
+        _offset = len(pre_steps) + len(platform_steps)
         for ps in plugin_steps_raw:
-            ps["step_index"] = ps["step_index"] + len(pre_steps)
+            ps["step_index"] = ps["step_index"] + _offset
         post_steps = build_post_external_steps(
-            start_index=len(pre_steps) + len(plugin_steps_raw)
+            start_index=_offset + len(plugin_steps_raw)
         )
-        steps = pre_steps + plugin_steps_raw + post_steps
+        steps = pre_steps + platform_steps + plugin_steps_raw + post_steps
 
         session = {
             "session_id": session_id,

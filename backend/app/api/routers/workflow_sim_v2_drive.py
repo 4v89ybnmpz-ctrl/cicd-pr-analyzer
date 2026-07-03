@@ -117,6 +117,20 @@ async def drive_session_events(
 
     os.makedirs(work_dir, exist_ok=True)
 
+    # 拍基线快照：记 HEAD commit sha 作为文件改动 diff 的基线（非 git 仓库则跳过，不阻断仿真）
+    if os.path.isdir(os.path.join(work_dir, ".git")):
+        try:
+            r = await _run_git("rev-parse", "HEAD", cwd=work_dir)
+            if r.get("returncode") == 0 and r.get("stdout", "").strip():
+                baseline = r["stdout"].strip()
+                session["diff_baseline"] = baseline
+                try:
+                    await db.update_workflow_sim_v2_session(session_id, {"diff_baseline": baseline})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     await _push_simlog(
         {
             "time": _ts(),
@@ -154,7 +168,12 @@ async def drive_session_events(
         required_skills = step.get("required_skills", [])
         artifacts = step.get("output_artifacts", [])
 
-        prompt = _render_prompt(prompt_template, op_name, op_spec)
+        # 平台注入步骤（step_type=platform）：prompt 由平台写死，替换 {work_dir}，
+        # 不走插件的 op_name/op_spec 渲染
+        if step.get("step_type") == "platform":
+            prompt = prompt_template.replace("{work_dir}", work_dir)
+        else:
+            prompt = _render_prompt(prompt_template, op_name, op_spec)
 
         # 追加产出物自检指令：让 Claude 在同一会话内完成前自行检查并补齐
         if artifacts:
@@ -1149,7 +1168,8 @@ async def drive_session_events(
         await db.append_workflow_sim_v2_log(session_id, "jsonl_log", final_jsonl_lines)
 
     # summary 统计只针对插件步骤，排除外部生命周期步骤（clone/NPU/CI-CD）
-    plugin_steps = [s for s in steps if s.get("step_type") != "external"]
+    # summary 只统计插件开发流程，排除 external（前端展示用）和 platform（平台注入的安装环境步骤）
+    plugin_steps = [s for s in steps if s.get("step_type") not in ("external", "platform")]
     completed_steps = [s for s in plugin_steps if s.get("status") == "completed"]
     failed_steps = [
         s
