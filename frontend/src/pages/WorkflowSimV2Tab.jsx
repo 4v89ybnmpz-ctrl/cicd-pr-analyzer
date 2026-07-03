@@ -33,6 +33,7 @@ import {
   getWorkflowDefinition,
   getNpuHosts, streamNpuTestSSE, cancelNpuTest, streamNpuTestClaudeSSE,
   getBreakpointDiagnosis, exportBreakpointDiagnosis,
+  getWorkflowDiff, getFileDiff,
 } from '../api'
 import {
   ReactFlow, Controls, Background, MarkerType, Handle, Position,
@@ -42,6 +43,7 @@ import PipelinePanel from '../components/workflowSimV2/PipelinePanel'
 import NpuTestPanel from '../components/workflowSimV2/NpuTestPanel'
 import PluginArchGraph from '../components/workflowSimV2/PluginArchGraph'
 import BreakpointDiagnosisGraph from '../components/workflowSimV2/BreakpointDiagnosisGraph'
+import NewSessionModal from '../components/workflowSimV2/NewSessionModal'
 import { PieChart, Pie, Cell, Tooltip as RTooltip, BarChart, Bar, XAxis, YAxis, ResponsiveContainer } from 'recharts'
 
 const { Text } = Typography
@@ -85,28 +87,12 @@ export default function WorkflowSimV2Tab() {
   const [workDir, setWorkDir] = useState(_saved?.workDir || '')
   const [pluginsLoading, setPluginsLoading] = useState(false)
 
-  // Step 1: 算子库
+  // Step 1: 算子库（输入态持久化；fork/clone/branch 操作态在 NewSessionModal 内部）
   const [repoUrl, setRepoUrl] = useState(_saved?.repoUrl || 'https://atomgit.com/cann/ops-math')
   const [gitcodeToken, setGitcodeToken] = useState(_saved?.gitcodeToken || '')
-  const [forkStatus, setForkStatus] = useState('idle') // idle | forking | forked | error
-  const [forkInfo, setForkInfo] = useState(null) // {fork_url, fork_path}
-  const [cloneStatus, setCloneStatus] = useState('idle') // idle | checking | cloning | cloned | error
-  const [cloneInfo, setCloneInfo] = useState(null) // {branch, path}
 
   // Step 2: 插件安装
   const [selectedTool, setSelectedTool] = useState(_saved?.selectedTool || 'claude')
-  const [installStatus, setInstallStatus] = useState('idle') // idle | checking | installing | installed | error
-  const [installInfo, setInstallInfo] = useState(null)
-
-  // 分支管理
-  const [branches, setBranches] = useState([])
-  const [currentBranch, setCurrentBranch] = useState('')
-  const [branchesLoading, setBranchesLoading] = useState(false)
-  const [newBranchName, setNewBranchName] = useState('')
-  const [baseBranch, setBaseBranch] = useState('')
-  const [branchCreating, setBranchCreating] = useState(false)
-  const [branchSwitching, setBranchSwitching] = useState(false)
-  const [selectedBranchToSwitch, setSelectedBranchToSwitch] = useState(null)
 
   const [stepTimeout, setStepTimeout] = useState(_saved?.stepTimeout ?? 0)
 
@@ -139,6 +125,14 @@ export default function WorkflowSimV2Tab() {
   const [npuClaudeLogs, setNpuClaudeLogs] = useState([])
   const [npuClaudeRunning, setNpuClaudeRunning] = useState(false)
   const [showNpuClaude, setShowNpuClaude] = useState(true)
+
+  // 文件改动 diff（diffFiles 进 per-session slice；selectedDiffFile/diffContent 为 UI 单例态）
+  const [diffFiles, setDiffFiles] = useState([])
+  const [diffError, setDiffError] = useState(null)
+  const [selectedDiffFile, setSelectedDiffFile] = useState(null)
+  const [diffContent, setDiffContent] = useState(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+  const [showDiffFiles, setShowDiffFiles] = useState(true)
   const npuClaudeEsRef = useRef(null)
   const npuClaudeEndRef = useRef(null)
   const [simulating, setSimulating] = useState(false)
@@ -163,6 +157,7 @@ export default function WorkflowSimV2Tab() {
   const npuLogEndRef = useRef(null)                   // npu 日志面板自动滚动锚点
   // 历史回看：null 表示查看当前仿真，有值表示查看历史记录
   const [viewingHistoryId, setViewingHistoryId] = useState(null)
+  const [newSessionModalOpen, setNewSessionModalOpen] = useState(false)
 
   // 日志预览 modal
   const [previewModal, setPreviewModal] = useState(null) // { session_id, op_name, terminal_log, simulation_log, tab: 'terminal'|'simlog' }
@@ -211,36 +206,40 @@ export default function WorkflowSimV2Tab() {
   }, [])
 
   // 连接 jsonl tail SSE（独立第二条 EventSource，只读镜像 claude 原生工作流水）
+  // 多 session 隔离：事件写对应 sid 的 slice，仅当前 viewing 触发单例渲染。
   const connectJsonlStream = useCallback((sid) => {
-    if (jsonlEsRef.current) jsonlEsRef.current.close()
+    if (jsonlEsMapRef.current.get(sid)) jsonlEsMapRef.current.get(sid).close()
     let intentionallyClosed = false
+    const setJsonlLinesS = writerFor(sid, 'jsonlLines', setJsonlLines)
+    const setJsonlActiveFileS = writerFor(sid, 'jsonlActiveFile', setJsonlActiveFile)
+    const isViewing = () => viewingSessionIdRef.current === sid
     const jes = streamWorkflowJsonl(sid)
-    jsonlEsRef.current = jes
+    jsonlEsMapRef.current.set(sid, jes)
     jes.addEventListener('jsonl_switch', (e) => {
       const data = JSON.parse(e.data)
-      setJsonlActiveFile(data.file || '')
+      setJsonlActiveFileS(data.file || '')
       const isSub = data.kind === 'subagent'
       const label = isSub
         ? `── 🤖 进入子 Agent 流水：${data.file || ''}${data.skipped_history ? '（仅显示后续实时输出）' : ''} ──`
         : `── 会话切换到 ${data.file || ''} ──`
-      setJsonlLines(prev => [...prev, { kind: isSub ? 'subagent_switch' : 'switch', summary: label, ts: '' }])
+      setJsonlLinesS(prev => [...prev, { kind: isSub ? 'subagent_switch' : 'switch', summary: label, ts: '' }])
     })
     jes.addEventListener('jsonl_line', (e) => {
       const data = JSON.parse(e.data)
-      setJsonlWaiting(false)
-      setJsonlLines(prev => [...prev, { kind: data.kind, summary: data.summary, ts: data.ts, type: data.type }])
+      if (isViewing()) setJsonlWaiting(false)
+      setJsonlLinesS(prev => [...prev, { kind: data.kind, summary: data.summary, ts: data.ts, type: data.type }])
     })
     jes.addEventListener('no_active', () => {
-      setJsonlWaiting(true)
+      if (isViewing()) setJsonlWaiting(true)
     })
     jes.addEventListener('jsonl_done', () => {
       if (intentionallyClosed) return
       intentionallyClosed = true
-      setJsonlLines(prev => prev.length > 0 && prev[prev.length - 1]?.summary === '── claude 会话已结束 ──'
+      setJsonlLinesS(prev => prev.length > 0 && prev[prev.length - 1]?.summary === '── claude 会话已结束 ──'
         ? prev
         : [...prev, { kind: 'switch', summary: '── claude 会话已结束 ──', ts: '' }])
       jes.close()
-      jsonlEsRef.current = null
+      jsonlEsMapRef.current.delete(sid)
     })
     jes.onerror = () => {
       if (intentionallyClosed) {
@@ -251,7 +250,9 @@ export default function WorkflowSimV2Tab() {
   }, [])
 
   const disconnectJsonlStream = useCallback(() => {
-    if (jsonlEsRef.current) { jsonlEsRef.current.close(); jsonlEsRef.current = null }
+    // 关闭所有 jsonl SSE（多 session 场景）
+    for (const [, jes] of jsonlEsMapRef.current) { try { jes.close() } catch { /* ignore */ } }
+    jsonlEsMapRef.current.clear()
   }, [])
 
   // 配置字段变化时自动持久化到 sessionStorage
@@ -266,7 +267,7 @@ export default function WorkflowSimV2Tab() {
       .then(res => {
         const list = res.data?.plugins || []
         setPlugins(list)
-        // 若用户未选过插件，默认选中第一个，驱动 Skill 实时流程图渲染
+        // 若用户未选过插件，默认选中第一个（便于新建仿真 Modal 预填；流程图跟随 session，不受此影响）
         if (!selectedPlugin && list.length > 0) setSelectedPlugin(list[0].plugin_id)
       })
       .catch(() => message.warning('插件列表加载失败，请检查后端服务'))
@@ -284,6 +285,19 @@ export default function WorkflowSimV2Tab() {
       .finally(() => setPluginDefLoading(false))
   }, [selectedPlugin])
 
+  // 打开插件架构 Drawer（NewSessionModal 的"查看插件架构"回调）
+  const openPluginArch = useCallback((pluginId) => {
+    if (!pluginId) return
+    setPluginDrawerOpen(true)
+    if (!pluginDef || pluginDef.plugin_id !== pluginId) {
+      setPluginDefLoading(true)
+      getWorkflowDefinition(pluginId)
+        .then(res => setPluginDef(res.data))
+        .catch(() => setPluginDef(null))
+        .finally(() => setPluginDefLoading(false))
+    }
+  }, [pluginDef])
+
   // 加载历史
   const loadHistory = useCallback(() => {
     setHistoryLoading(true)
@@ -295,263 +309,232 @@ export default function WorkflowSimV2Tab() {
 
   useEffect(() => { loadHistory() }, [loadHistory])
 
-  // 工作目录变化时自动检查仓库状态
+  // 自动滚动终端（仅当用户已在底部时；只滚容器内部，不带动外层页面）
   useEffect(() => {
-    if (!workDir.trim()) { setCloneStatus('idle'); setCloneInfo(null); return }
-    setCloneStatus('checking')
-    checkWorkflowV2Repo(workDir.trim())
-      .then(res => {
-        if (res.data?.is_git) {
-          setCloneStatus('cloned')
-          setCloneInfo({ branch: res.data.branch, path: res.data.path })
-        } else if (res.data?.exists) {
-          setCloneStatus('error')
-          setCloneInfo(null)
-        } else {
-          setCloneStatus('idle')
-          setCloneInfo(null)
-        }
-      })
-      .catch(() => setCloneStatus('idle'))
-  }, [workDir])
-
-  // 工作目录或插件变化时自动检测安装状态
-  useEffect(() => {
-    if (!workDir.trim() || !selectedPlugin) {
-      if (installStatus !== 'installing') setInstallStatus('idle')
-      return
+    if (termPinned && termBoxRef.current) {
+      termBoxRef.current.scrollTop = termBoxRef.current.scrollHeight
     }
-    setInstallStatus('checking')
-    checkCannbotInstallWorkdir(workDir.trim(), selectedPlugin, selectedTool)
-      .then(res => {
-        if (res.data?.installed) {
-          setInstallStatus('installed')
-          setInstallInfo(res.data)
-        } else {
-          setInstallStatus('idle')
-          setInstallInfo(null)
-        }
-      })
-      .catch(() => setInstallStatus('idle'))
-  }, [workDir, selectedPlugin, selectedTool])
-
-  // repoUrl + gitcodeToken 变化时自动检测是否已 fork
-  useEffect(() => {
-    if (!repoUrl.trim() || !gitcodeToken.trim()) { return }
-    setForkStatus('checking')
-    checkWorkflowV2Fork(repoUrl.trim(), gitcodeToken.trim())
-      .then(res => {
-        if (res.data?.forked) {
-          setForkStatus('forked')
-          setForkInfo({
-            fork_url: res.data.fork_url,
-            fork_ssh: res.data.fork_ssh,
-            fork_path: res.data.fork_path,
-          })
-        } else {
-          setForkStatus('idle')
-          setForkInfo(null)
-        }
-      })
-      .catch(() => setForkStatus('idle'))
-  }, [repoUrl, gitcodeToken])
-
-  // Fork 算子库到用户 GitCode 账号
-  const handleFork = useCallback(async () => {
-    if (!repoUrl.trim()) { message.warning('请输入算子库地址'); return }
-    if (!gitcodeToken.trim()) { message.warning('请输入 GitCode Token'); return }
-    setForkStatus('forking')
-    try {
-      const res = await forkWorkflowV2Repo({ repo_url: repoUrl.trim(), token: gitcodeToken.trim() })
-      if (res.data.error) {
-        setForkStatus('error')
-        message.error(res.data.error)
-        return
-      }
-      setForkStatus('forked')
-      setForkInfo(res.data)
-      message.success(res.data.status === 'already_forked' ? '仓库已存在于您的账号' : 'Fork 成功')
-    } catch (e) {
-      setForkStatus('error')
-      message.error(e._friendlyMsg || 'Fork 失败')
-    }
-  }, [repoUrl, gitcodeToken])
-
-  // Clone 算子库（从 fork 后的仓库 clone）
-  const handleClone = useCallback(async () => {
-    // clone URL 优先使用 fork 后的地址
-    const cloneUrl = forkInfo?.fork_url || repoUrl.trim()
-    if (!cloneUrl) { message.warning('请先 Fork 或输入仓库地址'); return }
-    if (!workDir.trim()) { message.warning('请输入工作目录'); return }
-    setCloneStatus('cloning')
-    try {
-      const res = await cloneWorkflowV2Repo({ repo_url: cloneUrl, target_dir: workDir.trim() })
-      if (res.data.error) {
-        setCloneStatus('error')
-        message.error(res.data.error)
-        return
-      }
-      setCloneStatus('cloned')
-      setCloneInfo({ branch: res.data.branch, path: res.data.path })
-      message.success(res.data.status === 'already_exists' ? '仓库已存在' : 'Clone 成功')
-    } catch (e) {
-      setCloneStatus('error')
-      message.error(e._friendlyMsg || 'Clone 失败')
-    }
-  }, [repoUrl, workDir, forkInfo])
-
-  // 安装插件
-  const handleInstall = useCallback(async () => {
-    if (!selectedPlugin) { message.warning('请先选择插件'); return }
-    if (!workDir.trim()) { message.warning('请先设置工作目录'); return }
-    setInstallStatus('installing')
-    try {
-      // 找到选中插件的 scenario_path
-      const plugin = plugins.find(p => p.plugin_id === selectedPlugin)
-      const scenarioPath = plugin?.plugin_id
-        ? `plugins-official/${plugin.plugin_id}`
-        : ''
-      if (!scenarioPath) { message.error('无法确定插件路径'); setInstallStatus('error'); return }
-
-      const res = await installCannbotScenario({
-        scenario_path: scenarioPath,
-        tool: selectedTool,
-        level: 'project',
-        install_path: workDir.trim(),
-      })
-      if (res.data?.success) {
-        setInstallStatus('installed')
-        setInstallInfo(res.data)
-        message.success('插件安装成功')
-      } else {
-        setInstallStatus('error')
-        message.error(res.data?.errors || '安装失败')
-      }
-    } catch (e) {
-      setInstallStatus('error')
-      message.error(e._friendlyMsg || '安装失败')
-    }
-  }, [selectedPlugin, selectedTool, workDir, plugins])
-
-  // 加载分支列表
-  const loadBranches = useCallback(async () => {
-    if (!workDir.trim()) return
-    setBranchesLoading(true)
-    try {
-      const res = await listWorkflowV2Branches(workDir.trim())
-      if (res.data.error) {
-        message.error(res.data.error)
-        return
-      }
-      setBranches(res.data.branches || [])
-      setCurrentBranch(res.data.current_branch || '')
-    } catch (e) {
-      message.error(e._friendlyMsg || '获取分支失败')
-    } finally {
-      setBranchesLoading(false)
-    }
-  }, [workDir])
-
-  // clone 完成后自动加载分支
-  useEffect(() => {
-    if (cloneStatus === 'cloned') loadBranches()
-  }, [cloneStatus, loadBranches])
-
-  // 创建新分支
-  const handleCreateBranch = useCallback(async () => {
-    if (!newBranchName.trim()) { message.warning('请输入分支名称'); return }
-    if (!workDir.trim()) { message.warning('请先设置工作目录'); return }
-    setBranchCreating(true)
-    try {
-      const res = await createWorkflowV2Branch({ work_dir: workDir.trim(), branch_name: newBranchName.trim(), base_branch: baseBranch || '' })
-      if (res.data.error) { message.error(res.data.error); return }
-      message.success(res.data.message)
-      setNewBranchName('')
-      setCurrentBranch(newBranchName.trim())
-      // 更新 cloneInfo 中的分支信息
-      setCloneInfo(prev => prev ? { ...prev, branch: newBranchName.trim() } : null)
-      loadBranches()
-    } catch (e) {
-      message.error(e._friendlyMsg || '创建分支失败')
-    } finally {
-      setBranchCreating(false)
-    }
-  }, [workDir, newBranchName, loadBranches])
-
-  // 切换分支
-  const handleSwitchBranch = useCallback(async (branchName) => {
-    if (!branchName || !workDir.trim()) return
-    setBranchSwitching(true)
-    try {
-      const res = await switchWorkflowV2Branch({ work_dir: workDir.trim(), branch_name: branchName })
-      if (res.data.error) { message.error(res.data.error); return }
-      message.success(res.data.message)
-      setCurrentBranch(branchName)
-      setCloneInfo(prev => prev ? { ...prev, branch: branchName } : null)
-      loadBranches()
-    } catch (e) {
-      message.error(e._friendlyMsg || '切换分支失败')
-    } finally {
-      setBranchSwitching(false)
-    }
-  }, [workDir, loadBranches])
-
-  // 自动滚动终端（仅当用户已在底部时）
-  useEffect(() => {
-    if (termPinned) termEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [terminalLines, termPinned])
 
-  // 自动滚动 jsonl 面板（仅当用户已在底部时）
+  // 自动滚动 jsonl 面板（仅当用户已在底部时；只滚容器内部）
   useEffect(() => {
-    if (jsonlPinned) jsonlEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (jsonlPinned && jsonlBoxRef.current) {
+      jsonlBoxRef.current.scrollTop = jsonlBoxRef.current.scrollHeight
+    }
   }, [jsonlLines, jsonlPinned])
 
-  // 清理 SSE
+  // 清理 SSE（卸载时关闭所有 session 的 SSE）
   useEffect(() => {
     return () => {
-      if (esRef.current) esRef.current.close()
-      if (jsonlEsRef.current) jsonlEsRef.current.close()
-      if (npuEsRef.current) npuEsRef.current.close()
-      if (npuClaudeEsRef.current) npuClaudeEsRef.current.close()
+      for (const m of [esMapRef, jsonlEsMapRef, npuEsMapRef, npuClaudeEsMapRef]) {
+        for (const [, es] of m.current) { try { es.close() } catch { /* ignore */ } }
+        m.current.clear()
+      }
     }
   }, [])
 
-  // npu 日志面板自动滚动（仅当用户已在底部时）
+  // npu 日志面板自动滚动（仅当用户已在底部时；只滚容器内部）
   useEffect(() => {
-    if (npuPinned) npuLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (npuPinned && npuBoxRef.current) {
+      npuBoxRef.current.scrollTop = npuBoxRef.current.scrollHeight
+    }
   }, [npuLogs, npuPinned])
 
-  // 程序日志面板自动滚动
+  // 程序日志面板自动滚动（只滚容器内部）
   useEffect(() => {
-    if (progLogPinned) progLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (progLogPinned && progLogBoxRef.current) {
+      progLogBoxRef.current.scrollTop = progLogBoxRef.current.scrollHeight
+    }
   }, [progLogs, progLogPinned])
 
   const addLog = useCallback((type, text) => {
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, text }])
+    const entry = { time: new Date().toLocaleTimeString(), type, text }
+    setLogs(prev => [...prev, entry])
+    // 同步写回当前 viewing session 的 slice.logs，避免切换后丢失
+    const sid = viewingSessionIdRef.current
+    if (sid) {
+      const slice = sessionCacheRef.current.get(sid)
+      if (slice) slice.logs = [...slice.logs, entry]
+    }
   }, [])
+
+  // ====== 多 session 隔离基础设施：per-session 缓存 + SSE 多路 ======
+  const MAX_CONCURRENT_RUNNING = 6
+  const sessionCacheRef = useRef(new Map())          // sid -> slice（所有仿真数据类 state）
+  const esMapRef = useRef(new Map())                 // sid -> EventSource（主 SSE）
+  const jsonlEsMapRef = useRef(new Map())            // sid -> EventSource（jsonl tail）
+  const npuEsMapRef = useRef(new Map())              // sid -> EventSource（npu-test）
+  const npuClaudeEsMapRef = useRef(new Map())        // sid -> EventSource（npu-claude）
+  const viewingSessionIdRef = useRef(null)           // 供 SSE handler 高频读（避免闭包陈旧）
+  const lastViewingRunningRef = useRef(null)         // 最近 viewing 的 running sid，供 backToCurrent
+
+  const setViewing = useCallback((sid) => {
+    viewingSessionIdRef.current = sid
+    setViewingSessionId(sid)
+    if (sid) {
+      const s = sessionCacheRef.current.get(sid)
+      if (s?.session?.status === 'running') lastViewingRunningRef.current = sid
+    }
+  }, [])
+
+  const getSlice = useCallback((sid) => {
+    if (!sid) return null
+    let s = sessionCacheRef.current.get(sid)
+    if (!s) {
+      s = {
+        steps: [], alerts: [], terminalLines: [], logs: [], progLogs: [],
+        summary: null, pipeline: null, fixRounds: [], fixLog: [],
+        jsonlLines: [], jsonlActiveFile: '', monitorInsights: {},
+        runtimeSkillStatus: {}, journeyData: [], npuTest: null,
+        npuLogs: [], npuClaudeLogs: [], session: null,
+        diffFiles: [],
+      }
+      sessionCacheRef.current.set(sid, s)
+    }
+    return s
+  }, [])
+
+  // 把"写 slice 字段"和"若当前 viewing 则同步单例触发渲染"封一层
+  const writerFor = useCallback((sid, key, singleSetter) => (updater) => {
+    const slice = getSlice(sid)
+    if (!slice) return
+    const next = typeof updater === 'function' ? updater(slice[key]) : updater
+    slice[key] = next
+    if (viewingSessionIdRef.current === sid) singleSetter(next)
+  }, [getSlice])
+
+  const closeSessionStreams = useCallback((sid) => {
+    for (const m of [esMapRef, jsonlEsMapRef, npuEsMapRef, npuClaudeEsMapRef]) {
+      const es = m.current.get(sid)
+      if (es) { try { es.close() } catch { /* ignore */ }; m.current.delete(sid) }
+    }
+  }, [])
+
+  // 切换 viewing：把目标 session 的缓存投影回单例 state（渲染层零改动）
+  const projectSession = useCallback((sid) => {
+    const s = getSlice(sid)
+    if (!s) return
+    setSession(s.session); setSteps(s.steps); setAlerts(s.alerts)
+    setTerminalLines(s.terminalLines); setLogs(s.logs); setProgLogs(s.progLogs)
+    setSummary(s.summary); setPipeline(s.pipeline); setFixRounds(s.fixRounds)
+    setFixLog(s.fixLog); setJsonlLines(s.jsonlLines); setJsonlActiveFile(s.jsonlActiveFile)
+    setMonitorInsights(s.monitorInsights); setRuntimeSkillStatus(s.runtimeSkillStatus)
+    setJourneyData(s.journeyData); setNpuTest(s.npuTest); setNpuLogs(s.npuLogs)
+    setNpuClaudeLogs(s.npuClaudeLogs)
+    setDiffFiles(s.diffFiles)
+    setDiffError(null)
+    setSelectedStepIndex(-1)
+    setSelectedDiffFile(null); setDiffContent(null)
+    setSimulating(s.session?.status === 'running')
+  }, [getSlice])
+
+  // 文件改动 diff：仿真中轮询文件列表（5s，仅 simulating 时）；切走自动停
+  useEffect(() => {
+    if (!simulating || !session?.session_id) return
+    const sid = session.session_id
+    const refresh = () => {
+      getWorkflowDiff(sid).then(res => {
+        const files = res.data?.files || []
+        const err = res.data?.error || null
+        const slice = getSlice(sid)
+        if (slice) slice.diffFiles = files
+        if (viewingSessionIdRef.current === sid) { setDiffFiles(files); setDiffError(err) }
+      }).catch(() => {})
+    }
+    refresh()
+    const timer = setInterval(refresh, 5000)
+    return () => clearInterval(timer)
+  }, [simulating, session?.session_id, getSlice])
+
+  // 历史回看时也加载一次 diff 文件列表（仿真已结束，无轮询）
+  useEffect(() => {
+    if (!session?.session_id || simulating) return
+    if (viewingHistoryId !== session.session_id) return
+    const sid = session.session_id
+    getWorkflowDiff(sid).then(res => {
+      const files = res.data?.files || []
+      const err = res.data?.error || null
+      const slice = getSlice(sid)
+      if (slice) slice.diffFiles = files
+      setDiffFiles(files)
+      setDiffError(err)
+    }).catch(() => {})
+  }, [session?.session_id, viewingHistoryId, simulating, getSlice])
+
+  // 选中文件 → 取该文件 patch
+  const onSelectDiffFile = useCallback((filePath) => {
+    if (!session?.session_id || !filePath) return
+    setSelectedDiffFile(filePath)
+    setDiffLoading(true)
+    getFileDiff(session.session_id, filePath).then(res => {
+      setDiffContent(res.data?.patch || '')
+    }).catch(() => setDiffContent('')).finally(() => setDiffLoading(false))
+  }, [session?.session_id])
 
   // 绑定仿真 SSE 事件（handleStart 与 restoreSession 共用）。
   // 后端改为执行与 SSE 解耦：SSE 断开不影响后台进程，故 onerror 不再判定仿真失败。
+  // 多 session 隔离：所有 setter 走 writerFor(sid,...)，事件只写对应 session 的 slice，
+  // 仅当该 session 正是当前 viewing 时才同步单例 state 触发渲染。
   const attachSseHandlers = useCallback((es, sid, { autoPipeline: ap } = {}) => {
+    const setStepsS = writerFor(sid, 'steps', setSteps)
+    const setAlertsS = writerFor(sid, 'alerts', setAlerts)
+    const setTerminalLinesS = writerFor(sid, 'terminalLines', setTerminalLines)
+    const setLogsS = writerFor(sid, 'logs', setLogs)
+    const setProgLogsS = writerFor(sid, 'progLogs', setProgLogs)
+    const setJsonlLinesS = writerFor(sid, 'jsonlLines', setJsonlLines)
+    const setFixLogS = writerFor(sid, 'fixLog', setFixLog)
+    const setSummaryS = writerFor(sid, 'summary', setSummary)
+    const setSessionS = writerFor(sid, 'session', setSession)
+    const setJourneyDataS = writerFor(sid, 'journeyData', setJourneyData)
+    const setPipelineS = writerFor(sid, 'pipeline', setPipeline)
+    const setNpuTestS = writerFor(sid, 'npuTest', setNpuTest)
+    const setNpuLogsS = writerFor(sid, 'npuLogs', setNpuLogs)
+    const setMonitorInsightsS = writerFor(sid, 'monitorInsights', setMonitorInsights)
+    const setRuntimeSkillStatusS = writerFor(sid, 'runtimeSkillStatus', setRuntimeSkillStatus)
+    const setFixRoundsS = writerFor(sid, 'fixRounds', setFixRounds)
+
+    // sid 版本的 addLog / setSkillStatus（写 slice.logs / slice.runtimeSkillStatus）
+    const addLogS = (type, text) => {
+      const slice = getSlice(sid)
+      if (!slice) return
+      const entry = { time: new Date().toLocaleTimeString(), type, text }
+      slice.logs = [...slice.logs, entry]
+      if (viewingSessionIdRef.current === sid) setLogs(slice.logs)
+    }
+    const setSkillStatusS = (skill, stepId, status, onlyUpgrade = false) => {
+      if (!skill) return
+      const slice = getSlice(sid)
+      if (!slice) return
+      const prev = slice.runtimeSkillStatus
+      const perStep = { ...(prev[skill] || {}) }
+      const cur = perStep[stepId]
+      if (onlyUpgrade && cur && SKILL_STATUS_RANK[cur] > SKILL_STATUS_RANK[status]) return
+      if (perStep[stepId] === status) return
+      perStep[stepId] = status
+      slice.runtimeSkillStatus = { ...prev, [skill]: perStep }
+      if (viewingSessionIdRef.current === sid) setRuntimeSkillStatus(slice.runtimeSkillStatus)
+    }
+    const isViewing = () => viewingSessionIdRef.current === sid
+
     // session_snapshot：后端在 SSE 连接建立时发 DB 全量快照，统一首次/重连/重启后重连三条路径。
     // 收到后整体重置状态（用 DB 真相覆盖内存），再处理后续实时事件。
     es.addEventListener('session_snapshot', (e) => {
       const snap = JSON.parse(e.data)
       if (!snap || !snap.session_id) return
-      setSteps(snap.steps || [])
-      setAlerts(snap.breakpoint_alerts || [])
-      setTerminalLines(snap.terminal_log || [])
-      setLogs(snap.simulation_log || [])
-      setProgLogs(snap.program_log || [])
+      setStepsS(snap.steps || [])
+      setAlertsS(snap.breakpoint_alerts || [])
+      setTerminalLinesS(snap.terminal_log || [])
+      setLogsS(snap.simulation_log || [])
+      setProgLogsS(snap.program_log || [])
       // jsonl_log 仅在仿真已结束时从 DB 加载（历史回看）；运行中由 /tail-jsonl SSE 实时提供，避免重复
       if (snap.jsonl_log && (snap.status === 'completed' || snap.status === 'stopped' || snap.status === 'failed')) {
-        setJsonlLines(snap.jsonl_log)
+        setJsonlLinesS(snap.jsonl_log)
       }
-      if (snap.fix_log) setFixLog(snap.fix_log)
-      setSummary(snap.summary || null)
-      if (snap.install_result) setSession(prev => ({ ...prev, install_result: snap.install_result }))
+      if (snap.fix_log) setFixLogS(snap.fix_log)
+      setSummaryS(snap.summary || null)
+      if (snap.install_result) setSessionS(prev => ({ ...(prev || {}), install_result: snap.install_result }))
       // 从 steps 重建 journey
-      setJourneyData((snap.steps || []).map((s, i) => ({
+      setJourneyDataS((snap.steps || []).map((s, i) => ({
         step_id: s.step_id, step_name: s.step_name, step_index: i,
         status: s.status === 'running' ? 'running' : 'completed',
         gate_passed: s.gate_passed ?? null,
@@ -560,24 +543,24 @@ export default function WorkflowSimV2Tab() {
         skills_from_subagents: s.skill_compliance?.skills_from_subagents || [],
         skills_missing: s.skill_compliance?.skills_missing || [],
       })))
-      setPipeline(snap.pipeline || null)
-      if (snap.npu_test) { setNpuTest(snap.npu_test); setNpuLogs(snap.npu_test.logs || []) }
+      setPipelineS(snap.pipeline || null)
+      if (snap.npu_test) { setNpuTestS(snap.npu_test); setNpuLogsS(snap.npu_test.logs || []) }
     })
 
     es.addEventListener('start', (e) => {
       const data = JSON.parse(e.data)
-      addLog('info', `开始仿真: ${data.op_name} (${data.total_steps} 步)`)
+      addLogS('info', `开始仿真: ${data.op_name} (${data.total_steps} 步)`)
     })
 
     es.addEventListener('step_start', (e) => {
       const data = JSON.parse(e.data)
-      setSelectedStepIndex(data.step_index)
-      addLog('info', `[${data.step_index + 1}/${data.total}] ${data.step_name}`)
-      const step = stepsRef.current?.find(s => s.step_id === data.step_id)
+      if (isViewing()) setSelectedStepIndex(data.step_index)
+      addLogS('info', `[${data.step_index + 1}/${data.total}] ${data.step_name}`)
+      const step = getSlice(sid)?.steps?.find(s => s.step_id === data.step_id)
       for (const sk of step?.required_skills || []) {
-        setSkillStatus(sk, data.step_id, 'expected', true)
+        setSkillStatusS(sk, data.step_id, 'expected', true)
       }
-      setJourneyData(prev => {
+      setJourneyDataS(prev => {
         const next = [...prev]
         if (!next.find(j => j.step_id === data.step_id)) {
           next.push({ step_id: data.step_id, step_name: data.step_name, step_index: data.step_index, status: 'running', gate_passed: null, calls: [], skills_expected: step?.required_skills || [] })
@@ -590,14 +573,14 @@ export default function WorkflowSimV2Tab() {
       const data = JSON.parse(e.data)
       const content = data.content || ''
       if (!content.trim() && data.type !== 'tool_use') return
-      setTerminalLines(prev => [...prev, {
+      setTerminalLinesS(prev => [...prev, {
         type: data.type, content,
         toolName: data.tool_name || '', stepId: data.step_id,
         time: new Date().toLocaleTimeString(),
       }])
       if (data.skill_invoked) {
-        setSkillStatus(data.skill_invoked, data.step_id, 'running', true)
-        setJourneyData(prev => prev.map(j => j.step_id === data.step_id
+        setSkillStatusS(data.skill_invoked, data.step_id, 'running', true)
+        setJourneyDataS(prev => prev.map(j => j.step_id === data.step_id
           ? { ...j, calls: [...j.calls, { type: 'skill', name: data.skill_invoked, ts: new Date().toLocaleTimeString(), from: 'top' }] }
           : j))
       }
@@ -608,9 +591,9 @@ export default function WorkflowSimV2Tab() {
           a => a.name === agentName || subType.includes(a.name)
         )
         if (agentDef && agentDef.skills?.length) {
-          for (const sk of agentDef.skills) setSkillStatus(sk, data.step_id, 'passed')
+          for (const sk of agentDef.skills) setSkillStatusS(sk, data.step_id, 'passed')
         }
-        setJourneyData(prev => prev.map(j => j.step_id === data.step_id
+        setJourneyDataS(prev => prev.map(j => j.step_id === data.step_id
           ? { ...j, calls: [...j.calls, { type: 'agent', name: agentName, sub_type: subType, desc: data.tool_input.description || '', skills: agentDef?.skills || [], ts: new Date().toLocaleTimeString() }] }
           : j))
       }
@@ -618,30 +601,30 @@ export default function WorkflowSimV2Tab() {
 
     es.addEventListener('gate_check', (e) => {
       const data = JSON.parse(e.data)
-      setSteps(prev => prev.map(s => s.step_id === data.step_id
+      setStepsS(prev => prev.map(s => s.step_id === data.step_id
         ? { ...s, gate_passed: data.passed, gate_artifacts: data.artifacts } : s))
-      if (data.passed === false) addLog('warn', `门禁未通过: ${data.artifacts.filter(a => !a.exists).map(a => a.name).join(', ')}`)
+      if (data.passed === false) addLogS('warn', `门禁未通过: ${data.artifacts.filter(a => !a.exists).map(a => a.name).join(', ')}`)
     })
 
     es.addEventListener('skill_compliance', (e) => {
       const data = JSON.parse(e.data)
-      setSteps(prev => prev.map(s => s.step_id === data.step_id
+      setStepsS(prev => prev.map(s => s.step_id === data.step_id
         ? { ...s, skill_compliance: { score: data.score, skills_referenced: data.skills_referenced, skills_from_subagents: data.skills_from_subagents, skills_missing: data.skills_missing, violations: data.violations } } : s))
-      for (const sk of data.skills_referenced || []) setSkillStatus(sk, data.step_id, 'passed')
-      for (const sk of data.skills_missing || []) setSkillStatus(sk, data.step_id, 'failed')
-      setJourneyData(prev => prev.map(j => j.step_id === data.step_id
+      for (const sk of data.skills_referenced || []) setSkillStatusS(sk, data.step_id, 'passed')
+      for (const sk of data.skills_missing || []) setSkillStatusS(sk, data.step_id, 'failed')
+      setJourneyDataS(prev => prev.map(j => j.step_id === data.step_id
         ? { ...j, skills_referenced: data.skills_referenced || [], skills_from_subagents: data.skills_from_subagents || [], skills_missing: data.skills_missing || [] }
         : j))
     })
 
     es.addEventListener('monitor_insight', (e) => {
       const data = JSON.parse(e.data)
-      setMonitorInsights(prev => ({ ...prev, [data.step_id]: data }))
+      setMonitorInsightsS(prev => ({ ...prev, [data.step_id]: data }))
       const MON_TO_RT = { compliant: 'passed', partial: 'passed', violation: 'failed' }
       for (const sa of data.skills_analysis || []) {
         const target = MON_TO_RT[sa.status]
         if (!target || !sa.skill) continue
-        setRuntimeSkillStatus(prev => {
+        setRuntimeSkillStatusS(prev => {
           const perStep = prev[sa.skill]
           const cur = perStep?.[data.step_id]
           if (cur === 'passed' || cur === 'running') return { ...prev, [sa.skill]: { ...perStep, [data.step_id]: target } }
@@ -652,51 +635,51 @@ export default function WorkflowSimV2Tab() {
 
     es.addEventListener('breakpoint_alert', (e) => {
       const data = JSON.parse(e.data)
-      setAlerts(prev => [...prev, data])
-      addLog('warn', `[${data.severity}] ${data.message}`)
+      setAlertsS(prev => [...prev, data])
+      addLogS('warn', `[${data.severity}] ${data.message}`)
     })
 
     es.addEventListener('program_log', (e) => {
       const data = JSON.parse(e.data)
-      setProgLogs(prev => [...prev.slice(-999), data])
+      setProgLogsS(prev => [...prev.slice(-999), data])
     })
 
     es.addEventListener('ai_gate', (e) => {
       const data = JSON.parse(e.data)
-      setSteps(prev => prev.map(s => s.step_id === data.step_id
+      setStepsS(prev => prev.map(s => s.step_id === data.step_id
         ? { ...s, ai_gate: { verdict: data.verdict, reasoning: data.reasoning, found_files: data.found_files, missing_core: data.missing_core } }
         : s))
     })
 
     es.addEventListener('fix_start', (e) => {
       const data = JSON.parse(e.data)
-      setFixLog(prev => [...prev, { time: new Date().toLocaleTimeString(), step_id: data.step_id, type: 'start', content: `🔧 开始补齐缺失产出物: ${(data.missing || []).join(', ')}` }])
+      setFixLogS(prev => [...prev, { time: new Date().toLocaleTimeString(), step_id: data.step_id, type: 'start', content: `🔧 开始补齐缺失产出物: ${(data.missing || []).join(', ')}` }])
     })
 
     es.addEventListener('fix_output', (e) => {
       const data = JSON.parse(e.data)
-      setFixLog(prev => [...prev, data])
+      setFixLogS(prev => [...prev, data])
     })
 
     es.addEventListener('fix_done', (e) => {
       const data = JSON.parse(e.data)
-      setFixLog(prev => [...prev, { time: new Date().toLocaleTimeString(), step_id: data.step_id, type: 'done', content: data.passed ? '✅ 补齐成功，门禁通过' : `❌ 仍缺失: ${(data.missing || []).join(', ')}` }])
+      setFixLogS(prev => [...prev, { time: new Date().toLocaleTimeString(), step_id: data.step_id, type: 'done', content: data.passed ? '✅ 补齐成功，门禁通过' : `❌ 仍缺失: ${(data.missing || []).join(', ')}` }])
     })
 
     es.addEventListener('step_done', (e) => {
       const data = JSON.parse(e.data)
       const stepFailed = !!data.error_detail || data.gate_passed === false
-      setSteps(prev => prev.map(s => s.step_id === data.step_id
+      setStepsS(prev => prev.map(s => s.step_id === data.step_id
         ? { ...s, status: 'completed', duration_ms: data.duration_ms, token_usage: data.token_usage, skill_compliance_score: data.skill_compliance_score, gate_passed: data.gate_passed, ...(data.error_detail ? { error_detail: data.error_detail } : {}) }
         : s))
-      setJourneyData(prev => prev.map(j => j.step_id === data.step_id
+      setJourneyDataS(prev => prev.map(j => j.step_id === data.step_id
         ? { ...j, status: 'completed', gate_passed: data.gate_passed }
         : j))
       if (stepFailed) {
-        const step = stepsRef.current?.find(s => s.step_id === data.step_id)
+        const step = getSlice(sid)?.steps?.find(s => s.step_id === data.step_id)
         const expected = step?.required_skills || []
         if (expected.length) {
-          setRuntimeSkillStatus(prev => {
+          setRuntimeSkillStatusS(prev => {
             const next = { ...prev }
             for (const sk of expected) {
               const perStep = { ...(next[sk] || {}) }
@@ -709,96 +692,91 @@ export default function WorkflowSimV2Tab() {
       }
       const logType = data.error_detail ? 'warn' : 'success'
       const errInfo = data.error_detail ? ` [${data.error_detail.category}]` : ''
-      addLog(logType, `${data.step_id} 完成 (${data.duration_ms}ms, 门禁: ${data.gate_passed === true ? '通过' : data.gate_passed === null ? '跳过' : '未通过'})${errInfo}`)
+      addLogS(logType, `${data.step_id} 完成 (${data.duration_ms}ms, 门禁: ${data.gate_passed === true ? '通过' : data.gate_passed === null ? '跳过' : '未通过'})${errInfo}`)
     })
 
     // --- Pipeline SSE 事件 ---
     es.addEventListener('pipeline_status', (e) => {
       const data = JSON.parse(e.data)
-      setPipeline(prev => ({ ...(prev || {}), ...data }))
-      if (data.message) addLog('info', `[Pipeline] ${data.message}`)
+      setPipelineS(prev => ({ ...(prev || {}), ...data }))
+      if (data.message) addLogS('info', `[Pipeline] ${data.message}`)
     })
     es.addEventListener('pipeline_start', (e) => {
       const data = JSON.parse(e.data)
-      setPipeline(prev => ({ ...(prev || {}), status: 'running', mr_url: data.mr_url, mr_iid: data.mr_iid, steps: data.steps || prev?.steps || [], triggered_at: data.triggered_at }))
-      addLog('info', `流水线已触发${data.mr_url ? ` — MR: ${data.mr_url}` : ''}`)
+      setPipelineS(prev => ({ ...(prev || {}), status: 'running', mr_url: data.mr_url, mr_iid: data.mr_iid, steps: data.steps || prev?.steps || [], triggered_at: data.triggered_at }))
+      addLogS('info', `流水线已触发${data.mr_url ? ` — MR: ${data.mr_url}` : ''}`)
     })
     es.addEventListener('pipeline_step_update', (e) => {
       const data = JSON.parse(e.data)
-      setPipeline(prev => ({ ...(prev || {}), steps: data.steps || prev?.steps || [], mr_url: data.mr_url || prev?.mr_url, mr_iid: data.mr_iid || prev?.mr_iid }))
+      setPipelineS(prev => ({ ...(prev || {}), steps: data.steps || prev?.steps || [], mr_url: data.mr_url || prev?.mr_url, mr_iid: data.mr_iid || prev?.mr_iid }))
       const stepStatus = data.step?.status || '更新'
       const stepName = data.step?.name || data.step_key
       const logType = stepStatus === 'success' ? 'success' : stepStatus === 'failed' ? 'error' : 'info'
-      addLog(logType, `[Pipeline] ${stepName}: ${stepStatus}${data.message ? ' — ' + data.message : ''}`)
+      addLogS(logType, `[Pipeline] ${stepName}: ${stepStatus}${data.message ? ' — ' + data.message : ''}`)
     })
     es.addEventListener('pipeline_done', (e) => {
       const data = JSON.parse(e.data)
-      setPipeline(prev => ({ ...(prev || {}), status: data.status, steps: data.steps || prev?.steps || [], completed_at: data.completed_at, fix_rounds: data.fix_rounds }))
-      if (data.status === 'success') addLog('success', '流水线全部通过')
-      else { const f = (data.steps || []).filter(s => s.status === 'failed'); addLog('error', `流水线失败: ${f.map(s => s.name || s.key).join(', ') || '未知'}${data.error ? ' — ' + data.error : ''}`) }
-      message.info(data.status === 'success' ? 'CI/CD 流水线全部通过' : 'CI/CD 流水线存在失败')
+      setPipelineS(prev => ({ ...(prev || {}), status: data.status, steps: data.steps || prev?.steps || [], completed_at: data.completed_at, fix_rounds: data.fix_rounds }))
+      if (data.status === 'success') addLogS('success', '流水线全部通过')
+      else { const f = (data.steps || []).filter(s => s.status === 'failed'); addLogS('error', `流水线失败: ${f.map(s => s.name || s.key).join(', ') || '未知'}${data.error ? ' — ' + data.error : ''}`) }
+      if (isViewing()) message.info(data.status === 'success' ? 'CI/CD 流水线全部通过' : 'CI/CD 流水线存在失败')
     })
     es.addEventListener('pipeline_fix_round', (e) => {
       const data = JSON.parse(e.data)
-      setFixRounds(prev => [...prev, data])
-      addLog('warn', `修复轮次 ${data.round_number}: ${data.error_type}${data.error_log ? ' — ' + data.error_log.slice(0, 100) : ''}`)
+      setFixRoundsS(prev => [...prev, data])
+      addLogS('warn', `修复轮次 ${data.round_number}: ${data.error_type}${data.error_log ? ' — ' + data.error_log.slice(0, 100) : ''}`)
     })
 
     es.addEventListener('summary', (e) => {
       const data = JSON.parse(e.data)
-      setSummary(data)
-      setSimulating(false)
-      addLog('info', `仿真完成 — ${data.verdict}, ${data.passed_steps}/${data.total_steps} 步通过`)
-      message.success('仿真完成')
+      setSummaryS(data)
+      if (isViewing()) setSimulating(false)
+      addLogS('info', `仿真完成 — ${data.verdict}, ${data.passed_steps}/${data.total_steps} 步通过`)
+      if (isViewing()) message.success('仿真完成')
       loadHistory()
-      // 从 runningSessions 移除已完成的
+      // 从 runningSessions 移除已完成的；延迟关闭该 session 的主 SSE（jsonl/npu 保留其 map 状态由各自清理）
       setRunningSessions(prev => prev.filter(s => s.session_id !== sid))
-      if (!ap) setTimeout(() => { if (esRef.current === es) es.close() }, 3000)
+      if (!ap) setTimeout(() => {
+        const e2 = esMapRef.current.get(sid)
+        if (e2) { try { e2.close() } catch { /* ignore */ }; esMapRef.current.delete(sid) }
+      }, 3000)
     })
 
     es.addEventListener('error', (e) => {
       if (e.data) {
-        try { const data = JSON.parse(e.data); addLog('error', `错误: ${data.error}`); message.error(data.error) } catch { /* ignore */ }
+        try { const data = JSON.parse(e.data); addLogS('error', `错误: ${data.error}`); if (isViewing()) message.error(data.error) } catch { /* ignore */ }
       }
     })
 
     // SSE 断开：后端执行已解耦，仿真仍在后台运行，不判定失败，等用户重连或刷新。
     es.onerror = () => {
-      addLog('warn', 'SSE 连接断开，仿真仍在后台运行（刷新页面可恢复）')
+      addLogS('warn', 'SSE 连接断开，仿真仍在后台运行（刷新页面可恢复）')
       es.close()
     }
-  }, [addLog, loadHistory])
+  }, [writerFor, getSlice, loadHistory])
 
-  // 恢复/切换查看某个 session：加载其 DB 快照并重连 SSE 看实时。
-  // 用于刷新恢复 running 会话、侧边栏切换查看后台跑着的会话。
+  // 切换查看某个 session（多 session 隔离）：把缓存 slice 投影回单例 + 必要时建 SSE。
+  // 用于刷新恢复 running、侧边栏切换查看后台 session。
+  // 不 close 其它 running session 的 SSE（它们继续往各自 slice 写）。
   const restoreSession = useCallback((sess) => {
     if (!sess || !sess.session_id) return
-    setSession(sess)
-    setSteps(sess.steps || [])
-    setAlerts(sess.breakpoint_alerts || [])
-    setSummary(sess.summary || null)
-    setPipeline(sess.pipeline || null)
-    if (sess.pipeline?.fix_rounds) setFixRounds(sess.pipeline.fix_rounds)
-    setNpuTest(sess.npu_test || null)
-    setNpuLogs(sess.npu_test?.logs || [])
-    setTerminalLines(sess.terminal_log || [])
-    setLogs(sess.simulation_log || [])
-    setViewingSessionId(sess.session_id)
-    setSelectedStepIndex(-1)
-    setRuntimeSkillStatus({})
+    const sid = sess.session_id
+    // 更新 slice 的 session 元数据（保留已有数据，仅 merge）
+    const slice = getSlice(sid)
+    slice.session = { ...(slice.session || {}), ...sess }
+    setViewing(sid)
+    setViewingHistoryId(null)
+    projectSession(sid)
 
-    const isRunning = sess.status === 'running'
-    setSimulating(isRunning)
-
-    // 重连仿真 SSE（后端会发 session_snapshot 全量快照 + 后续实时事件）
-    if (esRef.current) esRef.current.close()
-    const token = sess.auto_pipeline ? (gitcodeToken.trim() || '') : ''
-    const es = streamWorkflowSimV2(sess.session_id, token)
-    esRef.current = es
-    attachSseHandlers(es, sess.session_id, { autoPipeline: sess.auto_pipeline })
-    // 重连 jsonl tail
-    connectJsonlStream(sess.session_id)
-  }, [attachSseHandlers, connectJsonlStream, gitcodeToken])
+    // 仅在 running 且尚未持有 SSE 时新建（已完成的不连主 SSE，看的是 DB 数据）
+    if (sess.status === 'running' && !esMapRef.current.has(sid)) {
+      const token = sess.auto_pipeline ? (gitcodeToken.trim() || '') : ''
+      const es = streamWorkflowSimV2(sid, token)
+      esMapRef.current.set(sid, es)
+      attachSseHandlers(es, sid, { autoPipeline: sess.auto_pipeline })
+      connectJsonlStream(sid)
+    }
+  }, [attachSseHandlers, connectJsonlStream, gitcodeToken, getSlice, projectSession, setViewing])
 
   // 页面加载时检测运行中的会话（刷新恢复）。
   // 后端执行与 SSE 解耦后，刷新不杀进程；这里恢复 running 列表并重连 SSE 看实时。
@@ -817,106 +795,97 @@ export default function WorkflowSimV2Tab() {
   }, [restoreSession])
 
   // 启动仿真
-  const handleStart = useCallback(async () => {
-    if (!selectedPlugin) { message.warning('请选择插件'); return }
-    if (!opName.trim()) { message.warning('请输入算子名称'); return }
-
-    // 重置状态
-    setSteps([])
-    setAlerts([])
-    setMonitorInsights({})
-    setRuntimeSkillStatus({})
-    setTerminalLines([])
-    setJsonlLines([])
-    setJsonlActiveFile('')
-    setJsonlWaiting(false)
-    setLogs([])
-    setProgLogs([])
-    setSummary(null)
-    setSelectedStepIndex(-1)
-    setSimulating(true)
-    setJourneyData([])
-    setFixLog([])
-    setPipeline(null)
-    setFixRounds([])
-    setNpuTest(null)
-    setNpuLogs([])
-    setViewingHistoryId(null)
+  // 启动仿真（由 NewSessionModal 提交 formData 触发）
+  // 返回 false 表示不关闭 Modal（如超限/创建失败），成功返回 undefined
+  const handleStart = useCallback(async (formData) => {
+    const {
+      plugin_id, op_name, op_spec, work_dir: wd,
+      step_timeout, auto_pipeline, gitcode_token, repo_url,
+      fork_info, clone_status,
+    } = formData
+    if (!plugin_id) { message.warning('请选择插件'); return false }
+    if (!op_name?.trim()) { message.warning('请输入算子名称'); return false }
+    // 并发上限：后台 running session 太多时拒绝（避免 SSE 连接数失控）
+    if (runningSessions.length >= MAX_CONCURRENT_RUNNING) {
+      message.warning(`同时运行的仿真已达上限（${MAX_CONCURRENT_RUNNING}），请先停止部分仿真`)
+      return false
+    }
 
     try {
       // 创建会话
       const createRes = await createWorkflowSimV2Session({
-        plugin_id: selectedPlugin,
-        op_name: opName.trim(),
-        op_spec: opSpec.trim(),
-        work_dir: workDir.trim(),
-        step_timeout: stepTimeout,
-        gitcode_token: autoPipeline ? gitcodeToken.trim() : '',
-        auto_pipeline: autoPipeline,
-        repo_url: repoUrl.trim(),
-        fork_info: forkInfo,
-        clone_status: cloneStatus === 'cloned' ? 'cloned'
-          : cloneStatus === 'error' ? 'failed'
-          : 'pending',
+        plugin_id,
+        op_name: op_name.trim(),
+        op_spec,
+        work_dir: wd,
+        step_timeout,
+        gitcode_token: auto_pipeline ? gitcode_token : '',
+        auto_pipeline,
+        repo_url,
+        fork_info,
+        clone_status,
       })
       const sid = createRes.data.session_id
       if (!sid) {
         message.error(createRes.data.error || '创建会话失败')
-        setSimulating(false)
-        return
+        return false
       }
-      setSession(createRes.data)
-      setSteps(createRes.data.steps || [])
-      if (createRes.data.pipeline) setPipeline(createRes.data.pipeline)
-      setNpuTest(createRes.data.npu_test || null)
-      setNpuLogs(createRes.data.npu_test?.logs || [])
-      setViewingSessionId(sid)
+      const initData = { ...createRes.data, status: 'running' }
+      // 建 B 的 slice（不动其它 running session 的 slice/SSE）
+      const slice = getSlice(sid)
+      Object.assign(slice, {
+        session: initData,
+        steps: createRes.data.steps || [],
+        pipeline: createRes.data.pipeline || null,
+        npuTest: createRes.data.npu_test || null,
+        npuLogs: createRes.data.npu_test?.logs || [],
+      })
+      setViewing(sid)
+      setViewingHistoryId(null)
+      projectSession(sid)
+      // 局部 addLog：此时 B 已是 viewing，直接用单例 addLog 即可（它内部 setLogs 会反映到 B slice 经 project 后的值）
       addLog('info', `会话已创建: ${sid}`)
 
       // 启动执行（fire-and-forget 后台 Task，与 SSE 解耦）
-      const token = autoPipeline ? gitcodeToken.trim() : ''
+      const token = auto_pipeline ? gitcode_token : ''
       await startWorkflowSimV2Session(sid, token)
       addLog('info', '仿真已启动（后台执行），等待 SSE 流...')
       // 加入后台 running 列表
       setRunningSessions(prev => {
         if (prev.some(s => s.session_id === sid)) return prev
-        return [{ ...createRes.data, status: 'running' }, ...prev]
+        return [initData, ...prev]
       })
 
-      // 连接 SSE（只读订阅）
-      if (esRef.current) esRef.current.close()
+      // 连接 B 的 SSE（只读订阅，动其它 session 的 SSE）
       const es = streamWorkflowSimV2(sid, token)
-      esRef.current = es
-
-      // 连接 jsonl tail SSE（独立第二条连接，只读镜像 claude 原生工作流水）
+      esMapRef.current.set(sid, es)
+      // 连接 jsonl tail SSE（独立第二条连接）
       connectJsonlStream(sid)
-
-      attachSseHandlers(es, sid, { autoPipeline })
+      attachSseHandlers(es, sid, { autoPipeline: auto_pipeline })
     } catch (e) {
       message.error(e.response?.data?.detail || e._friendlyMsg || '启动失败')
       setSimulating(false)
+      return false
     }
-  }, [selectedPlugin, opName, workDir, addLog, loadHistory])
+  }, [runningSessions, addLog, getSlice, setViewing, projectSession, connectJsonlStream, attachSseHandlers])
 
   // 停止仿真
   const handleStop = useCallback(async () => {
     if (session?.session_id) {
       await stopWorkflowSimV2Session(session.session_id)
       addLog('info', '仿真已停止')
-    }
-    setSimulating(false)
-    if (esRef.current) esRef.current.close()
-    // 刷新 session 状态
-    if (session?.session_id) {
+      closeSessionStreams(session.session_id)
+      setRunningSessions(prev => prev.filter(s => s.session_id !== session.session_id))
+      // 刷新 session 状态并写回 slice + 投影（停止后可能仍在 viewing）
       const res = await getWorkflowSimV2Session(session.session_id)
       if (res.data && !res.data.error) {
-        setSession(res.data)
-        setSteps(res.data.steps || [])
-        setSimulating(false)
+        const slice = getSlice(session.session_id)
+        if (slice) { slice.session = res.data; slice.steps = res.data.steps || [] }
+        projectSession(session.session_id)
       }
     }
     loadHistory()
-  }, [session, addLog, loadHistory])
+  }, [session, addLog, loadHistory, closeSessionStreams, getSlice, projectSession])
 
   // 加载历史详情
   const loadHistoryDetail = useCallback(async (sid) => {
@@ -933,71 +902,78 @@ export default function WorkflowSimV2Tab() {
         if (!res2.data.error) Object.assign(data, res2.data)
       }
 
-      if (data.steps) setSteps(data.steps)
-      if (data.breakpoint_alerts) setAlerts(data.breakpoint_alerts)
-      if (data.summary) setSummary(data.summary)
-      if (data.pipeline) setPipeline(data.pipeline)
-      if (data.pipeline?.fix_rounds) setFixRounds(data.pipeline.fix_rounds)
-      setNpuTest(data.npu_test || null)
-      setNpuLogs(data.npu_test?.logs || [])
-      setSession(data)
-      setSelectedStepIndex(-1)
-      // 同步选中插件为该历史会话的插件，驱动 Skill 实时流程图加载对应 pluginDef
-      if (data.plugin_id && data.plugin_id !== selectedPlugin) {
-        setSelectedPlugin(data.plugin_id)
-      }
-      // 恢复终端日志和仿真日志
-      setTerminalLines(data.terminal_log || [])
-      setLogs(data.simulation_log || [])
       // 恢复 monitor insights（从 steps 中提取持久化的 monitor_insight）
       const restoredMonitor = {}
       for (const s of (data.steps || [])) {
         if (s.monitor_insight) restoredMonitor[s.step_id] = { step_id: s.step_id, ...s.monitor_insight }
       }
-      setMonitorInsights(restoredMonitor)
-      // 重置 live-only 状态
-      setRuntimeSkillStatus({})
-      setJsonlActiveFile(null)
-      setFixLog(data.fix_log || [])
-      // 历史回看不触发自动滚动到底（避免页面被 scrollIntoView 带到终端/jsonl 面板）
-      setTermPinned(false)
-      setJsonlPinned(false)
-      // 恢复 jsonl 工作流水：优先从 DB jsonl_log（实时执行时持久化），降级从磁盘回读
-      if (data.jsonl_log?.length > 0) {
-        setJsonlLines(data.jsonl_log)
-      } else {
-        setJsonlLines([])
+      // 恢复 jsonl 工作流水：优先从 DB jsonl_log，降级从磁盘回读
+      let jsonlLines = data.jsonl_log || []
+      if (!jsonlLines.length) {
         try {
           const jsonlRes = await getWorkflowJsonlHistory(sid)
-          if (jsonlRes.data?.lines?.length > 0) setJsonlLines(jsonlRes.data.lines)
+          if (jsonlRes.data?.lines?.length > 0) jsonlLines = jsonlRes.data.lines
         } catch { /* 老会话 jsonl 文件可能已清理 */ }
       }
-      setSimulating(false)
+
+      // 写入历史 slice（不碰任何 running session 的 SSE）
+      const slice = getSlice(sid)
+      Object.assign(slice, {
+        session: data,
+        steps: data.steps || [],
+        alerts: data.breakpoint_alerts || [],
+        summary: data.summary || null,
+        pipeline: data.pipeline || null,
+        fixRounds: data.pipeline?.fix_rounds || [],
+        npuTest: data.npu_test || null,
+        npuLogs: data.npu_test?.logs || [],
+        terminalLines: data.terminal_log || [],
+        logs: data.simulation_log || [],
+        monitorInsights: restoredMonitor,
+        runtimeSkillStatus: {},
+        journeyData: [],
+        fixLog: data.fix_log || [],
+        jsonlLines,
+        jsonlActiveFile: '',
+      })
+      setViewing(sid)
       setViewingHistoryId(sid)
+      projectSession(sid)
+      // 同步选中插件为该历史会话的插件，驱动 Skill 实时流程图加载对应 pluginDef
+      if (data.plugin_id && data.plugin_id !== selectedPlugin) {
+        setSelectedPlugin(data.plugin_id)
+      }
+      // 历史回看不触发自动滚动到底
+      setTermPinned(false)
+      setJsonlPinned(false)
       message.success('历史记录加载成功')
       loadHistory()
     } catch (e) {
       message.error('加载失败')
     }
-  }, [loadHistory])
+  }, [loadHistory, getSlice, setViewing, projectSession, selectedPlugin])
 
-  // 返回当前仿真视图
+  // 返回当前仿真视图：优先回到最近 viewing 的 running；否则第一个 running；都没有则回到空状态
   const backToCurrent = useCallback(() => {
     setViewingHistoryId(null)
-    if (session && !viewingHistoryId) return
-    // 清空回看数据，让页面回到空状态或当前仿真
-    setSteps([])
-    setAlerts([])
-    setSummary(null)
-    setPipeline(null)
-    setFixRounds([])
-    setNpuTest(null)
-    setNpuLogs([])
-    setSession(null)
-    setSelectedStepIndex(-1)
-    setTerminalLines([])
-    setLogs([])
-  }, [session, viewingHistoryId])
+    const last = runningSessions.find(s => s.session_id === lastViewingRunningRef.current)
+    const target = last || runningSessions[0]
+    if (target) {
+      restoreSession(target)
+    } else {
+      // 无 running session，回到干净的空状态（清空全部查看态，避免历史脏数据残留）
+      setViewing(null)
+      setViewingHistoryId(null)
+      setSession(null); setSteps([]); setAlerts([]); setSummary(null)
+      setPipeline(null); setFixRounds([]); setNpuTest(null); setNpuLogs([]); setNpuClaudeLogs([])
+      setTerminalLines([]); setLogs([]); setProgLogs([]); setSimulating(false)
+      setFixLog([]); setJsonlLines([]); setJsonlActiveFile('')
+      setMonitorInsights({}); setRuntimeSkillStatus({}); setJourneyData([])
+      setSelectedStepIndex(-1)
+      setDiagnosis(null)
+      setDiffFiles([]); setSelectedDiffFile(null); setDiffContent(null); setDiffError(null)
+    }
+  }, [runningSessions, restoreSession, setViewing])
 
   // 发起真机 NPU 远程测试
   const triggerNpuTest = useCallback((cfg) => {
@@ -1186,125 +1162,222 @@ export default function WorkflowSimV2Tab() {
             </div>
           )}
           <div style={{ maxHeight: 500, overflowY: 'auto' }}>
-            {historyList.length === 0 && !historyLoading && (
+            {historyList.length === 0 && runningSessions.length === 0 && !historyLoading && (
               <div style={{ padding: '16px 12px', textAlign: 'center' }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>暂无仿真记录</Text>
               </div>
             )}
-            {historyList.map(h => (
-              <div
-                key={h.session_id}
-                onClick={() => loadHistoryDetail(h.session_id)}
-                style={{
-                  padding: '8px 12px',
-                  marginBottom: 2,
-                  cursor: 'pointer',
-                  background: viewingHistoryId === h.session_id ? '#e6f7ff'
-                    : session?.session_id === h.session_id && !viewingHistoryId ? '#f0f5ff' : 'transparent',
-                  borderLeft: viewingHistoryId === h.session_id
-                    ? '3px solid #1677ff'
-                    : `3px solid ${STATUS_COLOR[h.status] || '#d9d9d9'}`,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Text strong ellipsis style={{ fontSize: 12, flex: 1 }}>{h.op_name || '-'}</Text>
-                  <Tag color={STATUS_COLOR[h.status]} style={{ fontSize: 9, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                    {h.status}
-                  </Tag>
+            {/* 进行中分组（后台 running，置顶） */}
+            {runningSessions.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                <div style={{ padding: '4px 12px', fontSize: 11, fontWeight: 600, color: '#52c41a', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <LoadingOutlined style={{ fontSize: 10 }} /> 进行中 ({runningSessions.length})
                 </div>
-                <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>
-                  {h.plugin_name || '-'}
-                </div>
-                <div style={{ fontSize: 10, color: '#bbb', marginTop: 1 }}>
-                  {h.created_at ? new Date(h.created_at).toLocaleString() : ''}
-                </div>
-                {h.status === 'running' && (
-                  <div style={{ marginTop: 4, display: 'flex', gap: 8 }} onClick={e => e.stopPropagation()}>
-                    <Button
-                      size="small"
-                      type="link"
-                      style={{ fontSize: 10, padding: 0, height: 'auto', color: '#1677ff' }}
-                      onClick={async () => {
-                        // 切换查看这个后台运行中的会话：加载快照 + 重连 SSE 看实时
-                        try {
-                          const res = await getWorkflowSimV2Session(h.session_id)
-                          if (res.data && !res.data.error) restoreSession(res.data)
-                          else message.error('加载失败')
-                        } catch { message.error('加载失败') }
-                      }}
-                    >
-                      查看实时
-                    </Button>
-                    <Button
-                      size="small"
-                      danger
-                      type="link"
-                      style={{ fontSize: 10, padding: 0, height: 'auto' }}
-                      onClick={async () => {
-                        await stopWorkflowSimV2Session(h.session_id)
-                        message.success('仿真已终止')
-                        loadHistory()
-                        if (session?.session_id === h.session_id) {
-                          handleStop()
-                        }
-                      }}
-                    >
-                      终止仿真
-                    </Button>
+                {runningSessions.map(h => (
+                  <div
+                    key={h.session_id}
+                    onClick={() => restoreSession(h)}
+                    style={{
+                      padding: '8px 12px', marginBottom: 2, cursor: 'pointer',
+                      background: viewingSessionId === h.session_id && !viewingHistoryId ? '#f0f5ff'
+                        : viewingHistoryId === h.session_id ? '#e6f7ff' : '#f6ffed',
+                      borderLeft: viewingSessionId === h.session_id && !viewingHistoryId
+                        ? '3px solid #1677ff' : '3px solid #52c41a',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Text strong ellipsis style={{ fontSize: 12, flex: 1 }}>{h.op_name || '-'}</Text>
+                      <Tag color="success" style={{ fontSize: 9, lineHeight: '16px', padding: '0 4px', margin: 0 }}>running</Tag>
+                    </div>
+                    <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>{h.plugin_name || '-'}</div>
+                    <div style={{ fontSize: 10, color: '#bbb', marginTop: 1 }}>
+                      {h.created_at ? new Date(h.created_at).toLocaleString() : ''}
+                    </div>
+                    <div style={{ marginTop: 4 }} onClick={e => e.stopPropagation()}>
+                      <Button
+                        size="small" type="link"
+                        style={{ fontSize: 10, padding: 0, height: 'auto', color: '#1677ff' }}
+                        onClick={() => restoreSession(h)}
+                      >
+                        {viewingSessionId === h.session_id && !viewingHistoryId ? '查看中' : '切换查看'}
+                      </Button>
+                      <Button
+                        size="small" danger type="link"
+                        style={{ fontSize: 10, padding: 0, height: 'auto' }}
+                        onClick={async () => {
+                          await stopWorkflowSimV2Session(h.session_id)
+                          message.success('仿真已终止')
+                          if (session?.session_id === h.session_id) handleStop()
+                        }}
+                      >
+                        终止
+                      </Button>
+                    </div>
                   </div>
-                )}
-                {h.status !== 'running' && (
-                  <div style={{ marginTop: 4 }} onClick={e => e.stopPropagation()}>
-                    <Button
-                      size="small"
-                      type="link"
-                      icon={<DownloadOutlined />}
-                      style={{ fontSize: 10, padding: 0, height: 'auto', marginRight: 8 }}
-                      onClick={async () => {
-                        try {
-                          const res = await exportWorkflowV2Session(h.session_id)
-                          const url = URL.createObjectURL(res.data)
-                          const a = document.createElement('a')
-                          a.href = url
-                          a.download = `sim-${h.session_id}-${h.op_name || 'report'}.md`
-                          a.click()
-                          URL.revokeObjectURL(url)
-                        } catch { message.error('导出失败') }
-                      }}
-                    >
-                      导出
-                    </Button>
-                    <Button
-                      size="small"
-                      type="link"
-                      style={{ fontSize: 10, padding: 0, height: 'auto' }}
-                      onClick={async () => {
-                        try {
-                          const res = await getWorkflowSimV2Session(h.session_id)
-                          const data = res.data
-                          if (data.error) { message.error(data.error); return }
-                          setPreviewModal({
-                            session_id: h.session_id,
-                            op_name: h.op_name || data.op_name || '-',
-                            terminal_log: data.terminal_log || [],
-                            simulation_log: data.simulation_log || [],
-                            tab: 'terminal',
-                          })
-                        } catch { message.error('加载失败') }
-                      }}
-                    >
-                      预览日志
-                    </Button>
-                  </div>
-                )}
+                ))}
               </div>
-            ))}
+            )}
+            {/* 历史分组（已完成/停止/失败，排除进行中） */}
+            {(() => {
+              const runningIds = new Set(runningSessions.map(s => s.session_id))
+              const historyGroup = historyList.filter(h => !runningIds.has(h.session_id))
+              if (historyGroup.length === 0) return null
+              return (
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ padding: '4px 12px', fontSize: 11, fontWeight: 600, color: '#8c8c8c' }}>
+                    历史 ({historyGroup.length})
+                  </div>
+                  {historyGroup.map(h => (
+                    <div
+                      key={h.session_id}
+                      onClick={() => loadHistoryDetail(h.session_id)}
+                      style={{
+                        padding: '8px 12px', marginBottom: 2, cursor: 'pointer',
+                        background: viewingHistoryId === h.session_id ? '#e6f7ff' : 'transparent',
+                        borderLeft: viewingHistoryId === h.session_id
+                          ? '3px solid #1677ff'
+                          : `3px solid ${STATUS_COLOR[h.status] || '#d9d9d9'}`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Text strong ellipsis style={{ fontSize: 12, flex: 1 }}>{h.op_name || '-'}</Text>
+                        <Tag color={STATUS_COLOR[h.status]} style={{ fontSize: 9, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                          {h.status}
+                        </Tag>
+                      </div>
+                      <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>{h.plugin_name || '-'}</div>
+                      <div style={{ fontSize: 10, color: '#bbb', marginTop: 1 }}>
+                        {h.created_at ? new Date(h.created_at).toLocaleString() : ''}
+                      </div>
+                      <div style={{ marginTop: 4 }} onClick={e => e.stopPropagation()}>
+                        <Button
+                          size="small" type="link" icon={<DownloadOutlined />}
+                          style={{ fontSize: 10, padding: 0, height: 'auto', marginRight: 8 }}
+                          onClick={async () => {
+                            try {
+                              const res = await exportWorkflowV2Session(h.session_id)
+                              const url = URL.createObjectURL(res.data)
+                              const a = document.createElement('a')
+                              a.href = url
+                              a.download = `sim-${h.session_id}-${h.op_name || 'report'}.md`
+                              a.click()
+                              URL.revokeObjectURL(url)
+                            } catch { message.error('导出失败') }
+                          }}
+                        >
+                          导出
+                        </Button>
+                        <Button
+                          size="small" type="link"
+                          style={{ fontSize: 10, padding: 0, height: 'auto' }}
+                          onClick={async () => {
+                            try {
+                              const res = await getWorkflowSimV2Session(h.session_id)
+                              const data = res.data
+                              if (data.error) { message.error(data.error); return }
+                              setPreviewModal({
+                                session_id: h.session_id,
+                                op_name: h.op_name || data.op_name || '-',
+                                terminal_log: data.terminal_log || [],
+                                simulation_log: data.simulation_log || [],
+                                tab: 'terminal',
+                              })
+                            } catch { message.error('加载失败') }
+                          }}
+                        >
+                          预览日志
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
           </div>
         </Card>
       </div>
 
       {/* 右侧：主内容区 */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+      {/* 当前 session 摘要条 + 新建仿真入口 */}
+      {session ? (
+        <Card size="small" style={{ marginBottom: 0 }}>
+          {/* 第一行：身份标识 + 操作 */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <Space size={8} wrap>
+              <Tag>Session: {session.session_id?.slice(0, 8)}</Tag>
+              <Tag color="blue">{session.plugin_name}</Tag>
+              <Tag color="green">{session.op_name}</Tag>
+              <Tag color={session.status === 'running' ? 'blue' : session.status === 'completed' ? 'green' : session.status === 'stopped' ? 'orange' : session.status === 'failed' ? 'red' : 'default'}>
+                {session.status}
+              </Tag>
+              <Text type="secondary" style={{ fontSize: 11 }}>{session.created_at ? new Date(session.created_at).toLocaleString() : ''}</Text>
+            </Space>
+            <Space>
+              {simulating && (
+                <Button danger size="small" icon={<StopOutlined />} onClick={handleStop}>停止</Button>
+              )}
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setNewSessionModalOpen(true)}>
+                新建仿真
+              </Button>
+            </Space>
+          </div>
+          {/* 第二行：建表信息汇总（当初怎么建的这个仿真） */}
+          <div style={{ marginTop: 8, padding: '8px 10px', background: '#fafafa', borderRadius: 4, fontSize: 12, lineHeight: 1.8 }}>
+            {session.op_spec && (
+              <div>
+                <Text type="secondary">需求描述：</Text>
+                <Text style={{ whiteSpace: 'pre-wrap' }}>{session.op_spec}</Text>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+              {session.repo_url && (
+                <Tag icon={<GithubOutlined />} style={{ fontSize: 10, margin: 0 }}>
+                  算子库: {session.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '')}
+                </Tag>
+              )}
+              {session.fork_info?.fork_path && (
+                <Tag color={session.clone_status === 'cloned' ? 'green' : 'default'} style={{ fontSize: 10, margin: 0 }}>
+                  Fork: {session.fork_info.fork_path}
+                </Tag>
+              )}
+              <Tag color={session.clone_status === 'cloned' ? 'green' : session.clone_status === 'failed' ? 'red' : 'default'} style={{ fontSize: 10, margin: 0 }}>
+                Clone: {session.clone_status === 'cloned' ? '已克隆' : session.clone_status === 'failed' ? '失败' : session.clone_status || '未克隆'}
+              </Tag>
+              {session.install_result && (
+                <Tag color={session.install_result.status === 'failed' ? 'red' : session.install_result.status === 'skipped' ? 'default' : 'green'} style={{ fontSize: 10, margin: 0 }}>
+                  插件: {session.install_result.status === 'installed' ? '已安装' : session.install_result.status === 'already_installed' ? '已存在' : session.install_result.status === 'failed' ? '安装失败' : session.install_result.status}
+                  {session.install_result.skills?.length > 0 && ` (${session.install_result.skills.length} skills)`}
+                </Tag>
+              )}
+              <Tag style={{ fontSize: 10, margin: 0 }}>工作目录: {session.work_dir}</Tag>
+              <Tag style={{ fontSize: 10, margin: 0 }}>超时: {session.step_timeout ? `${session.step_timeout}s` : '不限制'}</Tag>
+              {session.auto_pipeline && <Tag color="blue" style={{ fontSize: 10, margin: 0 }}>自动 CI/CD</Tag>}
+            </div>
+          </div>
+          {/* 各步骤进程信息 */}
+          {steps.filter(s => s.process).length > 0 && (
+            <div style={{ marginTop: 6, padding: '6px 8px', background: '#fafafa', borderRadius: 4, fontSize: 11 }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>进程记录:</Text>
+              <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {steps.map(s => s.process ? (
+                  <Tag key={s.step_id} color={s.process.alive ? 'green' : 'default'} style={{ fontSize: 10, lineHeight: '16px', padding: '2px 6px' }}>
+                    {s.step_name} — PID {s.process.pid} {s.process.alive ? '运行中' : `退出(${s.process.exit_code ?? '-'})`} {s.process.elapsed_sec}s
+                    {s.process.killed ? ' [终止]' : ''}
+                  </Tag>
+                ) : null)}
+              </div>
+            </div>
+          )}
+        </Card>
+      ) : (
+        <Card size="small">
+          <Empty description="暂无查看的仿真">
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setNewSessionModalOpen(true)}>新建仿真</Button>
+          </Empty>
+        </Card>
+      )}
+
       {/* 查看历史时显示提示横幅 */}
       {viewingHistoryId && (
         <Alert
@@ -1357,390 +1430,6 @@ export default function WorkflowSimV2Tab() {
           style={{ marginBottom: 0 }}
         />
       )}
-
-      {/* Step 1: 算子库 */}
-      <Card size="small" title={
-        <Space>
-          <GithubOutlined />
-          <span>Step 1: 算子库</span>
-          {forkStatus === 'forked' && <Tag color="cyan" style={{ fontSize: 10 }}>已 Fork</Tag>}
-          {cloneStatus === 'cloned' && <Tag color="green" style={{ fontSize: 10 }}>已克隆</Tag>}
-          {cloneStatus === 'cloning' && <Tag color="blue" style={{ fontSize: 10 }}><LoadingOutlined /> 克隆中</Tag>}
-          {forkStatus === 'forking' && <Tag color="blue" style={{ fontSize: 10 }}><LoadingOutlined /> Fork 中</Tag>}
-          {(forkStatus === 'checking' || cloneStatus === 'checking') && <Tag style={{ fontSize: 10 }}><LoadingOutlined /> 检查中</Tag>}
-        </Space>
-      }>
-        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-          {/* 上游仓库地址 */}
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>上游仓库:</Text></Col>
-            <Col flex="auto">
-              <Input
-                placeholder="如 https://atomgit.com/cann/ops-math"
-                value={repoUrl}
-                onChange={e => setRepoUrl(e.target.value)}
-                style={{ width: '100%' }}
-              />
-            </Col>
-          </Row>
-          {/* GitCode Token */}
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>GitCode Token:</Text></Col>
-            <Col flex="auto">
-              <Input.Password
-                placeholder="输入 GitCode API Token（用于 Fork 操作）"
-                value={gitcodeToken}
-                onChange={e => setGitcodeToken(e.target.value)}
-                style={{ width: '100%' }}
-              />
-            </Col>
-            <Col>
-              <Button
-                icon={<GithubOutlined />}
-                onClick={handleFork}
-                loading={forkStatus === 'forking' || forkStatus === 'checking'}
-                disabled={!repoUrl.trim() || !gitcodeToken.trim() || forkStatus === 'forking' || forkStatus === 'forked' || forkStatus === 'checking'}
-                type={forkStatus === 'forked' ? 'default' : 'primary'}
-              >
-                {forkStatus === 'forked' ? '已 Fork' : forkStatus === 'forking' ? 'Fork 中...' : forkStatus === 'checking' ? '检测中...' : 'Fork 到我的账号'}
-              </Button>
-            </Col>
-          </Row>
-          {/* Fork 结果 */}
-          {forkInfo && (
-            <div style={{ padding: '4px 0' }}>
-              <Space size={8}>
-                <Tag color="cyan" style={{ fontSize: 10 }}>Fork: {forkInfo.fork_path || ''}</Tag>
-                {forkInfo.fork_url && <a href={forkInfo.fork_url.replace('.git', '')} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11 }}>查看仓库</a>}
-              </Space>
-            </div>
-          )}
-          {/* 工作目录 + Clone */}
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>工作目录:</Text></Col>
-            <Col flex="auto">
-              <Input
-                placeholder="Clone 目标目录，如 /tmp/ops-math"
-                value={workDir}
-                onChange={e => setWorkDir(e.target.value)}
-                style={{ width: '100%' }}
-              />
-            </Col>
-            <Col>
-              <Button
-                icon={<DownloadOutlined />}
-                onClick={handleClone}
-                loading={cloneStatus === 'cloning'}
-                disabled={(!forkInfo?.fork_url && !repoUrl.trim()) || !workDir.trim() || cloneStatus === 'cloning' || cloneStatus === 'cloned'}
-                type={cloneStatus === 'cloned' ? 'default' : 'primary'}
-              >
-                {cloneStatus === 'cloned' ? '已克隆' : cloneStatus === 'cloning' ? '克隆中...' : 'Clone 到本地'}
-              </Button>
-            </Col>
-          </Row>
-          {/* Clone 结果 */}
-          {cloneInfo && (
-            <div>
-              <Space size={8}>
-                <Text type="secondary" style={{ fontSize: 11 }}>路径: {cloneInfo.path}</Text>
-                {currentBranch && <Tag color="blue" style={{ fontSize: 10 }}>当前分支: {currentBranch}</Tag>}
-              </Space>
-            </div>
-          )}
-          {/* 分支管理：clone 完成后显示 */}
-          {cloneStatus === 'cloned' && (
-            <div style={{ borderTop: '1px dashed #e8e8e8', paddingTop: 8, marginTop: 4 }}>
-              <Row gutter={8} align="middle" style={{ marginBottom: 6 }}>
-                <Col><BranchesOutlined style={{ color: '#1677ff' }} /> <Text strong style={{ fontSize: 12 }}>分支:</Text></Col>
-                <Col flex="auto">
-                  <Select
-                    style={{ width: '100%' }}
-                    placeholder="选择分支切换"
-                    value={currentBranch || undefined}
-                    loading={branchesLoading}
-                    onChange={(val) => { setSelectedBranchToSwitch(val); handleSwitchBranch(val) }}
-                    options={branches.map(b => ({
-                      value: b.name,
-                      label: (
-                        <span>
-                          {b.is_current ? <Tag color="blue" style={{ fontSize: 9, lineHeight: '14px', padding: '0 3px', marginRight: 4 }}>当前</Tag> : null}
-                          {b.name}
-                          {b.is_remote && !b.is_current && <Tag style={{ fontSize: 9, lineHeight: '14px', padding: '0 3px', marginLeft: 4 }}>远程</Tag>}
-                        </span>
-                      ),
-                    }))}
-                    popupMatchSelectWidth={false}
-                  />
-                </Col>
-                <Col>
-                  <Button
-                    size="small"
-                    icon={<ReloadOutlined />}
-                    onClick={loadBranches}
-                    loading={branchesLoading}
-                  />
-                </Col>
-              </Row>
-              <Row gutter={8} align="middle">
-                <Col><Text strong style={{ fontSize: 12 }}>基于:</Text></Col>
-                <Col>
-                  <Select
-                    style={{ width: 200 }}
-                    placeholder="自动检测主分支"
-                    value={baseBranch || undefined}
-                    onChange={setBaseBranch}
-                    allowClear
-                    options={[
-                      { value: '', label: '自动检测 (origin/main 或 master)' },
-                      ...branches.map(b => ({
-                        value: b.name,
-                        label: `${b.is_current ? '★ ' : ''}${b.name}${b.is_remote ? ' (远程)' : ''}`,
-                      })),
-                    ]}
-                  />
-                </Col>
-              </Row>
-              <Row gutter={8} align="middle">
-                <Col><Text strong style={{ fontSize: 12 }}>新分支:</Text></Col>
-                <Col flex="auto">
-                  <Input
-                    placeholder="输入新分支名称，如 feature/add-op"
-                    value={newBranchName}
-                    onChange={e => setNewBranchName(e.target.value)}
-                    onPressEnter={handleCreateBranch}
-                    style={{ width: '100%' }}
-                    suffix={
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<PlusOutlined />}
-                        onClick={handleCreateBranch}
-                        loading={branchCreating}
-                        disabled={!newBranchName.trim()}
-                        style={{ padding: 0 }}
-                      >
-                        创建并切换
-                      </Button>
-                    }
-                  />
-                </Col>
-              </Row>
-            </div>
-          )}
-        </Space>
-      </Card>
-
-      {/* Step 2: 安装插件 */}
-      <Card size="small" title={
-        <Space>
-          <ToolOutlined />
-          <span>Step 2: 安装插件</span>
-          {installStatus === 'installed' && <Tag color="green" style={{ fontSize: 10 }}>已安装</Tag>}
-          {installStatus === 'installing' && <Tag color="blue" style={{ fontSize: 10 }}><LoadingOutlined /> 安装中</Tag>}
-          {installStatus === 'checking' && <Tag color="blue" style={{ fontSize: 10 }}><LoadingOutlined /> 检测中</Tag>}
-        </Space>
-      }>
-        <Row gutter={12} align="middle">
-          <Col>
-            <Space>
-              <Text strong style={{ fontSize: 12 }}>插件:</Text>
-              <Select
-                style={{ width: 260 }}
-                placeholder="选择插件"
-                loading={pluginsLoading}
-                value={selectedPlugin}
-                onChange={setSelectedPlugin}
-                options={plugins.map(p => ({
-                  value: p.plugin_id,
-                  label: `${p.plugin_name}${p.agents_count ? ` (${p.agents_count} agents)` : ''}`,
-                }))}
-              />
-            </Space>
-          </Col>
-          <Col>
-            <Space>
-              <Text strong style={{ fontSize: 12 }}>工具:</Text>
-              <Select
-                style={{ width: 120 }}
-                value={selectedTool}
-                onChange={setSelectedTool}
-                options={[
-                  { value: 'claude', label: 'Claude' },
-                  { value: 'cursor', label: 'Cursor' },
-                  { value: 'trae', label: 'Trae' },
-                  { value: 'opencode', label: 'OpenCode' },
-                ]}
-              />
-            </Space>
-          </Col>
-          <Col>
-            <Button
-              icon={<ToolOutlined />}
-              onClick={handleInstall}
-              loading={installStatus === 'installing' || installStatus === 'checking'}
-              disabled={!selectedPlugin || !workDir.trim() || installStatus === 'installing' || installStatus === 'installed' || installStatus === 'checking'}
-              type={installStatus === 'installed' ? 'default' : 'primary'}
-            >
-              {installStatus === 'installed' ? '已安装' : installStatus === 'installing' ? '安装中...' : installStatus === 'checking' ? '检测中...' : '安装到工作目录'}
-            </Button>
-          </Col>
-        </Row>
-        {installInfo && (
-          <div style={{ marginTop: 6 }}>
-            <Space size={8}>
-              <Tag style={{ fontSize: 10 }}>工具: {selectedTool}</Tag>
-              {installInfo.skills?.length > 0 && <Tag color="green" style={{ fontSize: 10 }}>Skills: {installInfo.skills.length}</Tag>}
-              {installInfo.agents?.length > 0 && <Tag color="blue" style={{ fontSize: 10 }}>Agents: {installInfo.agents.length}</Tag>}
-            </Space>
-          </div>
-        )}
-        {selectedPlugin && (
-          <div style={{ marginTop: 8 }}>
-            <Button
-              size="small"
-              type="link"
-              icon={<ApartmentOutlined />}
-              onClick={async () => {
-                setPluginDrawerOpen(true)
-                if (!pluginDef || (pluginDef.plugin_id !== selectedPlugin)) {
-                  setPluginDefLoading(true)
-                  try {
-                    const res = await getWorkflowDefinition(selectedPlugin)
-                    setPluginDef(res.data)
-                  } catch { setPluginDef(null) }
-                  finally { setPluginDefLoading(false) }
-                }
-              }}
-            >
-              查看插件架构
-            </Button>
-          </div>
-        )}
-      </Card>
-
-      {/* Step 3: 开始仿真 */}
-      <Card size="small" title={
-        <Space>
-          <ExperimentOutlined />
-          <span>Step 3: 开始仿真</span>
-        </Space>
-      }>
-        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>算子名:</Text></Col>
-            <Col>
-              <Input
-                style={{ width: 160 }}
-                placeholder="如 Abs, Add, ScaledBesselI1"
-                value={opName}
-                onChange={e => setOpName(e.target.value)}
-              />
-            </Col>
-          </Row>
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>需求描述:</Text></Col>
-            <Col flex="auto">
-              <Input.TextArea
-                placeholder="描述算子开发需求，如：指数缩放第一类修正贝塞尔函数 I₁(x)·exp(-|x|) 的 AscendC 实现，支持 float16/float32 数据类型"
-                value={opSpec}
-                onChange={e => setOpSpec(e.target.value)}
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                style={{ width: '100%' }}
-              />
-            </Col>
-          </Row>
-          <Row gutter={8} align="middle">
-            <Col><Text strong style={{ fontSize: 12 }}>步骤超时:</Text></Col>
-            <Col>
-              <Select
-                style={{ width: 160 }}
-                value={stepTimeout}
-                onChange={setStepTimeout}
-                options={[
-                  { value: 0, label: '不限制 (默认)' },
-                  { value: 600, label: '10 分钟' },
-                  { value: 1800, label: '30 分钟' },
-                  { value: 3600, label: '60 分钟' },
-                ]}
-              />
-            </Col>
-            <Col>
-              <Tooltip title="步骤执行超时限制。默认不限制，长任务安全。">
-                <WarningOutlined style={{ color: '#faad14' }} />
-              </Tooltip>
-            </Col>
-          </Row>
-          <Row align="middle" gutter={8}>
-            <Col>
-              <Switch
-                size="small"
-                checked={autoPipeline}
-                onChange={setAutoPipeline}
-                disabled={!gitcodeToken.trim()}
-              />
-            </Col>
-            <Col>
-              <Text style={{ fontSize: 12 }}>自动触发 CI/CD 流水线</Text>
-            </Col>
-            <Col>
-              <Tooltip title="开启后，仿真完成后将自动提交 PR、触发流水线编译测试，失败时自动修复（需填写 GitCode Token）">
-                <WarningOutlined style={{ color: autoPipeline ? '#1677ff' : '#d9d9d9', fontSize: 12 }} />
-              </Tooltip>
-            </Col>
-          </Row>
-          <Row>
-            <Col>
-              {simulating ? (
-                <Button danger icon={<StopOutlined />} onClick={handleStop}>
-                  停止仿真
-                </Button>
-              ) : (
-                <Button
-                  type="primary"
-                  icon={<PlayCircleOutlined />}
-                  onClick={handleStart}
-                  disabled={!selectedPlugin || !opName.trim()}
-                >
-                  开始仿真
-                </Button>
-              )}
-            </Col>
-          </Row>
-        </Space>
-        {session && (
-          <div style={{ marginTop: 8 }}>
-            <Space size={8} wrap>
-              <Tag>Session: {session.session_id}</Tag>
-              <Tag color="blue">{session.plugin_name}</Tag>
-              <Tag color="green">{session.op_name}</Tag>
-              <Tag color={session.status === 'running' ? 'blue' : session.status === 'completed' ? 'green' : session.status === 'stopped' ? 'orange' : 'default'}>
-                {session.status}
-              </Tag>
-              <Text type="secondary" style={{ fontSize: 12 }}>{session.work_dir}</Text>
-              {session.install_result && (
-                <Tag color={session.install_result.status === 'failed' ? 'red' : session.install_result.status === 'skipped' ? 'default' : 'green'} style={{ fontSize: 10 }}>
-                  插件: {session.install_result.status === 'installed' ? '已安装' : session.install_result.status === 'already_installed' ? '已存在' : session.install_result.status === 'failed' ? '安装失败' : session.install_result.status}
-                  {session.install_result.skills?.length > 0 && ` (${session.install_result.skills.length} skills, ${session.install_result.agents?.length || 0} agents)`}
-                </Tag>
-              )}
-            </Space>
-            {/* 各步骤进程信息 */}
-            {steps.filter(s => s.process).length > 0 && (
-              <div style={{ marginTop: 6, padding: '6px 8px', background: '#fafafa', borderRadius: 4, fontSize: 11 }}>
-                <Text type="secondary" style={{ fontSize: 11 }}>进程记录:</Text>
-                <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {steps.map(s => s.process ? (
-                    <Tag key={s.step_id} color={s.process.alive ? 'green' : 'default'} style={{ fontSize: 10, lineHeight: '16px', padding: '2px 6px' }}>
-                      {s.step_name} — PID {s.process.pid} {s.process.alive ? '运行中' : `退出(${s.process.exit_code ?? '-'})`} {s.process.elapsed_sec}s
-                      {s.process.killed ? ' [终止]' : ''}
-                    </Tag>
-                  ) : null)}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </Card>
 
       {/* 断点告警横幅 */}
       {criticalAlerts.length > 0 && (
@@ -1824,8 +1513,8 @@ export default function WorkflowSimV2Tab() {
         </Card>
       )}
 
-      {/* Skill 实时流程图（GitHub-CI 风格，运行时逐个点亮） */}
-      {pluginDef && (
+      {/* Skill 实时流程图（跟随当前 viewing session 的插件，没 session 时不显示） */}
+      {pluginDef && session && (
         <Card size="small" title={<Space><ApartmentOutlined /> Skill 实时流程图</Space>} extra={
           <Button size="small" type="link" onClick={() => setPluginDrawerOpen(true)}>全屏查看</Button>
         } style={{ marginBottom: 12 }}>
@@ -1875,6 +1564,14 @@ export default function WorkflowSimV2Tab() {
               .lifecycle-steps .ant-steps-item.ext-step .ant-steps-icon {
                 color: #8c8c8c;
               }
+              /* 平台注入步骤（安装环境）：紫色柔和框，区别于插件步骤（蓝）和外部步骤（无） */
+              .lifecycle-steps .ant-steps-item.platform-step {
+                background: #f9f0ff;
+                border-left: 3px solid #d3adf7;
+                border-radius: 4px;
+                padding-left: 8px !important;
+                margin-left: -4px;
+              }
             `}</style>
             <Steps
               size="small"
@@ -1882,11 +1579,14 @@ export default function WorkflowSimV2Tab() {
               current={lifecycleSteps.findIndex(s => s.status === 'running')}
               items={lifecycleSteps.map((s, i) => {
                 const isExt = s.step_type === 'external'
+                const isPlatform = s.step_type === 'platform'
                 // 插件步骤：保留门禁/Skill遵从度 tag
                 let stepTag = null
                 if (!isExt) {
                   const compliance = s.skill_compliance
-                  if (s.gate_passed === false) {
+                  if (s.status === 'skipped') {
+                    stepTag = <Tag style={{ fontSize: 10, marginLeft: 4, color: '#999' }}>已跳过</Tag>
+                  } else if (s.gate_passed === false) {
                     stepTag = <Tag color="red" style={{ fontSize: 10, marginLeft: 4 }}>门禁未通过</Tag>
                   } else if (s.status === 'failed') {
                     stepTag = <Tag color="red" style={{ fontSize: 10, marginLeft: 4 }}>失败</Tag>
@@ -1907,13 +1607,15 @@ export default function WorkflowSimV2Tab() {
                 let groupLabel = null
                 if (isExt && s.step_category === 'clone') {
                   groupLabel = '▾ 前置准备'
-                } else if (!isExt && lifecycleSteps.slice(0, i).every(x => x.step_type === 'external' || x.step_category === 'clone')) {
+                } else if (isPlatform) {
+                  groupLabel = '▾ 环境准备'
+                } else if (!isExt && lifecycleSteps.slice(0, i).every(x => x.step_type === 'external' || x.step_type === 'platform' || x.step_category === 'clone')) {
                   groupLabel = '▾ 插件开发流程'
                 } else if (isExt && s.step_category === 'npu') {
                   groupLabel = '▾ 验收'
                 }
                 return {
-                  className: `${isExt ? 'ext-step' : 'plugin-step'}${groupLabel ? ' has-group' : ''}`,
+                  className: `${isExt ? 'ext-step' : (isPlatform ? 'platform-step' : 'plugin-step')}${groupLabel ? ' has-group' : ''}`,
                   title: (
                     <div>
                       {groupLabel && (
@@ -1947,11 +1649,94 @@ export default function WorkflowSimV2Tab() {
                           ? <LoadingOutlined />
                           : s.status === 'failed'
                             ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                            : null),
+                            : (isPlatform ? <ToolOutlined style={{ color: '#8c8c8c' }} /> : null)),
                 }
               })}
             />
           </div>
+        </Card>
+      )}
+
+      {/* 文件改动（git diff，相对于仿真开始的基线） */}
+      {session && (
+        <Card size="small" style={{ marginBottom: 12 }} title={
+          <Space>
+            <FileTextOutlined />
+            <span>文件改动</span>
+            <Tag style={{ fontSize: 10 }}>{diffFiles.length} 个文件</Tag>
+            {simulating && <Tag color="blue" style={{ fontSize: 10 }}>实时</Tag>}
+          </Space>
+        } extra={
+          <Button size="small" type="text" icon={showDiffFiles ? <DownOutlined /> : <UpOutlined />} onClick={() => setShowDiffFiles(v => !v)} />
+        }>
+          {showDiffFiles && (
+            diffFiles.length === 0 ? (
+              <div style={{ color: diffError ? '#ff4d4f' : '#999', textAlign: 'center', padding: 16, fontSize: 12 }}>
+                {diffError ? `无法获取 diff：${diffError}` : (simulating ? '仿真尚未改动文件…' : '无文件改动')}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 12 }}>
+                {/* 左：文件列表 */}
+                <div style={{ width: 280, flexShrink: 0, maxHeight: 480, overflowY: 'auto', borderRight: '1px solid #f0f0f0', paddingRight: 8 }}>
+                  {diffFiles.map(f => {
+                    const isSel = selectedDiffFile === f.path
+                    const stColor = f.status === 'A' ? 'green' : f.status === 'D' ? 'red' : f.status === 'R' ? 'blue' : 'orange'
+                    const stText = { A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制' }[f.status] || f.status
+                    return (
+                      <div key={f.path} onClick={() => onSelectDiffFile(f.path)} style={{
+                        padding: '4px 6px', marginBottom: 2, cursor: 'pointer', borderRadius: 4,
+                        background: isSel ? '#e6f7ff' : 'transparent',
+                        fontSize: 12, lineHeight: '18px',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Tag color={stColor} style={{ fontSize: 9, lineHeight: '14px', padding: '0 3px', margin: 0 }}>{stText}</Tag>
+                          <Text ellipsis style={{ flex: 1, fontSize: 11 }}>{f.path}</Text>
+                        </div>
+                        {!f.binary && (f.additions > 0 || f.deletions > 0) && (
+                          <div style={{ fontSize: 10, color: '#999', marginLeft: 4 }}>
+                            <span style={{ color: '#22863a' }}>+{f.additions}</span>{' '}
+                            <span style={{ color: '#cb2431' }}>-{f.deletions}</span>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                {/* 右：选中文件 diff（自绘 unified） */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {!selectedDiffFile ? (
+                    <div style={{ color: '#999', textAlign: 'center', padding: 32, fontSize: 12 }}>← 选择左侧文件查看改动</div>
+                  ) : diffLoading ? (
+                    <div style={{ textAlign: 'center', padding: 32 }}><Spin size="small" /></div>
+                  ) : !diffContent ? (
+                    <div style={{ color: '#999', textAlign: 'center', padding: 32, fontSize: 12 }}>无内容差异</div>
+                  ) : (
+                    <div style={{
+                      background: '#1e1e1e', borderRadius: 6, padding: 8, maxHeight: 480, overflow: 'auto',
+                      fontFamily: 'Menlo, Monaco, monospace', fontSize: 12, lineHeight: 1.6, color: '#d4d4d4',
+                    }}>
+                      <div style={{ color: '#bbb', marginBottom: 6, borderBottom: '1px solid #333', paddingBottom: 4 }}>{selectedDiffFile}</div>
+                      {diffContent.split('\n').map((line, i) => {
+                        if (line.startsWith('@@')) {
+                          return <div key={i} style={{ color: '#569cd6', background: '#2a2d3a', padding: '0 4px' }}>{line}</div>
+                        }
+                        if (line.startsWith('+++') || line.startsWith('---')) {
+                          return <div key={i} style={{ color: '#dcdcaa' }}>{line}</div>
+                        }
+                        if (line.startsWith('+')) {
+                          return <div key={i} style={{ background: '#1e3a1e', color: '#9bdb7a' }}>{line}</div>
+                        }
+                        if (line.startsWith('-')) {
+                          return <div key={i} style={{ background: '#3a1e1e', color: '#f5a3a3' }}>{line}</div>
+                        }
+                        return <div key={i} style={{ color: '#888' }}>{line || ' '}</div>
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          )}
         </Card>
       )}
 
@@ -3121,6 +2906,24 @@ export default function WorkflowSimV2Tab() {
           />
         </Modal>
       )}
+
+      {/* 新建仿真 Modal */}
+      <NewSessionModal
+        visible={newSessionModalOpen}
+        onCancel={() => setNewSessionModalOpen(false)}
+        selectedPlugin={selectedPlugin} onSelectedPluginChange={setSelectedPlugin}
+        opName={opName} onOpNameChange={e => setOpName(e.target.value)}
+        opSpec={opSpec} onOpSpecChange={e => setOpSpec(e.target.value)}
+        workDir={workDir} onWorkDirChange={e => setWorkDir(e.target.value)}
+        repoUrl={repoUrl} onRepoUrlChange={e => setRepoUrl(e.target.value)}
+        gitcodeToken={gitcodeToken} onGitcodeTokenChange={e => setGitcodeToken(e.target.value)}
+        selectedTool={selectedTool} onSelectedToolChange={setSelectedTool}
+        stepTimeout={stepTimeout} onStepTimeoutChange={setStepTimeout}
+        autoPipeline={autoPipeline} onAutoPipelineChange={setAutoPipeline}
+        plugins={plugins} pluginsLoading={pluginsLoading}
+        onViewArch={openPluginArch}
+        onStart={handleStart}
+      />
 
       {/* 插件架构 Drawer */}
       <Drawer

@@ -64,12 +64,12 @@ export default function CannbotSkills() {
   const [actionLoading, setActionLoading] = useState('')
   const [activeTab, setActiveTabState] = useState(() => {
     const params = new URLSearchParams(window.location.search)
-    return params.get('tab') || 'overview'
+    return params.get('tab') || 'workflow-sim-v2'
   })
   const setActiveTab = useCallback((key) => {
     setActiveTabState(key)
     const url = new URL(window.location)
-    if (key === 'overview') {
+    if (key === 'workflow-sim-v2') {
       url.searchParams.delete('tab')
     } else {
       url.searchParams.set('tab', key)
@@ -233,59 +233,9 @@ export default function CannbotSkills() {
       {/* 三个 Tab */}
       <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
         {
-          key: 'overview',
-          label: <span><DashboardOutlined /> 概览</span>,
-          children: <OverviewTab stats={stats} evaluation={evaluation} evalLoading={evalLoading} changelog={changelog} />,
-        },
-        {
-          key: 'evaluation',
-          label: <span><AuditOutlined /> 技能评估 {evalLoading && <Spin size="small" />}</span>,
-          children: (
-            <EvaluationTab
-              evaluation={evaluation}
-              evalLoading={evalLoading}
-              filtered={filteredEval}
-              searchText={searchText}
-              setSearchText={setSearchText}
-              filterCategory={filterCategory}
-              setFilterCategory={setFilterCategory}
-              filterGrade={filterGrade}
-              setFilterGrade={setFilterGrade}
-              onOpenDetail={openDetail}
-            />
-          ),
-        },
-        {
-          key: 'install',
-          label: <span><RocketOutlined /> 场景安装</span>,
-          children: (
-            <InstallTab scenarios={scenarios} selectedTool={selectedTool} setSelectedTool={setSelectedTool} />
-          ),
-        },
-        {
-          key: 'plugin-graph',
-          label: <span><ApartmentOutlined /> 插件架构</span>,
-          children: <PluginGraphPanel />,
-        },
-        {
-          key: 'test',
-          label: <span><ThunderboltOutlined /> Skill 测试</span>,
-          children: <TestTab scenarios={scenarios} />,
-        },
-        {
-          key: 'workflow-sim',
-          label: <span><ExperimentOutlined /> 工作流仿真</span>,
-          children: <WorkflowSimErrorBoundary><WorkflowSimTab /></WorkflowSimErrorBoundary>,
-        },
-        {
           key: 'workflow-sim-v2',
           label: <span><RocketOutlined /> 工作流仿真 2.0</span>,
           children: <WorkflowSimErrorBoundary><WorkflowSimV2Tab /></WorkflowSimErrorBoundary>,
-        },
-        {
-          key: 'ops-dev',
-          label: <span><CodeOutlined /> 算子开发 V2</span>,
-          children: <OpsDevSession />,
         },
       ]} />
 
