@@ -204,7 +204,7 @@ class RateLimiter:
         """
         self.enabled = config.get("enabled", True)
         self.window_seconds = config.get("window_seconds", 60)
-        self.max_requests = config.get("max_requests", 60)
+        self.max_requests = config.get("max_requests", 600)
         self.strict_max_requests = config.get("strict_max_requests", 20)
         # 严格限流路径前缀（写入类操作）
         self.strict_paths = config.get("strict_paths", [
@@ -212,6 +212,13 @@ class RateLimiter:
             "/analysis/cicd/analyze",
             "/agent/analyze",
             "/browser/fetch",
+        ])
+        # 白名单路径前缀（不计入限流）：仿真 SSE 流、状态查询、诊断等高频接口
+        self.whitelist_paths = config.get("whitelist_paths", [
+            "/cannbot/workflow-v2/sessions",    # 仿真会话、SSE 流、状态、诊断
+            "/cannbot/workflow-v2/diagnosis",
+            "/cannbot/workflow/",               # V1 仿真
+            "/cannbot/workflow/simulate",
         ])
 
         # 请求记录: {ip: [(timestamp, ...), ...]}
@@ -252,6 +259,9 @@ class RateLimiter:
 
         ip = self._get_client_ip(request)
         path = request.url.path
+        # 白名单路径（仿真 SSE/诊断等高频接口）直接放行，不计入限流
+        if any(path.startswith(wp) for wp in self.whitelist_paths):
+            return True, self.max_requests
         max_req = self._get_limit_for_path(path)
         now = time.time()
 
