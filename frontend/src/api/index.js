@@ -450,6 +450,12 @@ export const getBreakpointDiagnosis = (pluginId, limit = 50) =>
 export const exportBreakpointDiagnosis = (pluginId, limit = 50) =>
   api.get('/cannbot/workflow-v2/diagnosis/export', { params: { plugin_id: pluginId, limit }, responseType: 'blob', timeout: 30000 })
 
+// 文件改动 diff（相对于仿真开始的基线）
+export const getWorkflowDiff = (sessionId) =>
+  api.get(`/cannbot/workflow-v2/sessions/${sessionId}/diff`, { timeout: 30000 })
+export const getFileDiff = (sessionId, filePath) =>
+  api.get(`/cannbot/workflow-v2/sessions/${sessionId}/diff`, { params: { file: filePath }, timeout: 30000 })
+
 // ====================
 // 算子辅助开发 V2
 // ====================

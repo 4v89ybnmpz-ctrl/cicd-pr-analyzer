@@ -26,6 +26,7 @@ from .workflow_sim_v2_pipeline import register_pipeline_routes
 from .workflow_sim_v2_npu import register_npu_routes
 from .workflow_sim_v2_jsonl_routes import register_jsonl_routes
 from .workflow_sim_v2_diagnosis import register_diagnosis_routes
+from .workflow_sim_v2_diff import register_diff_routes
 
 
 def register_workflow_sim_v2_routes(router: APIRouter, db=None):
@@ -39,3 +40,4 @@ def register_workflow_sim_v2_routes(router: APIRouter, db=None):
     register_npu_routes(router, db)
     register_jsonl_routes(router, db)
     register_diagnosis_routes(router, db)
+    register_diff_routes(router, db)
