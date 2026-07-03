@@ -168,10 +168,14 @@ async def drive_session_events(
         required_skills = step.get("required_skills", [])
         artifacts = step.get("output_artifacts", [])
 
-        # 平台注入步骤（step_type=platform）：prompt 由平台写死，替换 {work_dir}，
+        # 平台注入步骤（step_type=platform）：prompt 由平台写死，替换占位符，
         # 不走插件的 op_name/op_spec 渲染
         if step.get("step_type") == "platform":
-            prompt = prompt_template.replace("{work_dir}", work_dir)
+            _fork_info = session.get("fork_info") or {}
+            prompt = prompt_template.replace("{work_dir}", work_dir) \
+                .replace("{gitcode_token}", gitcode_token or "") \
+                .replace("{repo_url}", session.get("repo_url", "") or "") \
+                .replace("{fork_path}", _fork_info.get("fork_path", "") or "")
         else:
             prompt = _render_prompt(prompt_template, op_name, op_spec)
 
