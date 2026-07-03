@@ -15,7 +15,7 @@ import {
   RightOutlined, DownOutlined, UpOutlined, GithubOutlined,
   DownloadOutlined, ToolOutlined, BranchesOutlined, PlusOutlined, SwapOutlined,
   ApartmentOutlined, RobotOutlined, FileTextOutlined, ThunderboltOutlined, SafetyCertificateOutlined,
-  RocketOutlined, NodeIndexOutlined, DeploymentUnitOutlined,
+  RocketOutlined, NodeIndexOutlined, DeploymentUnitOutlined, CloudUploadOutlined, LinkOutlined,
 } from '@ant-design/icons'
 import {
   getWorkflowV2Plugins, createWorkflowSimV2Session,
@@ -150,7 +150,7 @@ export default function WorkflowSimV2Tab() {
   const [runningSessions, setRunningSessions] = useState([])
   const [viewingSessionId, setViewingSessionId] = useState(null)
 
-  // 真机 NPU 远程测试
+  // NPU 性能测试（挂在性能验收步骤详情里）
   const [npuTest, setNpuTest] = useState(null)       // session.npu_test 镜像
   const [npuLogs, setNpuLogs] = useState([])          // 远程 stdout/stderr 实时流
   const npuEsRef = useRef(null)                       // npu-test SSE
@@ -1112,6 +1112,11 @@ export default function WorkflowSimV2Tab() {
     npu: <ApiOutlined />,
     cicd: <DeploymentUnitOutlined />,
   }
+  const PLATFORM_ICON = {
+    install_env: <ToolOutlined />,
+    upload_repo: <CloudUploadOutlined />,
+    create_pr: <BranchesOutlined />,
+  }
 
   // 后端枚举(status) → Ant Steps status 的统一映射
   const mapToStepsStatus = (raw) => {
@@ -1136,6 +1141,63 @@ export default function WorkflowSimV2Tab() {
       return { ...s, status: liveStatus }
     })
   }, [steps, session, npuTest, pipeline])
+
+  // 6 个大节点视图：clone / 环境 / 本地开发(含插件步骤+NPU) / 上库 / PR / CI-CD
+  // 每个大节点聚合内部步骤状态（failed→error，running→process，全完成→finish，否则 wait）
+  const aggregateStatus = (subSteps) => {
+    if (!subSteps || subSteps.length === 0) return 'wait'
+    const statuses = subSteps.map(s => mapToStepsStatus(s.status))
+    if (statuses.includes('error')) return 'error'
+    if (statuses.includes('process')) return 'process'
+    if (statuses.every(x => x === 'finish')) return 'finish'
+    return 'wait'
+  }
+  const macroNodes = useMemo(() => {
+    if (!lifecycleSteps.length) return []
+    const find = (pred) => lifecycleSteps.find(pred)
+    const filter = (pred) => lifecycleSteps.filter(pred)
+    const pluginSteps = filter(s => s.step_type !== 'external' && s.step_type !== 'platform')
+    // 本地开发内部只含插件步骤；NPU 性能测试作为「性能验收」步骤的下挂子项（不作为独立大节点、也不作为横向平级步骤）
+    const devInner = [...pluginSteps]
+    const npuStep = find(s => s.step_type === 'external' && s.step_category === 'npu')
+    const perfStep = pluginSteps.find(s => (s.step_name || '').includes('性能') || (s.step_name || '').includes('验收'))
+    return [
+      {
+        key: 'clone', name: 'Clone 算子库', icon: <GithubOutlined />,
+        status: mapToStepsStatus(find(s => s.step_category === 'clone')?.status || 'pending'),
+        sub: [find(s => s.step_category === 'clone')].filter(Boolean),
+      },
+      {
+        key: 'env', name: '环境搭建准备', icon: <ToolOutlined />,
+        status: mapToStepsStatus(find(s => s.step_category === 'install_env')?.status || 'pending'),
+        sub: [find(s => s.step_category === 'install_env')].filter(Boolean),
+      },
+      {
+        key: 'dev', name: '本地开发', icon: <CodeOutlined />,
+        status: aggregateStatus(npuStep ? [...devInner, npuStep] : devInner),
+        sub: devInner,
+        isDev: true,
+        npuStep: npuStep || null,        // NPU 性能测试（下挂在性能验收步骤）
+        perfStepId: perfStep?.step_id || null,
+        perfStepName: perfStep?.step_name || null,
+      },
+      {
+        key: 'upload', name: '上库', icon: <CloudUploadOutlined />,
+        status: mapToStepsStatus(find(s => s.step_category === 'upload_repo')?.status || 'pending'),
+        sub: [find(s => s.step_category === 'upload_repo')].filter(Boolean),
+      },
+      {
+        key: 'pr', name: 'PR', icon: <BranchesOutlined />,
+        status: mapToStepsStatus(find(s => s.step_category === 'create_pr')?.status || 'pending'),
+        sub: [find(s => s.step_category === 'create_pr')].filter(Boolean),
+      },
+      {
+        key: 'cicd', name: 'CI/CD', icon: <DeploymentUnitOutlined />,
+        status: mapToStepsStatus(find(s => s.step_category === 'cicd')?.status || 'pending'),
+        sub: [find(s => s.step_category === 'cicd')].filter(Boolean),
+      },
+    ].filter(n => n.sub.length > 0 || n.key === 'dev')  // dev 即使内部空也显示（开发流程可能还没产生步骤）
+  }, [lifecycleSteps])
   const criticalAlerts = alerts.filter(a => a.severity === 'CRITICAL' || a.severity === 'HIGH')
 
   return (
@@ -1522,140 +1584,115 @@ export default function WorkflowSimV2Tab() {
         </Card>
       )}
 
-      {/* 步骤进度（完整生命周期：clone → 插件开发流程 → NPU → CI/CD） */}
-      {lifecycleSteps.length > 0 && (
-        <Card size="small" title={<Space><CodeOutlined /> 工作流步骤 ({lifecycleSteps.length})</Space>}>
-          <div className="lifecycle-steps">
-            <style>{`
-              .lifecycle-steps .ant-steps-item.plugin-step {
-                background: #f0f5ff;
-                border-left: 3px solid #adc6ff;
-                border-radius: 4px;
-                padding-left: 8px !important;
-                margin-left: -4px;
-              }
-              .lifecycle-steps .ant-steps-item.plugin-step .ant-steps-item-title {
-                width: 100%;
-              }
-              /* 圆点与步骤名顶部对齐（默认垂直居中，title 变高会错位） */
-              .lifecycle-steps .ant-steps-vertical .ant-steps-item-tail,
-              .lifecycle-steps .ant-steps-vertical > .ant-steps-item > .ant-steps-item-container > .ant-steps-item-tail {
-                margin-inline-start: 13px;
-              }
-              /* 分组标签：绝对定位浮在 item 上方，不占 title 高度，避免圆点错位 */
-              .lifecycle-group-label {
-                position: absolute;
-                top: -16px;
-                left: 0;
-                font-size: 11px;
-                font-weight: 500;
-                color: #8c8c8c;
-                line-height: 1;
-                pointer-events: none;
-              }
-              .lifecycle-group-label.plugin {
-                color: #1d39c4;
-              }
-              /* 带分组标签的首步多留出顶部空间 */
-              .lifecycle-steps .ant-steps-item.has-group {
-                margin-top: 18px;
-                position: relative;
-              }
-              .lifecycle-steps .ant-steps-item.ext-step .ant-steps-icon {
-                color: #8c8c8c;
-              }
-              /* 平台注入步骤（安装环境）：紫色柔和框，区别于插件步骤（蓝）和外部步骤（无） */
-              .lifecycle-steps .ant-steps-item.platform-step {
-                background: #f9f0ff;
-                border-left: 3px solid #d3adf7;
-                border-radius: 4px;
-                padding-left: 8px !important;
-                margin-left: -4px;
-              }
-            `}</style>
-            <Steps
-              size="small"
-              direction="vertical"
-              current={lifecycleSteps.findIndex(s => s.status === 'running')}
-              items={lifecycleSteps.map((s, i) => {
-                const isExt = s.step_type === 'external'
-                const isPlatform = s.step_type === 'platform'
-                // 插件步骤：保留门禁/Skill遵从度 tag
-                let stepTag = null
-                if (!isExt) {
-                  const compliance = s.skill_compliance
-                  if (s.status === 'skipped') {
-                    stepTag = <Tag style={{ fontSize: 10, marginLeft: 4, color: '#999' }}>已跳过</Tag>
-                  } else if (s.gate_passed === false) {
-                    stepTag = <Tag color="red" style={{ fontSize: 10, marginLeft: 4 }}>门禁未通过</Tag>
-                  } else if (s.status === 'failed') {
-                    stepTag = <Tag color="red" style={{ fontSize: 10, marginLeft: 4 }}>失败</Tag>
-                  } else if (compliance) {
-                    stepTag = (
-                      <Tag color={compliance.score >= 0.8 ? 'green' : compliance.score >= 0.5 ? 'orange' : 'red'} style={{ fontSize: 10, marginLeft: 4 }}>
-                        {Math.round(compliance.score * 100)}%
-                      </Tag>
-                    )
-                  }
-                }
-                // 外部步骤：显示阶段状态 tag
-                const extStatusText = { pending: '待执行', running: '执行中', success: '通过', cloned: '已完成', failed: '失败', cancelled: '已取消', timeout: '超时' }[s.status] || s.status
-                const extStatusColor = mapToStepsStatus(s.status) === 'finish' ? 'green'
-                  : mapToStepsStatus(s.status) === 'error' ? 'red'
-                  : mapToStepsStatus(s.status) === 'process' ? 'blue' : 'default'
-                // 分组小标签（每组首步显示，绝对定位浮在 item 上方，不占 title 高度）
-                let groupLabel = null
-                if (isExt && s.step_category === 'clone') {
-                  groupLabel = '▾ 前置准备'
-                } else if (isPlatform) {
-                  groupLabel = '▾ 环境准备'
-                } else if (!isExt && lifecycleSteps.slice(0, i).every(x => x.step_type === 'external' || x.step_type === 'platform' || x.step_category === 'clone')) {
-                  groupLabel = '▾ 插件开发流程'
-                } else if (isExt && s.step_category === 'npu') {
-                  groupLabel = '▾ 验收'
-                }
-                return {
-                  className: `${isExt ? 'ext-step' : (isPlatform ? 'platform-step' : 'plugin-step')}${groupLabel ? ' has-group' : ''}`,
-                  title: (
-                    <div>
-                      {groupLabel && (
-                        <div className={!isExt ? 'lifecycle-group-label plugin' : 'lifecycle-group-label'}>
-                          {groupLabel}
-                        </div>
-                      )}
-                      <span
-                        style={{ cursor: isExt ? 'default' : 'pointer' }}
-                        onClick={() => { if (!isExt) setSelectedStepIndex(i) }}
-                      >
-                        {isExt && <span style={{ marginRight: 4 }}>{EXT_ICON[s.step_category]}</span>}
-                        {s.step_name}
-                        {stepTag}
-                        {isExt && <Tag color={extStatusColor} style={{ fontSize: 10, marginLeft: 4 }}>{extStatusText}</Tag>}
-                      </span>
+      {/* 工作流（6 个大节点竖向，本地开发内部横向展开插件步骤+NPU） */}
+      {macroNodes.length > 0 && (
+        <Card size="small" title={<Space><CodeOutlined /> 工作流</Space>}>
+          <style>{`
+            .macro-node {
+              display: flex; gap: 10px; padding: 8px 10px; margin-bottom: 6px;
+              border-radius: 6px; border: 1px solid #f0f0f0; align-items: flex-start;
+            }
+            .macro-node.is-dev { background: #f0f5ff; border-color: #adc6ff; }
+            .macro-node__icon {
+              width: 28px; height: 28px; border-radius: 50%; display: flex;
+              align-items: center; justify-content: center; flexShrink: 0;
+              font-size: 14px; border: 2px solid;
+            }
+            .macro-node__body { flex: 1; min-width: 0; }
+            .macro-node__title { font-weight: 600; font-size: 13px; }
+            .macro-node__sub { font-size: 11px; color: #888; margin-top: 2px; }
+            .dev-inner { margin-top: 8px; padding: 8px; background: #fff; border-radius: 4px; border: 1px solid #e8e8e8; }
+          `}</style>
+          {macroNodes.map(node => {
+            const color = node.status === 'finish' ? '#52c41a'
+              : node.status === 'error' ? '#ff4d4f'
+              : node.status === 'process' ? '#1677ff' : '#bfbfbf'
+            const Icon = node.status === 'finish' ? <CheckCircleOutlined style={{ color }} />
+              : node.status === 'process' ? <LoadingOutlined style={{ color }} />
+              : node.status === 'error' ? <CloseCircleOutlined style={{ color }} />
+              : <span style={{ color }}>{node.icon}</span>
+            const statusText = { finish: '已完成', error: '失败', process: '进行中', wait: '待执行' }[node.status]
+            const devInner = node.isDev && node.sub.length > 0
+            const devCurrent = node.sub.findIndex(s => s.status === 'running')
+            return (
+              <div key={node.key} className={`macro-node${node.isDev ? ' is-dev' : ''}`}>
+                <div className="macro-node__icon" style={{ borderColor: color, background: '#fff' }}>{Icon}</div>
+                <div className="macro-node__body">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span className="macro-node__title">{node.name}</span>
+                    <Tag color={node.status === 'finish' ? 'green' : node.status === 'error' ? 'red' : node.status === 'process' ? 'blue' : 'default'} style={{ fontSize: 10 }}>{statusText}</Tag>
+                  </div>
+                  <div className="macro-node__sub">
+                    {node.sub.length} 个步骤
+                    {node.isDev && devInner && ` · 当前: ${devCurrent >= 0 ? node.sub[devCurrent].step_name : (node.status === 'finish' ? '全部完成' : '-')}`}
+                  </div>
+                  {devInner && (
+                    <div className="dev-inner">
+                      <Steps
+                        size="small"
+                        current={devCurrent}
+                        items={node.sub.map((s, i) => {
+                          const isNpu = s.step_type === 'external' && s.step_category === 'npu'
+                          let stepTag = null
+                          if (s.status === 'skipped') stepTag = <Tag style={{ fontSize: 9, marginLeft: 4, color: '#999' }}>跳过</Tag>
+                          else if (s.gate_passed === false) stepTag = <Tag color="red" style={{ fontSize: 9, marginLeft: 4 }}>门禁</Tag>
+                          else if (s.status === 'failed') stepTag = <Tag color="red" style={{ fontSize: 9, marginLeft: 4 }}>失败</Tag>
+                          else if (s.skill_compliance) stepTag = <Tag color={s.skill_compliance.score >= 0.8 ? 'green' : s.skill_compliance.score >= 0.5 ? 'orange' : 'red'} style={{ fontSize: 9, marginLeft: 4 }}>{Math.round(s.skill_compliance.score * 100)}%</Tag>
+                          // 是否在"性能验收"步骤下挂 NPU 性能测试（融入 Ant Steps 的 description 区，自然竖向对齐）
+                          const isPerfAnchor = node.npuStep && node.perfStepId && s.step_id === node.perfStepId
+                          let npuDesc = null
+                          if (isPerfAnchor) {
+                            const ns = node.npuStep.status
+                            const ncolor = ns === 'success' ? '#52c41a' : (ns === 'failed' || ns === 'timeout') ? '#ff4d4f' : ns === 'running' ? '#1677ff' : '#bfbfbf'
+                            const nIcon = ns === 'success' ? <CheckCircleOutlined style={{ color: ncolor, fontSize: 12 }} />
+                              : ns === 'running' ? <LoadingOutlined style={{ color: ncolor, fontSize: 12 }} />
+                              : (ns === 'failed' || ns === 'timeout') ? <CloseCircleOutlined style={{ color: ncolor, fontSize: 12 }} />
+                              : <ApiOutlined style={{ color: ncolor, fontSize: 12 }} />
+                            const nText = { pending: '待执行', running: '执行中', success: '通过', failed: '失败', cancelled: '已取消', timeout: '超时' }[ns] || ns
+                            npuDesc = (
+                              <div style={{ marginTop: 6, marginLeft: -8, display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                                {/* NPU 圆点节点 + 上方竖线，整体对齐性能验收 icon */}
+                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+                                  <div style={{ width: 2, height: 8, background: '#d9d9d9' }} />
+                                  <div style={{
+                                    width: 22, height: 22, borderRadius: '50%',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    background: '#fff', border: `2px solid ${ncolor}`,
+                                  }}>{nIcon}</div>
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingTop: 10 }}>
+                                  <Text strong style={{ fontSize: 11 }}>NPU 性能测试</Text>
+                                  <Tag color={ns === 'success' ? 'green' : (ns === 'failed' || ns === 'timeout') ? 'red' : ns === 'running' ? 'blue' : 'default'} style={{ fontSize: 9, margin: 0, alignSelf: 'flex-start' }}>{nText}</Tag>
+                                </div>
+                              </div>
+                            )
+                          }
+                          return {
+                            title: (
+                              <span style={{ cursor: 'pointer', fontSize: 11 }} onClick={() => { if (!isNpu) setSelectedStepIndex(steps.findIndex(x => x.step_id === s.step_id)) }}>
+                                {isNpu ? 'NPU 真机' : s.step_name}
+                                {stepTag}
+                              </span>
+                            ),
+                            description: npuDesc,
+                            status: s.status === 'running' ? 'process' : s.status === 'completed' ? 'finish' : s.status === 'failed' ? 'error' : 'wait',
+                            icon: s.status === 'completed'
+                              ? <CheckCircleOutlined style={{ color: s.gate_passed === false ? '#ff4d4f' : '#52c41a' }} />
+                              : s.status === 'running' ? <LoadingOutlined />
+                              : s.status === 'failed' ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+                              : (isNpu ? <ApiOutlined style={{ color: '#8c8c8c' }} /> : null),
+                          }
+                        })}
+                      />
                     </div>
-                  ),
-                  status: isExt ? mapToStepsStatus(s.status) : (s.status === 'running' ? 'process' : s.status === 'completed' ? 'finish' : s.status === 'failed' ? 'error' : 'wait'),
-                  icon: isExt
-                    ? (mapToStepsStatus(s.status) === 'finish'
-                        ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                        : mapToStepsStatus(s.status) === 'process'
-                          ? <LoadingOutlined />
-                          : mapToStepsStatus(s.status) === 'error'
-                            ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                            : <span style={{ color: '#8c8c8c' }}>{EXT_ICON[s.step_category]}</span>)
-                    : (s.status === 'completed'
-                        ? <CheckCircleOutlined style={{ color: s.gate_passed === false ? '#ff4d4f' : '#52c41a' }} />
-                        : s.status === 'running'
-                          ? <LoadingOutlined />
-                          : s.status === 'failed'
-                            ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                            : (isPlatform ? <ToolOutlined style={{ color: '#8c8c8c' }} /> : null)),
-                }
-              })}
-            />
-          </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </Card>
       )}
+
 
       {/* 文件改动（git diff，相对于仿真开始的基线） */}
       {session && (
@@ -2019,6 +2056,23 @@ export default function WorkflowSimV2Tab() {
               </pre>
             </div>
           )}
+          {/* NPU 性能测试 — 挂在性能验收步骤详情里（按 step_name 关键字匹配，适配不同插件流程） */}
+          {(selectedStep.step_name?.includes('性能') || selectedStep.step_name?.includes('验收')) && (
+            <div style={{ marginTop: 12, borderTop: '1px dashed #e8e8e8', paddingTop: 12 }}>
+              <NpuTestPanel
+                npuTest={npuTest}
+                logs={npuLogs}
+                sessionId={session?.session_id}
+                sessionStatus={session?.status}
+                logEndRef={npuLogEndRef}
+                boxRef={npuBoxRef}
+                onBoxScroll={e => { const el = e.target; setNpuPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 40) }}
+                onTrigger={triggerNpuTest}
+                onCancel={npuTest?.status === 'running' ? cancelNpuTestRun : null}
+                onTriggerClaude={triggerNpuTestClaude}
+              />
+            </div>
+          )}
         </Card>
       )}
 
@@ -2161,21 +2215,6 @@ export default function WorkflowSimV2Tab() {
         </Card>
       )}
 
-      {/* 真机 NPU 远程测试面板 */}
-      {(session?.status === 'completed' || session?.status === 'stopped' || npuTest) && (
-        <NpuTestPanel
-          npuTest={npuTest}
-          logs={npuLogs}
-          sessionId={session?.session_id}
-          sessionStatus={session?.status}
-          logEndRef={npuLogEndRef}
-          boxRef={npuBoxRef}
-          onBoxScroll={e => { const el = e.target; setNpuPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 40) }}
-          onTrigger={triggerNpuTest}
-          onCancel={npuTest?.status === 'running' ? cancelNpuTestRun : null}
-          onTriggerClaude={triggerNpuTestClaude}
-        />
-      )}
 
       {/* 流水线状态面板 */}
       {pipeline && (

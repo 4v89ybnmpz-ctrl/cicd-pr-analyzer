@@ -87,7 +87,7 @@ export default function NpuTestPanel({ npuTest, logs, sessionId, sessionStatus, 
     <Card size="small" title={
       <Space>
         <RocketOutlined style={{ color: '#722ed1' }} />
-        <span>真机 NPU 远程测试</span>
+        <span>NPU 性能测试</span>
         {statusTag}
         {isRunning && <Spin size="small" />}
       </Space>
