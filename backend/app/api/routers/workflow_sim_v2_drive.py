@@ -20,6 +20,7 @@ from .workflow_sim_v2_helpers import (
     get_or_create_bus as _get_or_create_bus,
     _pipeline_cancel_flags,
     _active_session_tasks,
+    _PROJECT_ROOT,
 )
 from .workflow_sim_v2_skill import (
     compute_skill_compliance as _compute_skill_compliance,
@@ -172,10 +173,17 @@ async def drive_session_events(
         # 不走插件的 op_name/op_spec 渲染
         if step.get("step_type") == "platform":
             _fork_info = session.get("fork_info") or {}
+            _env_setup_dir = os.path.join(
+                _PROJECT_ROOT, "external", "cannbot-skills", "ops", "ascendc-env-setup"
+            )
             prompt = prompt_template.replace("{work_dir}", work_dir) \
+                .replace("{op_name}", op_name) \
+                .replace("{env_setup_dir}", _env_setup_dir) \
                 .replace("{gitcode_token}", gitcode_token or "") \
                 .replace("{repo_url}", session.get("repo_url", "") or "") \
                 .replace("{fork_path}", _fork_info.get("fork_path", "") or "")
+            # platform step 的 artifacts 占位符在此替换（plugin step 已在 sessions.py 替换）
+            artifacts = [a.replace("{operator_name}", op_name) for a in artifacts]
         else:
             prompt = _render_prompt(prompt_template, op_name, op_spec)
 

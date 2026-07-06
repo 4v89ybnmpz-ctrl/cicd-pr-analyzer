@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 import uuid
+from urllib.parse import quote_plus
 
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
@@ -38,7 +39,11 @@ class DatabaseService:
             return
 
         decrypted_password = self._decrypt_password(password)
-        self.connection_string = f"mongodb://{username}:{decrypted_password}@{host}:{port}/"
+        # 用户名/密码做 RFC 3986 转义，避免密码含 @:/ 等字符破坏 URI 解析
+        if username:
+            self.connection_string = f"mongodb://{quote_plus(username)}:{quote_plus(decrypted_password)}@{host}:{port}/"
+        else:
+            self.connection_string = f"mongodb://{host}:{port}/"
         self.database_name = database
         self.client: Optional[AsyncIOMotorClient] = None
         self.db = None

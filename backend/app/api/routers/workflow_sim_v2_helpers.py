@@ -121,23 +121,32 @@ def build_post_external_steps(start_index: int) -> list:
 
 
 # 平台注入步骤的 prompt（不属于插件 task-prompts.md，由平台写死；drive.py 替换 {work_dir}）
-PLATFORM_INSTALL_PROMPT = """你正在 {work_dir} 这个已 clone 下来的算子库工作目录中。
-这是仿真平台在执行插件开发流程之前，为你准备的「环境准备」步骤。
+PLATFORM_INSTALL_PROMPT = """你正在 {work_dir} 这个已 clone 下来的算子库工作目录中，算子名为 {op_name}。
+这是仿真平台在执行插件开发流程之前注入的「安装环境」步骤。本步骤固定调用 ascendc-env-setup skill 完成环境准备——该 skill 面向【无 NPU 的开发机】，只配置算子的【编译路径】，不碰 NPU/运行态。
 
-## 任务
-1. 先用 Read/Glob 阅读该算子库根目录及 docs/ 下的文档：README、CONTRIBUTING（贡献指南）、开发文档、构建说明、环境要求等（找不到就跳过该文件，不要报错）。
-2. 从文档中识别出本算子库的开发环境要求：依赖的编程语言/编译器版本、Python/Conda 环境、系统包、CANN/Ascend 工具链、第三方库、环境变量、初始化脚本（如 source env.sh / init.sh / install.sh）等。
-3. 按文档描述安装/配置环境。可以执行文档中明确指明的安装命令或初始化脚本。如文档未指明，仅做最小必要的环境准备（如创建 venv、安装 requirements.txt 中的依赖），不要臆造命令。
-4. 完成后给出简明安装总结：识别到的开发要求、实际执行的安装步骤、最终环境状态（已就绪 / 部分就绪 / 缺失项）。
+## 任务（严格按顺序）
+1. 跑只读检测（不改环境，保留输出供填台账）：
+   bash {env_setup_dir}/scripts/detect_env.sh {work_dir}
+2. 跑配置脚本（幂等、可安全执行；它【不会】下载 CANN、【不会】执行 sudo）：
+   bash {env_setup_dir}/scripts/setup_env.sh {work_dir}
+3. 若上一步在 {work_dir}/.env.ascendc.sh 生成了环境片段，在后续编译类步骤中保持 `source {work_dir}/.env.ascendc.sh` 生效。
+4. 按 {env_setup_dir}/templates/env-setup-template.md 的格式，把 detect 输出填入台账，产出文件：
+   {work_dir}/operators/{op_name}/docs/dev-environment.md
+   - 状态行据实填写：✅ 就绪 / ⚠ 部分就绪 / ❌ 缺失
+   - NPU 相关项一律 ⊘ 跳过（本机无 NPU）
+   - 若 CANN Toolkit 未装，台账如实标❌（本 skill 不自动下载 CANN）
 
 ## 约束
-- 严格依据文档判断要装什么，不要套用通用模板。不同算子库要求差异很大。
-- 只做"环境准备"，不要开始任何算子开发工作（那是后续插件步骤的任务）。
-- 安装命令应在 {work_dir} 下执行。
+- 严格走 ascendc-env-setup skill 的脚本，不要自行臆造安装命令。
+- 不下载/安装 CANN Toolkit 本体（缺失只在台账标❌并告知）。
+- 不碰 NPU 相关（npu-smi 等一律不跑）。
+- 不执行 sudo。
+- 只做环境准备，不要开始任何算子开发工作（那是后续插件步骤的任务）。
+- 台账必须如实：装了什么、缺什么、跳过什么都写清楚。
 """
 
 
-def _make_platform_step(step_id: str, step_name: str, step_category: str, prompt: str, step_index: int) -> dict:
+def _make_platform_step(step_id: str, step_name: str, step_category: str, prompt: str, step_index: int, output_artifacts: list = None) -> dict:
     """构造一个平台注入步骤（进 Claude 执行，prompt 由平台写死）。"""
     return {
         "step_id": step_id,
@@ -148,7 +157,7 @@ def _make_platform_step(step_id: str, step_name: str, step_category: str, prompt
         "status": "pending",
         "prompt_template": prompt,
         "required_skills": [],
-        "output_artifacts": [],
+        "output_artifacts": output_artifacts or [],
         "dispatch_target": None,  # 主 Claude 自己执行，不派给 subagent
         "fallback": None,
         "output": "",
@@ -164,7 +173,11 @@ def _make_platform_step(step_id: str, step_name: str, step_category: str, prompt
 
 
 # 平台注入步骤模板（step_index 在插入时续号）
-PRE_PLATFORM_STEP_DEFS = [("platform_install_env", "安装环境", "install_env", PLATFORM_INSTALL_PROMPT)]
+# 第 5 项为 output_artifacts（含 {operator_name} 占位符，由 drive.py platform 分支替换）
+PRE_PLATFORM_STEP_DEFS = [
+    ("platform_install_env", "安装环境", "install_env", PLATFORM_INSTALL_PROMPT,
+     ["operators/{operator_name}/docs/dev-environment.md"]),
+]
 POST_PLATFORM_STEP_DEFS = [("platform_upload_repo", "上库", "upload_repo", None)]  # upload_repo 的 prompt 见下方常量
 
 
@@ -227,8 +240,8 @@ POST_PLATFORM_STEP_DEFS = [
 def build_pre_platform_steps(start_index: int = 0) -> list:
     """前置平台步骤（安装环境），插在 Clone 之后、插件开发流程之前。"""
     return [
-        _make_platform_step(sid, name, cat, prompt, start_index + i)
-        for i, (sid, name, cat, prompt) in enumerate(PRE_PLATFORM_STEP_DEFS)
+        _make_platform_step(sid, name, cat, prompt, start_index + i, output_artifacts=arts)
+        for i, (sid, name, cat, prompt, arts) in enumerate(PRE_PLATFORM_STEP_DEFS)
     ]
 
 
