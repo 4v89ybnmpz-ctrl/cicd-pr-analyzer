@@ -361,7 +361,7 @@ export const getWorkflowDefinition = (pluginId) =>
 export const simulateWorkflow = (data) =>
   api.post('/cannbot/workflow/simulate', data, { timeout: 300000 })
 export const simulateWorkflowStream = (pluginId, persona) =>
-  // SSE 实时仿真流，返回 EventSource
+  // SSE 实时评估流，返回 EventSource
   new EventSource(`/api/cannbot/workflow/simulate-stream?plugin_id=${encodeURIComponent(pluginId)}&persona=${encodeURIComponent(persona)}`)
 export const simulateWorkflowBatch = () =>
   api.post('/cannbot/workflow/simulate-batch', null, { timeout: 600000 })
@@ -377,7 +377,7 @@ export const exportWorkflowReport = (data) =>
   api.post('/cannbot/workflow/export', data, { responseType: 'blob', timeout: 60000 })
 
 // ====================
-// 工作流仿真 V2 (Claude Code CLI 驱动)
+// 工作流评估 V2 (Claude Code CLI 驱动)
 // ====================
 export const getWorkflowV2Plugins = () =>
   api.get('/cannbot/workflow-v2/plugins')
@@ -404,7 +404,7 @@ export const streamWorkflowSimV2 = (id, gitcodeToken = '') => {
   const params = gitcodeToken ? `?gitcode_token=${encodeURIComponent(gitcodeToken)}` : ''
   return new EventSource(`/api/cannbot/workflow-v2/sessions/${id}/stream${params}`)
 }
-// 实时 tail 当前仿真 claude 的 jsonl 工作流水（Claude Code 原生存档）
+// 实时 tail 当前评估 claude 的 jsonl 工作流水（Claude Code 原生存档）
 export const streamWorkflowJsonl = (id) =>
   new EventSource(`/api/cannbot/workflow-v2/sessions/${id}/tail-jsonl`)
 // 历史回看：从磁盘读取已完成 session 的 jsonl 工作流水
@@ -428,7 +428,9 @@ export const streamNpuTestClaudeSSE = (id, params) => {
   return new EventSource(`/api/cannbot/workflow-v2/sessions/${id}/npu-test-claude?${qs}`)
 }
 export const cloneWorkflowV2Repo = (data) =>
-  api.post('/cannbot/workflow-v2/clone-repo', data, { timeout: 120000 })
+  api.post('/cannbot/workflow-v2/clone-repo', data, { timeout: 600000 })
+export const checkWorkflowV2Base = (repoUrl, targetDir) =>
+  api.get('/cannbot/workflow-v2/check-base', { params: { repo_url: repoUrl, target_dir: targetDir }, timeout: 15000 })
 export const checkWorkflowV2Repo = (targetDir) =>
   api.get('/cannbot/workflow-v2/check-repo', { params: { target_dir: targetDir } })
 export const forkWorkflowV2Repo = (data) =>
@@ -443,6 +445,8 @@ export const switchWorkflowV2Branch = (data) =>
   api.post('/cannbot/workflow-v2/switch-branch', data)
 export const exportWorkflowV2Session = (id) =>
   api.get(`/cannbot/workflow-v2/sessions/${id}/export`, { responseType: 'blob', timeout: 30000 })
+export const getArbitratorReports = (sessionId) =>
+  api.get(`/cannbot/workflow-v2/sessions/${sessionId}/arbitrator-reports`, { timeout: 15000 })
 
 // 插件断点诊断（按 plugin_id 跨 session 聚合病灶）
 export const getBreakpointDiagnosis = (pluginId, limit = 50) =>
@@ -450,7 +454,7 @@ export const getBreakpointDiagnosis = (pluginId, limit = 50) =>
 export const exportBreakpointDiagnosis = (pluginId, limit = 50) =>
   api.get('/cannbot/workflow-v2/diagnosis/export', { params: { plugin_id: pluginId, limit }, responseType: 'blob', timeout: 30000 })
 
-// 文件改动 diff（相对于仿真开始的基线）
+// 文件改动 diff（相对于评估开始的基线）
 export const getWorkflowDiff = (sessionId) =>
   api.get(`/cannbot/workflow-v2/sessions/${sessionId}/diff`, { timeout: 30000 })
 export const getFileDiff = (sessionId, filePath) =>

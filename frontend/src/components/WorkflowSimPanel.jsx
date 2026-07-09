@@ -1,5 +1,5 @@
 /**
- * WorkflowSimPanel — 工作流仿真 DAG 可视化
+ * WorkflowSimPanel — 工作流评估 DAG 可视化
  * 使用 @xyflow/react 展示工作流步骤，节点颜色表示通过率，断点用红色标注
  */
 import { useCallback, useMemo, useEffect } from 'react'
@@ -127,7 +127,7 @@ export default function WorkflowSimPanel({ steps, onStepClick, selectedStepId })
   if (!steps || steps.length === 0) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>
-        暂无仿真数据，请先执行仿真
+        暂无评估数据，请先执行评估
       </div>
     )
   }

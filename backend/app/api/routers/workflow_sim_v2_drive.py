@@ -10,6 +10,8 @@ from datetime import datetime
 
 from app.services.claude_code_driver import claude_driver, ClaudeCodeDriver
 from app.services.session_event_bus import SessionEventBus
+from app.config.config_manager import config_manager
+from app.models.workflow_models import ArbitratorReport, ArbitratorIssue
 
 from .workflow_sim_v2_helpers import (
     render_prompt as _render_prompt,
@@ -21,6 +23,7 @@ from .workflow_sim_v2_helpers import (
     _pipeline_cancel_flags,
     _active_session_tasks,
     _PROJECT_ROOT,
+    ARBITRATOR_PROMPT,
 )
 from .workflow_sim_v2_skill import (
     compute_skill_compliance as _compute_skill_compliance,
@@ -33,6 +36,28 @@ from .workflow_sim_v2_jsonl import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_arbitrator_json(text: str) -> dict:
+    """从 claude 的文本回复中解析裁判断点 JSON（和 _parse_claude_gate 类似但提取 issues 列表）。"""
+    try:
+        # 优先找 ```json ... ``` 代码块
+        start = text.find("```json")
+        if start >= 0:
+            start = text.find("\n", start) + 1
+            end = text.find("```", start)
+            if end > start:
+                return json.loads(text[start:end])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return {"verdict": "unknown", "issues": [], "summary": "无法解析裁判 JSON"}
 
 
 def _parse_claude_gate(text: str) -> dict:
@@ -81,6 +106,10 @@ async def drive_session_events(
     simulation_log = []
     jsonl_offsets: dict = {}
 
+    # Docker 容器：整个仿真在容器内运行，work_dir → /workspace，cannbot-skills → /opt/cannbot-skills
+    docker_container = f"cann-sim-{session_id}"
+    _cannbot_skills_dir = os.path.join(_PROJECT_ROOT, "external", "cannbot-skills")
+
     def _ts():
         return datetime.now().strftime("%H:%M:%S")
 
@@ -117,6 +146,73 @@ async def drive_session_events(
         bus.publish({"event": "gate_record", "data": rec})
 
     os.makedirs(work_dir, exist_ok=True)
+
+    # ===== Docker 容器管理 =====
+    # 启动 cann-dev 容器，挂载 work_dir 和 cannbot-skills
+    _container_ready = False
+    # 平台产物目录（算子仓之外，不污染代码仓）
+    _artifacts_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(work_dir))),
+        "artifacts", session_id,
+    )
+    os.makedirs(_artifacts_dir, exist_ok=True)
+    # 检测 --shared clone 的 alternates 母本路径，挂载到容器内同路径（避免 git 仓库断开）
+    _base_mount = []
+    _alt_file = os.path.join(work_dir, ".git", "objects", "info", "alternates")
+    if os.path.isfile(_alt_file):
+        _base_path = open(_alt_file).read().strip()
+        if _base_path and os.path.isdir(_base_path):
+            _base_mount = ["-v", f"{_base_path}:{_base_path}:ro"]
+            logger.info(f"[docker] alternates 母本挂载: {_base_path}")
+    try:
+        _stop_cmd = ["docker", "rm", "-f", docker_container]
+        _stop_proc = await asyncio.create_subprocess_exec(*_stop_cmd)
+        await _stop_proc.communicate()
+        _start_cmd = [
+            "docker", "run", "-d", "--name", docker_container,
+            "-v", f"{work_dir}:/workspace",
+            "-v", f"{_cannbot_skills_dir}:{_cannbot_skills_dir}:ro",
+            "-v", f"{_artifacts_dir}:/platform-artifacts",
+            *_base_mount,
+            "--network", "host",
+            # 透传 Claude 认证相关环境变量（否则容器内 claude 报 Not logged in）
+            "-e", "ANTHROPIC_AUTH_TOKEN",
+            "-e", "ANTHROPIC_BASE_URL",
+            "-e", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "-e", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "-e", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "-e", "NODE_TLS_REJECT_UNAUTHORIZED",  # 宿主机 ANTHROPIC_BASE_URL 用自签证书，需跳过 SSL 验证
+            "cann-dev:full", "sleep", "infinity",
+        ]
+        logger.info(f"[docker] 正在启动容器: {' '.join(_start_cmd)}")
+        _proc = await asyncio.create_subprocess_exec(
+            *_start_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, _stderr = await _proc.communicate()
+        logger.info(f"[docker] 启动结果: rc={_proc.returncode} stdout={_stdout!r} stderr={_stderr!r}")
+        if _proc.returncode == 0:
+            _container_ready = True
+            # 换国内 apt 镜像源（加速 apt-get update/install）
+            _sed_cmd = ["docker", "exec", "--user", "root", docker_container,
+                        "sed", "-i", "s@archive.ubuntu.com@mirrors.aliyun.com@g", "/etc/apt/sources.list"]
+            _sed_proc = await asyncio.create_subprocess_exec(*_sed_cmd)
+            await _sed_proc.communicate()
+            # 换国内 pip 镜像源（加速 pip install）
+            _pip_cmd = ["docker", "exec", docker_container,
+                        "pip", "config", "set", "global.index-url", "https://mirrors.aliyun.com/pypi/simple/"]
+            _pip_proc = await asyncio.create_subprocess_exec(*_pip_cmd)
+            await _pip_proc.communicate()
+            await _push_proglog("INFO", f"Docker 容器已启动: {docker_container}（apt 源已换）", container=docker_container)
+        else:
+            _err = _stderr.decode() if _stderr else "无错误输出"
+            logger.error(f"[docker] 容器启动失败: {_err}")
+            await _push_proglog("WARN", f"Docker 容器启动失败: {_err}", container=docker_container)
+    except Exception as _e:
+        logger.exception(f"[docker] 容器启动异常: {_e}")
+        try:
+            await _push_proglog("WARN", f"Docker 容器启动异常: {_e}")
+        except Exception:
+            logger.exception("[docker] _push_proglog 也失败了")
 
     # 拍基线快照：记 HEAD commit sha 作为文件改动 diff 的基线（非 git 仓库则跳过，不阻断仿真）
     if os.path.isdir(os.path.join(work_dir, ".git")):
@@ -156,6 +252,16 @@ async def drive_session_events(
         "INFO", f"仿真启动: op={op_name}, steps={len(steps)}, work_dir={work_dir}"
     )
 
+    # 配置阀门：控制工作流走到哪个步骤后停止
+    _wf_config = config_manager.get("workflow_v2", {}) if config_manager else {}
+    _max_steps = _wf_config.get("max_steps", "all")  # clone | install_env | all
+    _stop_after = {
+        "clone": "platform_install_env",   # clone 之后无 platform step，等价于第一个 platform 前停
+        "install_env": "platform_install_env",
+        "env_check": "step_1",             # 插件 Step 1 环境检查后停
+        "all": "__never__",
+    }.get(_max_steps, "platform_install_env")
+
     for i, step in enumerate(steps):
         if step.get("step_type") == "external":
             # 外部生命周期步骤（clone/NPU/CI-CD）不进 Claude 执行，仅前端串联展示
@@ -173,10 +279,11 @@ async def drive_session_events(
         # 不走插件的 op_name/op_spec 渲染
         if step.get("step_type") == "platform":
             _fork_info = session.get("fork_info") or {}
+            # Docker 模式下 env_setup_dir 用容器内路径
             _env_setup_dir = os.path.join(
-                _PROJECT_ROOT, "external", "cannbot-skills", "ops", "ascendc-env-setup"
+                _cannbot_skills_dir, "ops", "ascendc-env-setup"
             )
-            prompt = prompt_template.replace("{work_dir}", work_dir) \
+            prompt = prompt_template.replace("{work_dir}", "/workspace") \
                 .replace("{op_name}", op_name) \
                 .replace("{env_setup_dir}", _env_setup_dir) \
                 .replace("{gitcode_token}", gitcode_token or "") \
@@ -272,6 +379,7 @@ async def drive_session_events(
             step_id=step_id,
             persist_proc_on_consumer_exit=True,
             resume_session_id=claude_session_id,
+            docker_container=docker_container if _container_ready else "",
         ):
             events.append(ev)
             ev_type = ev["type"]
@@ -463,40 +571,13 @@ async def drive_session_events(
             step["gate_artifacts"] = []
         else:
             artifact_list_str = "\n".join(f"- {a}" for a in artifacts)
-            gate_prompt = f"""请对本步骤的交付物进行门禁检查。
-
-## 预期交付物
-{artifact_list_str}
-
-## 步骤要求（prompt）
-{prompt[:3000]}
-
-## 检查要求
-1. 对每个文件，使用 Read 工具检查是否存在且内容不为空
-2. 评估内容是否满足步骤要求中的核心要素
-3. 不得仅凭文件名判断，必须读取实际内容
-
-## 判定规则
-- 文件存在且内容满足要求 → passed
-- 文件不存在但有等价产出覆盖核心要素 → passed
-- 文件存在但内容不完整（空、仅标题、模板未填） → failed
-- 文件不存在且无等价产出 → failed
-
-## 输出方式（重要）
-完成检查后，直接在你的回复文本中输出以下JSON。禁止使用 Bash/cat/echo 等工具输出JSON，必须作为你的文本回复直接输出。
-
-请严格按以下JSON格式输出判定结果：
-```json
-{{
-  "verdict": "passed" | "failed",
-  "reasoning": "判断依据",
-  "files": [
-    {{"name": "文件路径", "exists": true, "adequate": true, "issue": ""}}
-  ],
-  "missing_core": ["缺失的核心要素"],
-  "suggestion": "如failed，给出修正建议"
-}}
-```"""
+            gate_prompt = ARBITRATOR_PROMPT.replace(
+                "{step_prompt}", prompt[:3000]
+            ).replace(
+                "{step_output}", "\n".join(step_output_parts)[-5000:]
+            ).replace(
+                "{artifacts}", artifact_list_str
+            )
 
             await _push_simlog(
                 {"time": _ts(), "type": "info", "text": "🔍 Claude 门禁检查中..."}
@@ -522,6 +603,7 @@ async def drive_session_events(
                 step_id=f"{step_id}_gate",
                 persist_proc_on_consumer_exit=True,
                 resume_session_id=claude_session_id,
+                docker_container=docker_container if _container_ready else "",
             ):
                 evt_type = gev.get("type", "other")
                 if evt_type in gate_event_count:
@@ -613,8 +695,31 @@ async def drive_session_events(
                     step=step_id,
                 )
 
-            gate_result = _parse_claude_gate(gate_text)
+            gate_result = _parse_arbitrator_json(gate_text)
             gate_verdict = gate_result.get("verdict", "skipped")
+
+            # 结构化存储裁判报告
+            arb_issues = [
+                ArbitratorIssue(
+                    problem=iss.get("problem", ""),
+                    severity=iss.get("severity", "HIGH"),
+                    category=iss.get("category", "OTHER"),
+                    suggestion=iss.get("suggestion", ""),
+                    suggestion_action=iss.get("suggestion_action", ""),
+                )
+                for iss in (gate_result.get("issues") or [])
+            ]
+            arb_report = ArbitratorReport(
+                session_id=session_id,
+                step_id=step_id,
+                verdict=gate_result.get("verdict", "unknown"),
+                summary=gate_result.get("summary", ""),
+                issues=arb_issues,
+                raw_response=gate_text[:4000],
+                parsing_success=gate_result.get("verdict", "unknown") != "unknown",
+                detected_at=datetime.now().isoformat(),
+            )
+            await db.upsert_arbitrator_report(session_id, step_id, arb_report)
 
             # fallback: 如果 text/result 都没解析出 JSON，尝试从 tool_result 提取
             if gate_verdict == "skipped" and gate_tool_output.strip():
@@ -623,7 +728,7 @@ async def drive_session_events(
                     f"门禁 fallback: 从 tool_result 提取JSON, output_len={len(gate_tool_output)}",
                     step=step_id,
                 )
-                fallback_result = _parse_claude_gate(gate_tool_output)
+                fallback_result = _parse_arbitrator_json(gate_tool_output)
                 if fallback_result.get("verdict") != "skipped":
                     gate_result = fallback_result
                     gate_verdict = gate_result.get("verdict", "skipped")
@@ -633,8 +738,9 @@ async def drive_session_events(
                         step=step_id,
                     )
 
-            gate_reasoning = gate_result.get("reasoning", "")
-            gate_passed = gate_verdict == "passed"
+            gate_reasoning = gate_result.get("summary", "") or gate_result.get("reasoning", "")
+            # 裁判判定：verdict=pass 且 issues 为空 → 通过；否则不通过
+            gate_passed = gate_verdict == "pass" and not gate_result.get("issues")
 
             # 诊断：Claude 门禁响应解析失败时输出原始文本
             if gate_verdict == "skipped" and gate_text.strip():
@@ -658,7 +764,9 @@ async def drive_session_events(
                 )
                 await _push_proglog("WARN", "门禁无文本输出", step=step_id)
 
-            file_gate = _gate_check(work_dir, artifacts)
+            # gate_check 在宿主机跑，把容器内 /platform-artifacts 路径换成宿主机实际路径
+            host_artifacts = [a.replace("/platform-artifacts", _artifacts_dir) for a in artifacts]
+            file_gate = _gate_check(work_dir, host_artifacts)
             gate = {
                 "passed": gate_passed,
                 "skipped": False,
@@ -722,50 +830,77 @@ async def drive_session_events(
             if not gate_passed:
                 missing = [a["name"] for a in file_gate["artifacts"] if not a["exists"]]
                 existing = [a["name"] for a in file_gate["artifacts"] if a["exists"]]
-                if gate_verdict == "skipped":
-                    if missing:
-                        alert_msg = f"AI门禁解析失败且产出物缺失: {', '.join(missing)}"
-                    else:
-                        alert_msg = (
-                            f"AI门禁解析失败(产出物已存在): {', '.join(existing)}"
+                # 从裁判 JSON 的 issues 构建断点 alerts（含 problem + suggestion + suggestion_action）
+                issues = gate_result.get("issues", []) or []
+                if issues:
+                    for issue in issues:
+                        await _push_alert(
+                            {
+                                "type": "ARBITRATOR",
+                                "severity": issue.get("severity", "HIGH"),
+                                "step_id": step_id,
+                                "message": issue.get("problem", ""),
+                                "root_cause": gate_reasoning or issue.get("category", "OTHER"),
+                                "suggestion": issue.get("suggestion", ""),
+                                "suggestion_action": issue.get("suggestion_action", ""),
+                                "error_category": issue.get("category", "OTHER"),
+                                "detected_at": datetime.now().isoformat(),
+                            }
                         )
-                elif missing:
-                    alert_msg = f"产出物缺失: {', '.join(missing)}"
-                elif existing:
-                    alert_msg = f"产出物内容不达标: {', '.join(existing)}"
+                        yield _emit("breakpoint_alert", alerts[-1])
+                    await _push_proglog(
+                        "WARN",
+                        f"裁判发现 {len(issues)} 个断点: {gate_reasoning}",
+                        step=step_id,
+                    )
                 else:
-                    alert_msg = "门禁未通过(原因未知)"
-                root_cause = (
-                    f"Claude 门禁: {gate_reasoning}"
-                    if gate_reasoning
-                    else f"门禁解析失败, 原始响应: {gate_text[:300]}"
-                )
-                await _push_alert(
-                    {
-                        "type": "ARTIFACT_MISSING",
-                        "severity": "HIGH",
-                        "step_id": step_id,
-                        "message": alert_msg,
-                        "root_cause": root_cause,
-                        "suggestion": gate_result.get("suggestion", ""),
-                        "error_category": "SKILL",
-                        "detected_at": datetime.now().isoformat(),
-                    }
-                )
-                yield _emit("breakpoint_alert", alerts[-1])
-                await _push_proglog(
-                    "WARN",
-                    f"门禁未通过: {alert_msg}",
-                    reasoning=gate_reasoning[:200] or gate_text[:200],
-                    step=step_id,
-                )
+                    alert_msg = f"产出物缺失: {', '.join(missing)}" if missing else "门禁未通过(原因未知)"
+                    await _push_alert(
+                        {
+                            "type": "ARTIFACT_MISSING",
+                            "severity": "HIGH",
+                            "step_id": step_id,
+                            "message": alert_msg,
+                            "root_cause": f"裁判: {gate_reasoning}" if gate_reasoning else f"原始响应: {gate_text[:300]}",
+                            "error_category": "SKILL",
+                            "detected_at": datetime.now().isoformat(),
+                        }
+                    )
+                    yield _emit("breakpoint_alert", alerts[-1])
+                    await _push_proglog(
+                        "WARN",
+                        f"门禁未通过: {alert_msg}",
+                        reasoning=gate_reasoning[:200] or gate_text[:200],
+                        step=step_id,
+                    )
 
-                # ===== 同会话修复 =====
-                fix_prompt = f"""门禁检查未通过。
+                # ===== 裁判分析 + 同会话修复 =====
+                fix_prompt = f"""门禁检查未通过。请先以裁判视角分析问题，输出结构化断点报告，然后逐一修复。
 
+## 裁判分析（先输出 JSON 断点报告）
+严格输出以下 JSON（不要包含其他内容）：
+```json
+{{
+  "verdict": "fail",
+  "issues": [
+    {{
+      "problem": "问题描述（中文）",
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      "category": "MISSING_FILE" | "CONTENT_INCOMPLETE" | "WRONG_PATH" | "SKILL_NOT_USED" | "ENV_MISSING" | "CONSTRAINT_VIOLATION" | "COMPILE_ERROR" | "OTHER",
+      "suggestion": "具体修复建议（中文，直接可执行）",
+      "suggestion_action": "具体的修复命令或文件创建指令"
+    }}
+  ],
+  "summary": "总体评价"
+}}
+```
+
+## 门禁检查结果
 判断依据：{gate_reasoning}
 缺失核心要素：{", ".join(gate_result.get("missing_core", [])) or "未具体标注"}
 修正建议：{gate_result.get("suggestion", "")}
+产出物缺失：{", ".join(missing) if missing else "无"}
+已有但不达标：{", ".join(existing) if existing else "无"}
 
 ## 算子信息
 - 算子名称：{op_name}
@@ -774,11 +909,17 @@ async def drive_session_events(
 ## 原始步骤要求（prompt）
 {prompt[:3000]}
 
-请立即修正上述问题，确保所有交付物文件存在且内容满足步骤要求。每个文件必须有实质内容，不得为空或仅含模板占位符。完成后确认每个文件都已正确写入。"""
+## 执行要求
+1. 先输出上述 JSON 断点报告
+2. 然后根据分析结果逐一修复所有问题
+3. 确保所有交付物文件存在且内容满足步骤要求（每个文件必须有实质内容，不得为空或仅含模板占位符）
+4. 完成后确认每个文件都已正确写入"""
 
                 yield _emit(
-                    "fix_start", {"step_id": step_id, "missing": missing or inadequate}
+                    "fix_start", {"step_id": step_id, "missing": missing}
                 )
+
+                fix_text = ""  # 收集 fix claude 的完整文本输出，用于解析裁判 JSON
 
                 async for cev in claude_driver.run_step(
                     session_id,
@@ -788,6 +929,7 @@ async def drive_session_events(
                     step_id=f"{step_id}_fix",
                     persist_proc_on_consumer_exit=True,
                     resume_session_id=claude_session_id,
+                    docker_container=docker_container if _container_ready else "",
                 ):
                     fix_entry = None
                     if cev["type"] == "tool_use":
@@ -810,7 +952,9 @@ async def drive_session_events(
                             }
                         )
                     elif cev["type"] in ("text", "thinking"):
-                        c_content = str(cev.get("content", ""))[:500]
+                        c_content_full = str(cev.get("content", ""))
+                        c_content = c_content_full[:500]
+                        fix_text += c_content_full  # 累加完整文本供裁判 JSON 解析
                         fix_entry = {
                             "time": _ts(),
                             "step_id": step_id,
@@ -847,6 +991,30 @@ async def drive_session_events(
                         )
                         yield _emit("fix_output", fix_entry)
 
+                # 从 fix claude 输出中解析裁判 JSON（断点 + 解决方案），记录到 alerts
+                arbitrator = _parse_arbitrator_json(fix_text)
+                if arbitrator.get("issues"):
+                    for issue in arbitrator["issues"]:
+                        await _push_alert(
+                            {
+                                "type": "ARBITRATOR",
+                                "severity": issue.get("severity", "HIGH"),
+                                "step_id": step_id,
+                                "message": issue.get("problem", ""),
+                                "suggestion": issue.get("suggestion", ""),
+                                "suggestion_action": issue.get("suggestion_action", ""),
+                                "root_cause": arbitrator.get("summary", ""),
+                                "error_category": issue.get("category", "OTHER"),
+                                "detected_at": datetime.now().isoformat(),
+                            }
+                        )
+                        yield _emit("breakpoint_alert", alerts[-1])
+                    await _push_proglog(
+                        "WARN",
+                        f"裁判发现 {len(arbitrator['issues'])} 个断点: {arbitrator.get('summary', '')}",
+                        step=step_id,
+                    )
+
                 # 修复后 Claude 复查
                 await _push_simlog(
                     {
@@ -866,6 +1034,7 @@ async def drive_session_events(
                     step_id=f"{step_id}_regate",
                     persist_proc_on_consumer_exit=True,
                     resume_session_id=claude_session_id,
+                    docker_container=docker_container if _container_ready else "",
                 ):
                     if gev["type"] == "text":
                         re_gate_text += gev.get("content", "")
@@ -890,7 +1059,8 @@ async def drive_session_events(
                     if fallback.get("verdict") != "skipped":
                         re_result = fallback
                 re_passed = re_result.get("verdict") == "passed"
-                file_gate = _gate_check(work_dir, artifacts)
+                host_artifacts = [a.replace("/platform-artifacts", _artifacts_dir) for a in artifacts]
+                file_gate = _gate_check(work_dir, host_artifacts)
                 gate["passed"] = re_passed
                 gate["artifacts"] = file_gate["artifacts"]
                 step["gate_passed"] = re_passed
@@ -1175,6 +1345,15 @@ async def drive_session_events(
                 session_id, "jsonl_log", new_jsonl_lines
             )
 
+        # 阀门：达到 max_steps 后跳过后续步骤
+        if step_id == _stop_after and step["status"] == "completed":
+            await _push_proglog("INFO", f"阀门触发: max_steps={_max_steps}, 在 {step_id} 后停止")
+            for _s in steps[i + 1:]:
+                _s["status"] = "skipped"
+                await db.update_workflow_sim_v2_step(session_id, _s["step_id"], {"status": "skipped"})
+                await _push_simlog({"time": _ts(), "type": "info", "text": f"{_s['step_id']} 跳过（阀门: {_max_steps}）"})
+            break
+
     final_jsonl_lines, jsonl_offsets = _harvest_new_jsonl_lines(work_dir, jsonl_offsets)
     if final_jsonl_lines:
         await db.append_workflow_sim_v2_log(session_id, "jsonl_log", final_jsonl_lines)
@@ -1452,6 +1631,12 @@ async def execute_session_task(session_id: str, db, gitcode_token: str = ""):
     finally:
         bus.mark_finished()
         _active_session_tasks.pop(session_id, None)
+        # 清理 Docker 容器
+        _ctn = f"cann-sim-{session_id}"
+        try:
+            await asyncio.create_subprocess_exec("docker", "rm", "-f", _ctn).communicate()
+        except Exception:
+            pass
 
 
 def ensure_session_task_running(

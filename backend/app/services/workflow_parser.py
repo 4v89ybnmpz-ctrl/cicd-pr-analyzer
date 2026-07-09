@@ -285,10 +285,10 @@ def parse_task_prompts(task_prompts_path: str) -> Dict[str, StepPrompt]:
 
         prompt = StepPrompt(step_id=f"step_{step_num}")
 
-        # 提取 subagent_type
-        sa_match = re.search(r'"subagent_type"\s*:\s*"([^"]+)"', block_text)
-        if sa_match:
-            prompt.subagent_type = sa_match.group(1)
+        # 提取 subagent_type（支持同一 ## Step 下多个 JSON 块如 5a/5b、6a/6b，逗号拼接）
+        sa_matches = re.findall(r'"subagent_type"\s*:\s*"([^"]+)"', block_text)
+        if sa_matches:
+            prompt.subagent_type = ", ".join(sa_matches)
 
         # 提取 prompt 模板（整个 prompt 字段内容）
         prompt_match = re.search(r'"prompt"\s*:\s*"(.+?)"\s*\}', block_text, re.DOTALL)
@@ -440,6 +440,106 @@ def _build_step_from_parsed(
     )
 
 
+def parse_registry_workflow(task_prompts_path: str) -> List[WorkflowStep]:
+    """定制：解析 ops-registry-invoke 风格「任务恢复映射表」→ 4 大阶段 + 子 step。
+
+    映射表格式（workflow/resources/task-prompts.md）：
+        | 阶段 | Subagent | 恢复说明 |
+        | 1.1 开发准备 | `general` | ... |
+        | 2-迭代一-A1-Main | `ascendc-ops-developer` | ... |
+        | 4.2 代码检视 | 主 Agent 加载 skill | 调用 /ascendc-code-review |
+    按编号首位（1/2/3/4）归入 4 大阶段，每阶段一个大 WorkflowStep，
+    其 sub_steps 为该阶段下的子 step（含 dispatch）。
+    """
+    PHASE_NAMES = {
+        "1": "阶段一·需求与设计",
+        "2": "阶段二·开发",
+        "3": "阶段三·验收",
+        "4": "阶段四·上库",
+    }
+    try:
+        text = open(task_prompts_path, encoding="utf-8", errors="replace").read()
+    except Exception:
+        return []
+    # ① 解析映射表行 → [(name, dispatch)]
+    rows: List[tuple] = []
+    in_table = False
+    for line in text.split("\n"):
+        s = line.strip()
+        if not in_table:
+            if s.startswith("|") and "Subagent" in s and ("阶段" in s or "中断" in s):
+                in_table = True
+            continue
+        if not s.startswith("|"):
+            if s:
+                break  # 表格结束
+            continue
+        if "---" in s:
+            continue
+        cols = [c.strip() for c in s.split("|")]
+        cols = [c for c in cols if c != ""]
+        if len(cols) < 2:
+            continue
+        name = cols[0]
+        sub_raw = cols[1]
+        m_sub = re.match(r"[`'\s]*(general|ascendc-ops-[\w-]+)", sub_raw)
+        sub = m_sub.group(1) if m_sub else sub_raw.strip("`").split()[0].strip("`")
+        desc = " ".join(cols[2:])
+        if sub.startswith(("general", "ascendc-ops-")):
+            dispatch = sub
+        else:
+            m = re.search(r"/?(ascendc-[\w-]+)", desc + " " + sub)
+            dispatch = m.group(1) if m else None
+        rows.append((name, dispatch))
+    # ② 按编号首位归入 4 大阶段，每阶段一个 WorkflowStep，子 step 进 sub_steps
+    phases: dict = {}
+    for name, dispatch in rows:
+        m = re.match(r"^\s*(\d)", name)
+        pnum = m.group(1) if m else "?"
+        phases.setdefault(pnum, []).append((name, dispatch))
+    # 各阶段的产出物，来自 data-flow.md 文件路径速查表（{operator_name} 占位符由 sessions.py 替换）
+    PHASE_ARTIFACTS = {
+        "1": [
+            "operators/{operator_name}/docs/spec.yaml",
+            "operators/{operator_name}/docs/DESIGN.md",
+            "operators/{operator_name}/docs/DESIGN_REVIEW.md",
+            "operators/{operator_name}/docs/TEST.md",
+            "operators/{operator_name}/docs/LOG.md",
+        ],
+        "2": [
+            "operators/{operator_name}/op_kernel/",
+            "operators/{operator_name}/op_host/",
+            "operators/{operator_name}/tests/reports/iter",
+        ],
+        "3": [
+            "operators/{operator_name}/docs/precision-report.md",
+        ],
+        "4": [
+            "operators/{operator_name}/README.md",
+            "operators/{operator_name}/docs/LOG.md",
+        ],
+    }
+    steps: List[WorkflowStep] = []
+    for pnum in sorted(phases.keys()):
+        sub_steps = [
+            WorkflowStep(
+                step_id="step_" + re.sub(r"[^\w]", "_", sname).strip("_"),
+                name=sname,
+                dispatch_target=dispatch,
+            )
+            for sname, dispatch in phases[pnum]
+        ]
+        steps.append(
+            WorkflowStep(
+                step_id=f"phase_{pnum}",
+                name=PHASE_NAMES.get(pnum, f"阶段{pnum}"),
+                sub_steps=sub_steps,
+                output_artifacts=PHASE_ARTIFACTS.get(pnum, []),
+            )
+        )
+    return steps
+
+
 def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
     """
     构建完整的工作流定义
@@ -509,6 +609,16 @@ def build_workflow_definition(plugin_dir: str) -> Optional[WorkflowDefinition]:
                     prompt_def=prompt_def,
                 )
             )
+
+    # 定制：registry 风格插件，尝试解析任务恢复映射表（workflow/resources/task-prompts.md 等）
+    if not steps:
+        for cand in ("workflow/resources/task-prompts.md", "workflows/task-prompts.md", "workflow/task-prompts.md"):
+            rp = os.path.join(plugin_dir, cand)
+            if os.path.isfile(rp):
+                reg_steps = parse_registry_workflow(rp)
+                if reg_steps:
+                    steps = reg_steps
+                    break
 
     # 如果还是没有步骤，但 agents 有定义，创建通用流程
     if not steps and agent_defs:

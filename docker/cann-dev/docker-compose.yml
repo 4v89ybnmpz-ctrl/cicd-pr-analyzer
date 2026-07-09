@@ -1,0 +1,52 @@
+version: '3.8'
+
+# ==================== CANN 算子开发 Docker 环境 ====================
+# 启动方式:
+#   docker-compose up -d              # 后台启动
+#   docker-compose run cann-dev bash  # 交互式进入
+#   docker-compose down               # 停止
+
+services:
+  cann-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # CANN Toolkit 安装包路径/URL（空 = 不安装，后续挂载宿主机 CANN）
+        CANN_PACKAGE: "${CANN_PACKAGE:-}"
+    image: cann-dev:${CANN_VERSION:-latest}
+    container_name: canbot-cann-dev
+    hostname: cann-dev
+    stdin_open: true
+    tty: true
+    volumes:
+      # 挂载项目根目录到容器 /workspace
+      - ../..:/workspace
+      # 如果宿主机已有 CANN，取消下面注释并调整路径
+      # - /usr/local/Ascend:/usr/local/Ascend:ro
+    environment:
+      - ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
+      - PYTHONUNBUFFERED=1
+    working_dir: /workspace
+    # 后台驻留（避免容器启动后立即退出）
+    command: sleep infinity
+    networks:
+      - cann-net
+
+  # 可选：MongoDB（算子开发结果持久化，复用宿主机 mongodb 则不需要）
+  # mongodb:
+  #   image: mongo:7.0
+  #   container_name: canbot-mongodb
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - mongo_data:/data/db
+  #   networks:
+  #     - cann-net
+
+networks:
+  cann-net:
+    driver: bridge
+
+# volumes:
+#   mongo_data:

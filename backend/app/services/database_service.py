@@ -4637,6 +4637,41 @@ class DatabaseService:
             logger.error(f"追加 V2 仿真日志失败 [{session_id}.{field}]: {e}")
             return False
 
+    async def upsert_arbitrator_report(self, session_id: str, step_id: str, report) -> bool:
+        """结构化存储裁判断点报告（按 session + step 去重 upsert）。"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return False
+        try:
+            doc = report.model_dump() if hasattr(report, "model_dump") else report
+            doc["session_id"] = session_id
+            doc["step_id"] = step_id
+            await self.db["workflow_sim_v2_arbitrator_reports"].update_one(
+                {"session_id": session_id, "step_id": step_id},
+                {"$set": doc},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"存储裁判报告失败 [{session_id}.{step_id}]: {e}")
+            return False
+
+    async def get_arbitrator_reports(self, session_id: str) -> list:
+        """获取某个 session 的所有裁判报告。"""
+        if self.db is None:
+            await self._ensure_connected()
+        if self.db is None:
+            return []
+        try:
+            cur = self.db["workflow_sim_v2_arbitrator_reports"].find(
+                {"session_id": session_id}
+            ).sort("detected_at", 1)
+            return await cur.to_list(length=100)
+        except Exception as e:
+            logger.error(f"查询裁判报告失败 [{session_id}]: {e}")
+            return []
+
     async def update_workflow_sim_v2_step(self, session_id: str, step_id: str, step_update: dict) -> bool:
         """按 step_id 局部更新单个 step 字段（steps.$.xxx），避免全量 $set steps 覆盖并发写。"""
         if self.db is None:

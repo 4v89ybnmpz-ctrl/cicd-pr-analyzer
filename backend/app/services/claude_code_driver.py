@@ -146,6 +146,7 @@ class ClaudeCodeDriver:
         step_id: str = "",
         persist_proc_on_consumer_exit: bool = False,
         resume_session_id: str = "",
+        docker_container: str = "",
     ) -> AsyncGenerator[dict, None]:
         """
         执行单个 Claude Code CLI 步骤，yield 解析后的事件。
@@ -157,11 +158,27 @@ class ClaudeCodeDriver:
 
         resume_session_id: 若提供，则用 claude --resume <id> -p 续接已有会话，
         共享完整对话上下文；否则起新会话。
+
+        docker_container: 若提供，则通过 docker exec 在该容器内运行 claude，
+        work_dir 会自动映射为容器内路径 /workspace。
         """
         proc = None
         proc_info = None
         try:
-            cmd = ["claude"]
+            if docker_container:
+                # Docker 模式：claude 在容器内执行，work_dir 映射到 /workspace
+                container_work_dir = "/workspace"
+                cmd = [
+                    "docker", "exec", "-i",
+                    "--user", "cann",
+                    "--workdir", container_work_dir,
+                    docker_container,
+                    "claude",
+                ]
+            else:
+                container_work_dir = work_dir
+                cmd = ["claude"]
+
             if resume_session_id:
                 cmd += ["--resume", resume_session_id]
             cmd += [
@@ -169,15 +186,16 @@ class ClaudeCodeDriver:
                 prompt,
                 "--output-format",
                 "stream-json",
+                "--verbose",
                 "--dangerously-skip-permissions",
                 "--add-dir",
-                work_dir,
+                container_work_dir,
             ]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=work_dir,
+                cwd=container_work_dir,
             )
             self._active_procs[session_id] = proc
 

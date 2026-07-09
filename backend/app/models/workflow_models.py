@@ -56,6 +56,30 @@ class WorkflowDefinition(BaseModel):
     parsed_at: str = ""
 
 
+# ==================== 裁判断点模型 ====================
+
+class ArbitratorIssue(BaseModel):
+    """裁判发现的单个问题"""
+    problem: str                            # 问题描述
+    severity: str = "HIGH"                  # CRITICAL | HIGH | MEDIUM | LOW
+    category: str = "OTHER"                 # MISSING_FILE | CONTENT_INCOMPLETE | WRONG_PATH | SKILL_NOT_USED | ENV_MISSING | CONSTRAINT_VIOLATION | COMPILE_ERROR | OTHER
+    suggestion: str = ""                    # 修复建议（中文）
+    suggestion_action: str = ""             # 具体修复命令或操作
+    affected_file: Optional[str] = None     # 受影响的文件路径
+
+
+class ArbitratorReport(BaseModel):
+    """裁判完整报告（每个 step 一次）"""
+    session_id: str
+    step_id: str
+    verdict: str = "unknown"                # pass | fail | unknown
+    summary: str = ""                       # 总体评价
+    issues: List[ArbitratorIssue] = []      # 问题列表
+    raw_response: str = ""                  # 裁判原始输出（备查）
+    parsing_success: bool = False           # JSON 是否解析成功
+    detected_at: str = ""                   # 时间戳
+
+
 # ==================== 仿真结果 ====================
 
 class Breakpoint(BaseModel):

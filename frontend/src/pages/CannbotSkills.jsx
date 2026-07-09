@@ -234,7 +234,7 @@ export default function CannbotSkills() {
       <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
         {
           key: 'workflow-sim-v2',
-          label: <span><RocketOutlined /> 工作流仿真 2.0</span>,
+          label: <span><RocketOutlined /> 工作流评估 2.0</span>,
           children: <WorkflowSimErrorBoundary><WorkflowSimV2Tab /></WorkflowSimErrorBoundary>,
         },
       ]} />
@@ -1424,7 +1424,7 @@ function EmbeddedTerminal({ cwd, tool, examplePrompt }) {
   )
 }
 
-// ==================== 工作流仿真 Tab ====================
+// ==================== 工作流评估 Tab ====================
 
 class WorkflowSimErrorBoundary extends Component {
   state = { error: null }
@@ -1435,7 +1435,7 @@ class WorkflowSimErrorBoundary extends Component {
         <Card>
           <Empty description={
             <div>
-              <Text type="danger">工作流仿真渲染出错</Text>
+              <Text type="danger">工作流评估渲染出错</Text>
               <pre style={{ textAlign: 'left', fontSize: 12, color: '#ff4d4f', maxHeight: 200, overflow: 'auto', background: '#fafafa', padding: 12, borderRadius: 6, marginTop: 8 }}>
                 {this.state.error?.message || String(this.state.error)}
                 {'\n'}
@@ -1464,7 +1464,7 @@ function WorkflowSimTab() {
   const [defsLoading, setDefsLoading] = useState(false)
   const [logs, setLogs] = useState([])                      // 实时日志
   const [exporting, setExporting] = useState(false)
-  const [historyList, setHistoryList] = useState([])          // 历史仿真列表
+  const [historyList, setHistoryList] = useState([])          // 历史评估列表
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false)
   const esRef = useRef(null)
@@ -1483,7 +1483,7 @@ function WorkflowSimTab() {
     return () => { if (esRef.current) esRef.current.close() }
   }, [])
 
-  // 加载历史仿真列表
+  // 加载历史评估列表
   const loadHistory = useCallback(() => {
     setHistoryLoading(true)
     getWorkflowSimulations({ limit: 30 })
@@ -1494,7 +1494,7 @@ function WorkflowSimTab() {
 
   useEffect(() => { loadHistory() }, [loadHistory])
 
-  // 加载历史仿真详情
+  // 加载历史评估详情
   const loadHistoryDetail = useCallback(async (simId) => {
     setHistoryDetailLoading(true)
     try {
@@ -1506,7 +1506,7 @@ function WorkflowSimTab() {
       setSimulating(false)
       setCurrentStepInfo(null)
       setLogs([])
-      message.success('历史仿真加载成功')
+      message.success('历史评估加载成功')
     } catch (e) {
       message.error('加载失败: ' + (e._friendlyMsg || e.message))
     } finally {
@@ -1518,7 +1518,7 @@ function WorkflowSimTab() {
     setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), type, text }])
   }, [])
 
-  // 启动 SSE 实时仿真
+  // 启动 SSE 实时评估
   const handleSimulate = useCallback(() => {
     if (!selectedPlugin) { message.warning('请先选择插件'); return }
 
@@ -1539,14 +1539,14 @@ function WorkflowSimTab() {
     es.addEventListener('start', (e) => {
       const data = JSON.parse(e.data)
       setTotalSteps(data.total_steps)
-      addLog('info', `开始仿真: ${data.plugin_name} (${data.total_steps} 步, 角色: ${data.persona})`)
+      addLog('info', `开始评估: ${data.plugin_name} (${data.total_steps} 步, 角色: ${data.persona})`)
     })
 
     es.addEventListener('step_start', (e) => {
       const data = JSON.parse(e.data)
       setCurrentStepInfo(data)
       setSelectedStepId(data.step_id)
-      addLog('info', `[${data.step_index + 1}/${data.total}] 仿真 ${data.step_name}...`)
+      addLog('info', `[${data.step_index + 1}/${data.total}] 评估 ${data.step_name}...`)
     })
 
     es.addEventListener('step_done', (e) => {
@@ -1569,8 +1569,8 @@ function WorkflowSimTab() {
       setSummary(data)
       setSimulating(false)
       setCurrentStepInfo(null)
-      addLog('info', `仿真完成 — 总通过率 ${Math.round(data.overall_pass_rate * 100)}%, ${data.total_breakpoints} 个断点, Token: ${data.total_tokens?.toLocaleString()}`)
-      message.success('仿真完成')
+      addLog('info', `评估完成 — 总通过率 ${Math.round(data.overall_pass_rate * 100)}%, ${data.total_breakpoints} 个断点, Token: ${data.total_tokens?.toLocaleString()}`)
+      message.success('评估完成')
       loadHistory()
       es.close()
     })
@@ -1592,7 +1592,7 @@ function WorkflowSimTab() {
     es.onerror = () => {
       if (simulating) {
         addLog('error', '连接断开')
-        message.error('仿真连接断开')
+        message.error('评估连接断开')
       }
       setSimulating(false)
       setCurrentStepInfo(null)
@@ -1602,7 +1602,7 @@ function WorkflowSimTab() {
   // 导出报告
   const handleExport = useCallback(async (format) => {
     if (!summary || stepResults.length === 0) {
-      message.warning('请先完成仿真后再导出')
+      message.warning('请先完成评估后再导出')
       return
     }
     setExporting(true)
@@ -1685,7 +1685,7 @@ function WorkflowSimTab() {
               onClick={handleSimulate}
               disabled={!selectedPlugin}
             >
-              {simulating ? '仿真中...' : '启动仿真'}
+              {simulating ? '评估中...' : '启动评估'}
             </Button>
           </Col>
           {simulating && totalSteps > 0 && (
@@ -1721,13 +1721,13 @@ function WorkflowSimTab() {
         </Row>
       </Card>
 
-      {/* 实时仿真过程 */}
+      {/* 实时评估过程 */}
       {(simulating || stepResults.length > 0) && (
         <Card
           title={
             <span>
               <ExperimentOutlined style={{ marginRight: 8 }} />
-              仿真过程 {simulating && <Spin size="small" style={{ marginLeft: 8 }} />}
+              评估过程 {simulating && <Spin size="small" style={{ marginLeft: 8 }} />}
             </span>
           }
           size="small"
@@ -1745,7 +1745,7 @@ function WorkflowSimTab() {
           {simulating && currentStepInfo && (
             <div style={{ marginTop: 12, padding: '8px 12px', background: '#e6f7ff', borderRadius: 6, borderLeft: '3px solid #1890ff' }}>
               <Spin size="small" style={{ marginRight: 8 }} />
-              <Text strong>正在仿真: {currentStepInfo.step_name}</Text>
+              <Text strong>正在评估: {currentStepInfo.step_name}</Text>
               <Text type="secondary" style={{ marginLeft: 8 }}>
                 ({currentStepInfo.step_index + 1}/{currentStepInfo.total})
               </Text>
@@ -1816,7 +1816,7 @@ function WorkflowSimTab() {
 
       {/* 实时日志 */}
       {(simulating || logs.length > 0) && (
-        <Card title="仿真日志" size="small">
+        <Card title="评估日志" size="small">
           <div style={{ maxHeight: 200, overflowY: 'auto', background: '#1e1e1e', borderRadius: 6, padding: 8, fontFamily: 'monospace', fontSize: 12 }}>
             {logs.map((log, i) => (
               <div key={i} style={{ marginBottom: 2 }}>
@@ -1909,13 +1909,13 @@ function WorkflowSimTab() {
         </Card>
       )}
 
-      {/* 历史仿真记录 */}
+      {/* 历史评估记录 */}
       {historyList.length > 0 && (
         <Card
           title={
             <span>
               <ClockCircleOutlined style={{ marginRight: 8 }} />
-              历史仿真记录
+              历史评估记录
               <Button type="link" size="small" onClick={loadHistory} loading={historyLoading} style={{ marginLeft: 8 }}>刷新</Button>
             </span>
           }
@@ -1970,7 +1970,7 @@ function WorkflowSimTab() {
       {!simulating && stepResults.length === 0 && (
         <Card>
           <Empty
-            description="选择插件和角色后点击「启动仿真」，LLM 将实时模拟开发者走完整个工作流"
+            description="选择插件和角色后点击「启动评估」，LLM 将实时模拟开发者走完整个工作流"
             image={Empty.PRESENTED_IMAGE_SIMPLE}
           />
         </Card>

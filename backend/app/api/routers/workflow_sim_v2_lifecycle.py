@@ -146,6 +146,19 @@ def register_lifecycle_routes(router: APIRouter, db=None):
             },
         )
 
+    @router.get("/cannbot/workflow-v2/sessions/{session_id}/arbitrator-reports")
+    async def get_arbitrator_reports(session_id: str):
+        """获取某个 session 的所有裁判报告（结构化断点数据）。"""
+        if not db:
+            return {"error": "数据库未连接", "reports": []}
+        try:
+            reports = await db.get_arbitrator_reports(session_id)
+            for r in reports:
+                r.pop("_id", None)  # 去掉 MongoDB ObjectId
+            return {"session_id": session_id, "reports": reports, "count": len(reports)}
+        except Exception as e:
+            return {"error": str(e), "reports": []}
+
     @router.get("/cannbot/workflow-v2/sessions/{session_id}/export")
     async def export_session_log(session_id: str, format: str = "md"):
         """导出会话日志为 Markdown 文件"""

@@ -1,5 +1,5 @@
 /**
- * WorkflowSimV2Tab — 工作流仿真 2.0
+ * WorkflowSimV2Tab — 工作流评估 2.0
  * 驱动真实 Claude Code CLI 执行算子开发全流程
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
@@ -16,6 +16,7 @@ import {
   DownloadOutlined, ToolOutlined, BranchesOutlined, PlusOutlined, SwapOutlined,
   ApartmentOutlined, RobotOutlined, FileTextOutlined, ThunderboltOutlined, SafetyCertificateOutlined,
   RocketOutlined, NodeIndexOutlined, DeploymentUnitOutlined, CloudUploadOutlined, LinkOutlined,
+  AuditOutlined,
 } from '@ant-design/icons'
 import {
   getWorkflowV2Plugins, createWorkflowSimV2Session,
@@ -43,6 +44,7 @@ import PipelinePanel from '../components/workflowSimV2/PipelinePanel'
 import NpuTestPanel from '../components/workflowSimV2/NpuTestPanel'
 import PluginArchGraph from '../components/workflowSimV2/PluginArchGraph'
 import BreakpointDiagnosisGraph from '../components/workflowSimV2/BreakpointDiagnosisGraph'
+import ArbitratorPanel from '../components/workflowSimV2/ArbitratorPanel'
 import NewSessionModal from '../components/workflowSimV2/NewSessionModal'
 import { PieChart, Pie, Cell, Tooltip as RTooltip, BarChart, Bar, XAxis, YAxis, ResponsiveContainer } from 'recharts'
 
@@ -155,9 +157,10 @@ export default function WorkflowSimV2Tab() {
   const [npuLogs, setNpuLogs] = useState([])          // 远程 stdout/stderr 实时流
   const npuEsRef = useRef(null)                       // npu-test SSE
   const npuLogEndRef = useRef(null)                   // npu 日志面板自动滚动锚点
-  // 历史回看：null 表示查看当前仿真，有值表示查看历史记录
+  // 历史回看：null 表示查看当前评估，有值表示查看历史记录
   const [viewingHistoryId, setViewingHistoryId] = useState(null)
   const [newSessionModalOpen, setNewSessionModalOpen] = useState(false)
+  const [arbitratorPanelOpen, setArbitratorPanelOpen] = useState(false)
 
   // 日志预览 modal
   const [previewModal, setPreviewModal] = useState(null) // { session_id, op_name, terminal_log, simulation_log, tab: 'terminal'|'simlog' }
@@ -267,7 +270,7 @@ export default function WorkflowSimV2Tab() {
       .then(res => {
         const list = res.data?.plugins || []
         setPlugins(list)
-        // 若用户未选过插件，默认选中第一个（便于新建仿真 Modal 预填；流程图跟随 session，不受此影响）
+        // 若用户未选过插件，默认选中第一个（便于新建评估 Modal 预填；流程图跟随 session，不受此影响）
         if (!selectedPlugin && list.length > 0) setSelectedPlugin(list[0].plugin_id)
       })
       .catch(() => message.warning('插件列表加载失败，请检查后端服务'))
@@ -360,7 +363,7 @@ export default function WorkflowSimV2Tab() {
 
   // ====== 多 session 隔离基础设施：per-session 缓存 + SSE 多路 ======
   const MAX_CONCURRENT_RUNNING = 6
-  const sessionCacheRef = useRef(new Map())          // sid -> slice（所有仿真数据类 state）
+  const sessionCacheRef = useRef(new Map())          // sid -> slice（所有评估数据类 state）
   const esMapRef = useRef(new Map())                 // sid -> EventSource（主 SSE）
   const jsonlEsMapRef = useRef(new Map())            // sid -> EventSource（jsonl tail）
   const npuEsMapRef = useRef(new Map())              // sid -> EventSource（npu-test）
@@ -428,7 +431,7 @@ export default function WorkflowSimV2Tab() {
     setSimulating(s.session?.status === 'running')
   }, [getSlice])
 
-  // 文件改动 diff：仿真中轮询文件列表（5s，仅 simulating 时）；切走自动停
+  // 文件改动 diff：评估中轮询文件列表（5s，仅 simulating 时）；切走自动停
   useEffect(() => {
     if (!simulating || !session?.session_id) return
     const sid = session.session_id
@@ -446,7 +449,7 @@ export default function WorkflowSimV2Tab() {
     return () => clearInterval(timer)
   }, [simulating, session?.session_id, getSlice])
 
-  // 历史回看时也加载一次 diff 文件列表（仿真已结束，无轮询）
+  // 历史回看时也加载一次 diff 文件列表（评估已结束，无轮询）
   useEffect(() => {
     if (!session?.session_id || simulating) return
     if (viewingHistoryId !== session.session_id) return
@@ -471,8 +474,8 @@ export default function WorkflowSimV2Tab() {
     }).catch(() => setDiffContent('')).finally(() => setDiffLoading(false))
   }, [session?.session_id])
 
-  // 绑定仿真 SSE 事件（handleStart 与 restoreSession 共用）。
-  // 后端改为执行与 SSE 解耦：SSE 断开不影响后台进程，故 onerror 不再判定仿真失败。
+  // 绑定评估 SSE 事件（handleStart 与 restoreSession 共用）。
+  // 后端改为执行与 SSE 解耦：SSE 断开不影响后台进程，故 onerror 不再判定评估失败。
   // 多 session 隔离：所有 setter 走 writerFor(sid,...)，事件只写对应 session 的 slice，
   // 仅当该 session 正是当前 viewing 时才同步单例 state 触发渲染。
   const attachSseHandlers = useCallback((es, sid, { autoPipeline: ap } = {}) => {
@@ -526,7 +529,7 @@ export default function WorkflowSimV2Tab() {
       setTerminalLinesS(snap.terminal_log || [])
       setLogsS(snap.simulation_log || [])
       setProgLogsS(snap.program_log || [])
-      // jsonl_log 仅在仿真已结束时从 DB 加载（历史回看）；运行中由 /tail-jsonl SSE 实时提供，避免重复
+      // jsonl_log 仅在评估已结束时从 DB 加载（历史回看）；运行中由 /tail-jsonl SSE 实时提供，避免重复
       if (snap.jsonl_log && (snap.status === 'completed' || snap.status === 'stopped' || snap.status === 'failed')) {
         setJsonlLinesS(snap.jsonl_log)
       }
@@ -549,7 +552,7 @@ export default function WorkflowSimV2Tab() {
 
     es.addEventListener('start', (e) => {
       const data = JSON.parse(e.data)
-      addLogS('info', `开始仿真: ${data.op_name} (${data.total_steps} 步)`)
+      addLogS('info', `开始评估: ${data.op_name} (${data.total_steps} 步)`)
     })
 
     es.addEventListener('step_start', (e) => {
@@ -731,8 +734,8 @@ export default function WorkflowSimV2Tab() {
       const data = JSON.parse(e.data)
       setSummaryS(data)
       if (isViewing()) setSimulating(false)
-      addLogS('info', `仿真完成 — ${data.verdict}, ${data.passed_steps}/${data.total_steps} 步通过`)
-      if (isViewing()) message.success('仿真完成')
+      addLogS('info', `评估完成 — ${data.verdict}, ${data.passed_steps}/${data.total_steps} 步通过`)
+      if (isViewing()) message.success('评估完成')
       loadHistory()
       // 从 runningSessions 移除已完成的；延迟关闭该 session 的主 SSE（jsonl/npu 保留其 map 状态由各自清理）
       setRunningSessions(prev => prev.filter(s => s.session_id !== sid))
@@ -748,9 +751,9 @@ export default function WorkflowSimV2Tab() {
       }
     })
 
-    // SSE 断开：后端执行已解耦，仿真仍在后台运行，不判定失败，等用户重连或刷新。
+    // SSE 断开：后端执行已解耦，评估仍在后台运行，不判定失败，等用户重连或刷新。
     es.onerror = () => {
-      addLogS('warn', 'SSE 连接断开，仿真仍在后台运行（刷新页面可恢复）')
+      addLogS('warn', 'SSE 连接断开，评估仍在后台运行（刷新页面可恢复）')
       es.close()
     }
   }, [writerFor, getSlice, loadHistory])
@@ -761,6 +764,8 @@ export default function WorkflowSimV2Tab() {
   const restoreSession = useCallback((sess) => {
     if (!sess || !sess.session_id) return
     const sid = sess.session_id
+    // 同步插件选择（切历史 session 时流程图跟 session 走）
+    if (sess.plugin_id) setSelectedPlugin(sess.plugin_id)
     // 更新 slice 的 session 元数据（保留已有数据，仅 merge）
     const slice = getSlice(sid)
     slice.session = { ...(slice.session || {}), ...sess }
@@ -794,8 +799,8 @@ export default function WorkflowSimV2Tab() {
       .catch(() => {})
   }, [restoreSession])
 
-  // 启动仿真
-  // 启动仿真（由 NewSessionModal 提交 formData 触发）
+  // 启动评估
+  // 启动评估（由 NewSessionModal 提交 formData 触发）
   // 返回 false 表示不关闭 Modal（如超限/创建失败），成功返回 undefined
   const handleStart = useCallback(async (formData) => {
     const {
@@ -807,7 +812,7 @@ export default function WorkflowSimV2Tab() {
     if (!op_name?.trim()) { message.warning('请输入算子名称'); return false }
     // 并发上限：后台 running session 太多时拒绝（避免 SSE 连接数失控）
     if (runningSessions.length >= MAX_CONCURRENT_RUNNING) {
-      message.warning(`同时运行的仿真已达上限（${MAX_CONCURRENT_RUNNING}），请先停止部分仿真`)
+      message.warning(`同时运行的评估已达上限（${MAX_CONCURRENT_RUNNING}），请先停止部分评估`)
       return false
     }
 
@@ -849,7 +854,7 @@ export default function WorkflowSimV2Tab() {
       // 启动执行（fire-and-forget 后台 Task，与 SSE 解耦）
       const token = auto_pipeline ? gitcode_token : ''
       await startWorkflowSimV2Session(sid, token)
-      addLog('info', '仿真已启动（后台执行），等待 SSE 流...')
+      addLog('info', '评估已启动（后台执行），等待 SSE 流...')
       // 加入后台 running 列表
       setRunningSessions(prev => {
         if (prev.some(s => s.session_id === sid)) return prev
@@ -869,11 +874,11 @@ export default function WorkflowSimV2Tab() {
     }
   }, [runningSessions, addLog, getSlice, setViewing, projectSession, connectJsonlStream, attachSseHandlers])
 
-  // 停止仿真
+  // 停止评估
   const handleStop = useCallback(async () => {
     if (session?.session_id) {
       await stopWorkflowSimV2Session(session.session_id)
-      addLog('info', '仿真已停止')
+      addLog('info', '评估已停止')
       closeSessionStreams(session.session_id)
       setRunningSessions(prev => prev.filter(s => s.session_id !== session.session_id))
       // 刷新 session 状态并写回 slice + 投影（停止后可能仍在 viewing）
@@ -953,7 +958,7 @@ export default function WorkflowSimV2Tab() {
     }
   }, [loadHistory, getSlice, setViewing, projectSession, selectedPlugin])
 
-  // 返回当前仿真视图：优先回到最近 viewing 的 running；否则第一个 running；都没有则回到空状态
+  // 返回当前评估视图：优先回到最近 viewing 的 running；否则第一个 running；都没有则回到空状态
   const backToCurrent = useCallback(() => {
     setViewingHistoryId(null)
     const last = runningSessions.find(s => s.session_id === lastViewingRunningRef.current)
@@ -1082,7 +1087,7 @@ export default function WorkflowSimV2Tab() {
       setDiagnosis(res.data)
       setDiagnosisOpen(true)
       const n = res.data?.meta?.session_count || 0
-      if (n === 0) message.info('该插件暂无已完成的仿真样本')
+      if (n === 0) message.info('该插件暂无已完成的评估样本')
     } catch (e) {
       message.error('生成诊断失败')
     } finally {
@@ -1209,7 +1214,7 @@ export default function WorkflowSimV2Tab() {
           title={
             <Space>
               <HistoryOutlined />
-              <span>仿真记录</span>
+              <span>评估记录</span>
               <Button type="link" size="small" onClick={loadHistory} loading={historyLoading} style={{ padding: 0 }}>刷新</Button>
             </Space>
           }
@@ -1219,14 +1224,14 @@ export default function WorkflowSimV2Tab() {
           {viewingHistoryId && (
             <div style={{ padding: '0 12px 8px' }}>
               <Button size="small" block onClick={backToCurrent}>
-                返回当前仿真
+                返回当前评估
               </Button>
             </div>
           )}
           <div style={{ maxHeight: 500, overflowY: 'auto' }}>
             {historyList.length === 0 && runningSessions.length === 0 && !historyLoading && (
               <div style={{ padding: '16px 12px', textAlign: 'center' }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>暂无仿真记录</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>暂无评估记录</Text>
               </div>
             )}
             {/* 进行中分组（后台 running，置顶） */}
@@ -1268,7 +1273,7 @@ export default function WorkflowSimV2Tab() {
                         style={{ fontSize: 10, padding: 0, height: 'auto' }}
                         onClick={async () => {
                           await stopWorkflowSimV2Session(h.session_id)
-                          message.success('仿真已终止')
+                          message.success('评估已终止')
                           if (session?.session_id === h.session_id) handleStop()
                         }}
                       >
@@ -1361,7 +1366,7 @@ export default function WorkflowSimV2Tab() {
 
       {/* 右侧：主内容区 */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-      {/* 当前 session 摘要条 + 新建仿真入口 */}
+      {/* 当前 session 摘要条 + 新建评估入口 */}
       {session ? (
         <Card size="small" style={{ marginBottom: 0 }}>
           {/* 第一行：身份标识 + 操作 */}
@@ -1379,12 +1384,15 @@ export default function WorkflowSimV2Tab() {
               {simulating && (
                 <Button danger size="small" icon={<StopOutlined />} onClick={handleStop}>停止</Button>
               )}
+              <Button size="small" icon={<AuditOutlined />} onClick={() => setArbitratorPanelOpen(true)}>
+                裁判
+              </Button>
               <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setNewSessionModalOpen(true)}>
-                新建仿真
+                新建评估
               </Button>
             </Space>
           </div>
-          {/* 第二行：建表信息汇总（当初怎么建的这个仿真） */}
+          {/* 第二行：建表信息汇总（当初怎么建的这个评估） */}
           <div style={{ marginTop: 8, padding: '8px 10px', background: '#fafafa', borderRadius: 4, fontSize: 12, lineHeight: 1.8 }}>
             {session.op_spec && (
               <div>
@@ -1434,8 +1442,8 @@ export default function WorkflowSimV2Tab() {
         </Card>
       ) : (
         <Card size="small">
-          <Empty description="暂无查看的仿真">
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setNewSessionModalOpen(true)}>新建仿真</Button>
+          <Empty description="暂无查看的评估">
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setNewSessionModalOpen(true)}>新建评估</Button>
           </Empty>
         </Card>
       )}
@@ -1445,7 +1453,7 @@ export default function WorkflowSimV2Tab() {
         <Alert
           type="info"
           showIcon
-          message="正在查看历史仿真记录"
+          message="正在查看历史评估记录"
           description={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>Session: {viewingHistoryId} · {session?.plugin_name} · {session?.op_name}</span>
@@ -1461,7 +1469,7 @@ export default function WorkflowSimV2Tab() {
                     URL.revokeObjectURL(url)
                   } catch { message.error('导出失败') }
                 }}>导出报告</Button>
-                <Button size="small" onClick={backToCurrent}>返回当前仿真</Button>
+                <Button size="small" onClick={backToCurrent}>返回当前评估</Button>
               </Space>
             </div>
           }
@@ -1475,7 +1483,7 @@ export default function WorkflowSimV2Tab() {
           type="warning"
           showIcon
           icon={<WarningOutlined />}
-          message="会话中断 — 仿真进程已丢失"
+          message="会话中断 — 评估进程已丢失"
           description={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>Session: {session.session_id} · {session.op_name} — 后端进程已不存在（可能因页面刷新或后端重启）</span>
@@ -1514,7 +1522,7 @@ export default function WorkflowSimV2Tab() {
         />
       )}
 
-      {/* 终端面板（常驻显示，进仿真页面即可见） */}
+      {/* 终端面板（常驻显示，进评估页面即可见） */}
       {(session || simulating) && (
         <Card
           size="small"
@@ -1694,7 +1702,7 @@ export default function WorkflowSimV2Tab() {
       )}
 
 
-      {/* 文件改动（git diff，相对于仿真开始的基线） */}
+      {/* 文件改动（git diff，相对于评估开始的基线） */}
       {session && (
         <Card size="small" style={{ marginBottom: 12 }} title={
           <Space>
@@ -1709,7 +1717,7 @@ export default function WorkflowSimV2Tab() {
           {showDiffFiles && (
             diffFiles.length === 0 ? (
               <div style={{ color: diffError ? '#ff4d4f' : '#999', textAlign: 'center', padding: 16, fontSize: 12 }}>
-                {diffError ? `无法获取 diff：${diffError}` : (simulating ? '仿真尚未改动文件…' : '无文件改动')}
+                {diffError ? `无法获取 diff：${diffError}` : (simulating ? '评估尚未改动文件…' : '无文件改动')}
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 12 }}>
@@ -2080,7 +2088,7 @@ export default function WorkflowSimV2Tab() {
       {logs.length > 0 && (
         <Card
           size="small"
-          title="仿真日志"
+          title="评估日志"
           extra={!simulating && logs.length > 0 && (
             <Button size="small" icon={<DownloadOutlined />} onClick={() => {
               const content = logs.map(l => `[${l.time}] [${l.type.toUpperCase()}] ${l.text}`).join('\n')
@@ -2642,7 +2650,7 @@ export default function WorkflowSimV2Tab() {
         </Button>
       )}
 
-      {/* 仿真结果统计 */}
+      {/* 评估结果统计 */}
       {summary && (
         <Row gutter={12}>
           <Col span={6}>
@@ -2692,7 +2700,7 @@ export default function WorkflowSimV2Tab() {
           <SafetyCertificateOutlined />
           <span>插件断点诊断</span>
           {diagnosis?.meta && <Tag color="blue">{diagnosis.meta.session_count} 样本 · {diagnosis.meta.op_count} 算子</Tag>}
-          <Tooltip title="聚合该插件所有已完成仿真，定位 cannbot-skills 工作流的断点与设计缺陷：哪一步最常失败、哪个 skill 最常被漏读、哪类错误最多。">
+          <Tooltip title="聚合该插件所有已完成评估，定位 cannbot-skills 工作流的断点与设计缺陷：哪一步最常失败、哪个 skill 最常被漏读、哪类错误最多。">
             <Text type="secondary" style={{ fontSize: 11 }}>?</Text>
           </Tooltip>
         </Space>
@@ -2708,7 +2716,7 @@ export default function WorkflowSimV2Tab() {
         </Space>
       }>
         {(!diagnosis || !diagnosis.meta || diagnosis.meta.session_count === 0) ? (
-          <Empty description={diagnosis ? '该插件暂无已完成的仿真样本，无法聚合断点' : '点击「生成诊断」聚合该插件历史仿真的断点与病灶'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description={diagnosis ? '该插件暂无已完成的评估样本，无法聚合断点' : '点击「生成诊断」聚合该插件历史评估的断点与病灶'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <Collapse activeKey={diagnosisOpen ? ['diag'] : []} onChange={k => setDiagnosisOpen(k.includes('diag'))} items={[{
             key: 'diag',
@@ -2829,7 +2837,7 @@ export default function WorkflowSimV2Tab() {
         )}
       </Card>
 
-      {/* 导出报告按钮（仿真完成或历史回看时显示） */}
+      {/* 导出报告按钮（评估完成或历史回看时显示） */}
       {summary && session && !viewingHistoryId && (
         <div style={{ marginTop: 8, textAlign: 'right' }}>
           <Button icon={<DownloadOutlined />} size="small" onClick={async () => {
@@ -2850,7 +2858,7 @@ export default function WorkflowSimV2Tab() {
       {!simulating && steps.length === 0 && (
         <Card>
           <Empty
-            description="选择插件和算子名称后点击「开始仿真」，驱动 Claude Code CLI 执行真实的算子开发全流程"
+            description="选择插件和算子名称后点击「开始评估」，驱动 Claude Code CLI 执行真实的算子开发全流程"
             image={Empty.PRESENTED_IMAGE_SIMPLE}
           />
         </Card>
@@ -2884,7 +2892,7 @@ export default function WorkflowSimV2Tab() {
               a.download = `simlog-${previewModal.session_id}.txt`
               a.click()
               URL.revokeObjectURL(url)
-            }}>下载仿真日志</Button>,
+            }}>下载评估日志</Button>,
             <Button key="close" size="small" onClick={() => setPreviewModal(null)}>关闭</Button>,
           ]}
         >
@@ -2921,14 +2929,14 @@ export default function WorkflowSimV2Tab() {
               },
               {
                 key: 'simlog',
-                label: `仿真日志 (${(previewModal.simulation_log || []).length} 条)`,
+                label: `评估日志 (${(previewModal.simulation_log || []).length} 条)`,
                 children: (
                   <div style={{
                     maxHeight: 500, overflowY: 'auto', background: '#fafafa', borderRadius: 6,
                     padding: 10, fontSize: 12,
                   }}>
                     {(previewModal.simulation_log || []).length === 0 && (
-                      <div style={{ color: '#999', textAlign: 'center', padding: 20 }}>无仿真日志</div>
+                      <div style={{ color: '#999', textAlign: 'center', padding: 20 }}>无评估日志</div>
                     )}
                     {(previewModal.simulation_log || []).map((log, i) => (
                       <div key={i} style={{ marginBottom: 2 }}>
@@ -2946,7 +2954,7 @@ export default function WorkflowSimV2Tab() {
         </Modal>
       )}
 
-      {/* 新建仿真 Modal */}
+      {/* 新建评估 Modal */}
       <NewSessionModal
         visible={newSessionModalOpen}
         onCancel={() => setNewSessionModalOpen(false)}
@@ -2962,6 +2970,13 @@ export default function WorkflowSimV2Tab() {
         plugins={plugins} pluginsLoading={pluginsLoading}
         onViewArch={openPluginArch}
         onStart={handleStart}
+      />
+
+      {/* 裁判报告 Drawer（开发者模式） */}
+      <ArbitratorPanel
+        sessionId={session?.session_id}
+        visible={arbitratorPanelOpen}
+        onClose={() => setArbitratorPanelOpen(false)}
       />
 
       {/* 插件架构 Drawer */}
@@ -2980,7 +2995,7 @@ export default function WorkflowSimV2Tab() {
         {pluginDefLoading ? (
           <div style={{ textAlign: 'center', padding: 60 }}><Spin tip="加载插件定义..." /></div>
         ) : pluginDef ? (
-          <PluginArchGraph pluginDef={pluginDef} monitorInsights={monitorInsights} steps={steps} runtimeSkillStatus={runtimeSkillStatus} />
+          <PluginArchGraph pluginDef={pluginDef} />
         ) : (
           <Empty description="无法加载插件定义" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         )}

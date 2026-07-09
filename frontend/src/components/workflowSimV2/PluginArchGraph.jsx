@@ -106,17 +106,121 @@ function collectAllSkills(def) {
   return [...m.keys()]
 }
 
+// 分层布局：用于有 sub_steps 的插件（如 ops-registry-invoke，4 大阶段 + 子 step）
+// 结构：Primary → Phase → SubStep → Agent → Skill
+function layoutHierarchical(def, skills, agents) {
+  const nodes = [], edges = []
+  const phases = def.steps || []
+  const hasAgents = agents.length > 0
+
+  // 展平所有子 step，记录所属 phase
+  const allSubs = []
+  phases.forEach(phase => {
+    (phase.sub_steps || []).forEach(sub => allSubs.push({ ...sub, phase_id: phase.step_id }))
+  })
+
+  const maxCount = Math.max(1, phases.length, allSubs.length, agents.length, skills.length)
+  const totalH = maxCount * ARCH_Y_GAP
+  const cy = (count) => (totalH - count * ARCH_Y_GAP) / 2 + ARCH_Y_GAP / 2 - 20
+
+  // Primary (x=0)
+  nodes.push({ id: 'primary', type: 'archNode', position: { x: 0, y: cy(1) }, data: { label: def.plugin_name || def.plugin_id, nodeType: 'primary', description: def.description || '', extra: `${phases.length} 阶段 · ${allSubs.length} 子step · ${agents.length} 代理 · ${skills.length} 技能 · 分层` }})
+
+  // Phase 大阶段节点 (x=GAP)
+  phases.forEach((phase, i) => {
+    nodes.push({ id: phase.step_id, type: 'archNode', position: { x: ARCH_X_GAP, y: cy(phases.length) + i * ARCH_Y_GAP }, data: { label: phase.name, nodeType: 'step', extra: `${phase.sub_steps?.length || 0} 子step` }})
+    edges.push({ id: `p-${phase.step_id}`, source: 'primary', target: phase.step_id, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#bbb' }, style: { stroke: '#bbb', strokeWidth: 1.8 }})
+  })
+
+  // SubStep 子步骤节点 (x=GAP*2)
+  allSubs.forEach((sub, i) => {
+    const sid = sub.step_id
+    nodes.push({ id: sid, type: 'archNode', position: { x: ARCH_X_GAP * 2, y: cy(allSubs.length) + i * ARCH_Y_GAP }, data: { label: sub.name, nodeType: 'step', extra: sub.dispatch_target ? `→ ${sub.dispatch_target}` : '' }})
+    edges.push({ id: `${sub.phase_id}-${sid}`, source: sub.phase_id, target: sid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#bbb' }, style: { stroke: '#d9d9d9', strokeWidth: 1 }})
+  })
+
+  // Agent 节点 (x=GAP*3)
+  if (hasAgents) {
+    agents.forEach((agent, i) => {
+      const aid = `agent_${agent.name}`
+      nodes.push({ id: aid, type: 'archNode', position: { x: ARCH_X_GAP * 3, y: cy(agents.length) + i * ARCH_Y_GAP }, data: { label: agent.name, nodeType: 'agent', description: agent.description || '', extra: agent.skills?.length ? `Skills: ${agent.skills.slice(0, 3).join(', ')}${agent.skills.length > 3 ? '...' : ''}` : '' }})
+    })
+  }
+
+  // Skill 节点 (x=GAP*4)
+  skills.forEach((skill, i) => {
+    const skid = `skill_${skill}`
+    nodes.push({ id: skid, type: 'archNode', position: { x: ARCH_X_GAP * 4, y: cy(skills.length) + i * ARCH_Y_GAP }, data: { label: skill, nodeType: 'skill' }})
+  })
+
+  // SubStep → Agent（dispatch 匹配）
+  if (hasAgents) {
+    allSubs.forEach(sub => {
+      const dt = sub.dispatch_target || ''
+      if (!dt) return
+      agents.forEach(agent => {
+        if (dt === agent.name || dt.includes(agent.name)) {
+          edges.push({ id: `${sub.step_id}-agent_${agent.name}`, source: sub.step_id, target: `agent_${agent.name}`, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#722ed1' }, style: { stroke: '#bfbfbf', strokeWidth: 1.2 }})
+        }
+      })
+    })
+    // Agent → Skill
+    agents.forEach(agent => {
+      const aid = `agent_${agent.name}`
+      for (const skill of agent.skills || []) {
+        const skid = `skill_${skill}`
+        if (nodes.some(n => n.id === skid)) {
+          edges.push({ id: `${aid}-${skid}`, source: aid, target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#52c41a' }, style: { stroke: '#bfbfbf', strokeWidth: 1.2 }})
+        }
+      }
+    })
+  }
+
+  // SubStep → Skill 兜底（dispatch 是 skill 名而非 agent，如 4.2→ascendc-code-review）
+  allSubs.forEach(sub => {
+    const dt = sub.dispatch_target || ''
+    if (!dt) return
+    const viaAgent = hasAgents && agents.some(a => dt === a.name || dt.includes(a.name))
+    if (viaAgent) return
+    skills.forEach(skill => {
+      if (dt.includes(skill)) {
+        const skid = `skill_${skill}`
+        if (nodes.some(n => n.id === skid)) {
+          edges.push({ id: `${sub.step_id}-${skid}`, source: sub.step_id, target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#52c41a' }, style: { stroke: '#bfbfbf', strokeWidth: 1, strokeDasharray: '4 3' }})
+        }
+      }
+    })
+  })
+
+  // Primary → Skill（required_skills 虚线）
+  for (const skill of def.required_skills || []) {
+    const skid = `skill_${skill}`
+    if (nodes.some(n => n.id === skid)) {
+      edges.push({ id: `p-${skid}`, source: 'primary', target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#1890ff' }, style: { stroke: '#d9d9d9', strokeWidth: 1, strokeDasharray: '6 3' }})
+    }
+  }
+
+  return { nodes, edges }
+}
+
 function layoutArchGraph(def) {
   const nodes = [], edges = []
   const steps = def.steps || []
   const agents = def.agent_defs || []
   const skills = collectAllSkills(def)
+  // 分层模式：step 有 sub_steps（如 ops-registry-invoke 4 大阶段 + 子 step）
+  if (steps.some(s => s.sub_steps?.length > 0)) return layoutHierarchical(def, skills, agents)
+  const hasAgents = agents.length > 0
+  const directMode = !hasAgents  // 直接模式：无 subagent，主 Claude 直接调 skill
+
+  // 列布局：直接模式三列（Primary/Step/Skill），派发/混合四列（+Agent）
+  const skillX = directMode ? ARCH_X_GAP * 2 : ARCH_X_GAP * 3
   const maxCount = Math.max(1, steps.length, agents.length, skills.length)
   const totalH = maxCount * ARCH_Y_GAP
   const cy = (count) => (totalH - count * ARCH_Y_GAP) / 2 + ARCH_Y_GAP / 2 - 20
 
   // Primary
-  nodes.push({ id: 'primary', type: 'archNode', position: { x: 0, y: cy(1) }, data: { label: def.plugin_name || def.plugin_id, nodeType: 'primary', description: def.description || '', extra: `${steps.length} 步 · ${agents.length} 代理 · ${skills.length} 技能` }})
+  nodes.push({ id: 'primary', type: 'archNode', position: { x: 0, y: cy(1) }, data: { label: def.plugin_name || def.plugin_id, nodeType: 'primary', description: def.description || '', extra: `${steps.length} 步 · ${agents.length} 代理 · ${skills.length} 技能${directMode ? ' · 直接模式' : ''}` }})
 
   // Steps
   steps.forEach((step, i) => {
@@ -125,46 +229,69 @@ function layoutArchGraph(def) {
     edges.push({ id: `p-${sid}`, source: 'primary', target: sid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#bbb' }, style: { stroke: '#bbb', strokeWidth: 1.5 }})
   })
 
-  // Agents
-  agents.forEach((agent, i) => {
-    const aid = `agent_${agent.name}`
-    nodes.push({ id: aid, type: 'archNode', position: { x: ARCH_X_GAP * 2, y: cy(agents.length) + i * ARCH_Y_GAP }, data: { label: agent.name, nodeType: 'agent', description: agent.description || '', extra: agent.skills?.length ? `Skills: ${agent.skills.slice(0, 3).join(', ')}${agent.skills.length > 3 ? '...' : ''}` : '' }})
+  // Agents（仅派发/混合模式画 Agent 列）
+  if (hasAgents) {
+    agents.forEach((agent, i) => {
+      const aid = `agent_${agent.name}`
+      nodes.push({ id: aid, type: 'archNode', position: { x: ARCH_X_GAP * 2, y: cy(agents.length) + i * ARCH_Y_GAP }, data: { label: agent.name, nodeType: 'agent', description: agent.description || '', extra: agent.skills?.length ? `Skills: ${agent.skills.slice(0, 3).join(', ')}${agent.skills.length > 3 ? '...' : ''}` : '' }})
 
-    let hasConn = false
-    steps.forEach(step => {
-      const dt = step.dispatch_target || ''
-      if (dt === agent.name || dt.includes(agent.name)) {
-        edges.push({ id: `${step.step_id}-${aid}`, source: step.step_id, target: aid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#722ed1' }, style: { stroke: '#bfbfbf', strokeWidth: 1.5 }})
-        hasConn = true
+      let hasConn = false
+      steps.forEach(step => {
+        const dt = step.dispatch_target || ''
+        if (dt === agent.name || dt.includes(agent.name)) {
+          edges.push({ id: `${step.step_id}-${aid}`, source: step.step_id, target: aid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#722ed1' }, style: { stroke: '#bfbfbf', strokeWidth: 1.5 }})
+          hasConn = true
+        }
+      })
+      if (!hasConn) {
+        edges.push({ id: `p-${aid}`, source: 'primary', target: aid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#722ed1' }, style: { stroke: '#d9d9d9', strokeWidth: 1, strokeDasharray: '4 4' }})
       }
     })
-    if (!hasConn) {
-      edges.push({ id: `p-${aid}`, source: 'primary', target: aid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#722ed1' }, style: { stroke: '#d9d9d9', strokeWidth: 1, strokeDasharray: '4 4' }})
-    }
-  })
+  }
 
   // Skills
   skills.forEach((skill, i) => {
     const skid = `skill_${skill}`
-    nodes.push({ id: skid, type: 'archNode', position: { x: ARCH_X_GAP * 3, y: cy(skills.length) + i * ARCH_Y_GAP }, data: { label: skill, nodeType: 'skill' }})
+    nodes.push({ id: skid, type: 'archNode', position: { x: skillX, y: cy(skills.length) + i * ARCH_Y_GAP }, data: { label: skill, nodeType: 'skill' }})
   })
 
-  // Agent → Skill
-  agents.forEach(agent => {
-    const aid = `agent_${agent.name}`
-    for (const skill of agent.skills || []) {
+  // Agent → Skill（仅派发/混合）
+  if (hasAgents) {
+    agents.forEach(agent => {
+      const aid = `agent_${agent.name}`
+      for (const skill of agent.skills || []) {
+        const skid = `skill_${skill}`
+        if (nodes.some(n => n.id === skid)) {
+          edges.push({ id: `${aid}-${skid}`, source: aid, target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#52c41a' }, style: { stroke: '#bfbfbf', strokeWidth: 1.5 }})
+        }
+      }
+    })
+  }
+
+  // Step → Skill（直接模式主线 / 混合模式兜底）：dispatch_target 提到的 skill
+  // 已通过 Agent 中转的 step（dispatch 匹配 agent 名）不重复画
+  steps.forEach(step => {
+    const dt = step.dispatch_target || ''
+    if (!dt) return
+    const viaAgent = hasAgents && agents.some(a => dt === a.name || dt.includes(a.name))
+    if (viaAgent) return  // 派发模式走 Step→Agent→Skill，不重复
+    skills.forEach(skill => {
+      if (dt.includes(skill)) {
+        const skid = `skill_${skill}`
+        if (nodes.some(n => n.id === skid)) {
+          edges.push({ id: `${step.step_id}-${skid}`, source: step.step_id, target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#52c41a' }, style: { stroke: directMode ? '#52c41a' : '#bfbfbf', strokeWidth: directMode ? 1.5 : 1, ...(directMode ? {} : { strokeDasharray: '4 3' }) }})
+        }
+      }
+    })
+  })
+
+  // Primary → Skills（required_skills 虚线）：直接模式省略（Step→Skill 已表达），派发/混合保留
+  if (!directMode) {
+    for (const skill of def.required_skills || []) {
       const skid = `skill_${skill}`
       if (nodes.some(n => n.id === skid)) {
-        edges.push({ id: `${aid}-${skid}`, source: aid, target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#52c41a' }, style: { stroke: '#bfbfbf', strokeWidth: 1.5 }})
+        edges.push({ id: `p-${skid}`, source: 'primary', target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#1890ff' }, style: { stroke: '#d9d9d9', strokeWidth: 1, strokeDasharray: '6 3' }})
       }
-    }
-  })
-
-  // Primary → Skills (dashed)
-  for (const skill of def.required_skills || []) {
-    const skid = `skill_${skill}`
-    if (nodes.some(n => n.id === skid)) {
-      edges.push({ id: `p-${skid}`, source: 'primary', target: skid, animated: false, markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: '#1890ff' }, style: { stroke: '#d9d9d9', strokeWidth: 1, strokeDasharray: '6 3' }})
     }
   }
 

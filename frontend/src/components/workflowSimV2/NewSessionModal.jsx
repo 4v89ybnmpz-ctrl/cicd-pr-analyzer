@@ -1,9 +1,9 @@
 /**
- * NewSessionModal — 新建仿真弹窗
+ * NewSessionModal — 新建评估弹窗
  * 含算子库 clone（Step1）+ 装插件（Step2）+ 启动参数（Step3）全部准备步骤。
  * 表单输入态（9 个）由父组件受控（保留 sessionStorage 持久化单一数据源），
  * 操作态（fork/clone/install/分支）封在组件内部。
- * 点「开始仿真」组装 formData 调 onStart，成功后关闭。
+ * 点「开始评估」组装 formData 调 onStart，成功后关闭。
  */
 import { useState, useEffect, useCallback } from 'react'
 import { Modal, Card, Space, Tag, Input, Select, Button, Switch, Row, Col, Tooltip, Typography, message } from 'antd'
@@ -14,6 +14,7 @@ import {
 } from '@ant-design/icons'
 import {
   forkWorkflowV2Repo, checkWorkflowV2Fork, cloneWorkflowV2Repo, checkWorkflowV2Repo,
+  checkWorkflowV2Base,
   installCannbotScenario, checkCannbotInstallWorkdir,
   listWorkflowV2Branches, createWorkflowV2Branch, switchWorkflowV2Branch,
 } from '../../api'
@@ -39,6 +40,7 @@ export default function NewSessionModal({
   onStart,
 }) {
   // ===== 内部操作态 =====
+  const [baseReady, setBaseReady] = useState(false)  // base_repo 母本是否就绪（决定 Clone/派生按钮）
   const [forkStatus, setForkStatus] = useState('idle')
   const [forkInfo, setForkInfo] = useState(null)
   const [cloneStatus, setCloneStatus] = useState('idle')
@@ -61,11 +63,23 @@ export default function NewSessionModal({
     setCloneStatus('checking')
     checkWorkflowV2Repo(workDir.trim())
       .then(res => {
-        if (res.data?.is_git) { setCloneStatus('cloned'); setCloneInfo({ branch: res.data.branch, path: res.data.path }) }
-        else if (res.data?.exists) { setCloneStatus('error'); setCloneInfo(null) }
-        else { setCloneStatus('idle'); setCloneInfo(null) }
+        if (res.data?.is_git) {
+          setCloneStatus('cloned')
+          setCloneInfo({ branch: res.data.branch, path: res.data.path, is_clean: res.data.is_clean, modified_count: res.data.modified_count })
+        } else { setCloneStatus('idle'); setCloneInfo(null) }  // 方案一：workDir 可能是根目录（非 git，合法），不报错
       })
       .catch(() => setCloneStatus('idle'))
+    // 定期轮询刷新文件改动状态（30s），让"全新/已修改"实时更新
+    const timer = setInterval(() => {
+      const wd = workDir?.trim()
+      if (!wd) return
+      checkWorkflowV2Repo(wd).then(res => {
+        if (res.data?.is_git) {
+          setCloneInfo(prev => prev ? { ...prev, is_clean: res.data.is_clean, modified_count: res.data.modified_count } : prev)
+        }
+      }).catch(() => {})
+    }, 30000)
+    return () => clearInterval(timer)
   }, [workDir])
 
   useEffect(() => {
@@ -106,6 +120,17 @@ export default function NewSessionModal({
 
   useEffect(() => { if (cloneStatus === 'cloned') loadBranches() }, [cloneStatus, loadBranches])
 
+  // 检测母本是否就绪（决定显示 Clone 还是派生按钮；根目录 = workDir 或 config 默认）
+  useEffect(() => {
+    const cloneUrl = forkInfo?.fork_url || repoUrl?.trim()
+    if (!cloneUrl) { setBaseReady(false); return }
+    let cancelled = false
+    checkWorkflowV2Base(cloneUrl, workDir?.trim())
+      .then(res => { if (!cancelled) setBaseReady(!!res.data?.base_ready) })
+      .catch(() => { if (!cancelled) setBaseReady(false) })
+    return () => { cancelled = true }
+  }, [repoUrl, forkInfo, workDir])
+
   // ===== handler =====
   const handleFork = useCallback(async () => {
     if (!repoUrl?.trim()) { message.warning('请输入算子库地址'); return }
@@ -122,15 +147,22 @@ export default function NewSessionModal({
   const handleClone = useCallback(async () => {
     const cloneUrl = forkInfo?.fork_url || repoUrl?.trim()
     if (!cloneUrl) { message.warning('请先 Fork 或输入仓库地址'); return }
-    if (!workDir?.trim()) { message.warning('请输入工作目录'); return }
     setCloneStatus('cloning')
     try {
-      const res = await cloneWorkflowV2Repo({ repo_url: cloneUrl, target_dir: workDir.trim() })
+      // 方案一：workDir 留空 → 后端自动生成隔离目录（base_repo + --shared）；填写则用指定目录
+      const payload = { repo_url: cloneUrl }
+      if (workDir?.trim()) payload.target_dir = workDir.trim()
+      if (opName?.trim()) payload.op_name = opName.trim()
+      const res = await cloneWorkflowV2Repo(payload)
       if (res.data.error) { setCloneStatus('error'); message.error(res.data.error); return }
       setCloneStatus('cloned'); setCloneInfo({ branch: res.data.branch, path: res.data.path })
-      message.success(res.data.status === 'already_exists' ? '仓库已存在' : 'Clone 成功')
+      if (res.data.path) onWorkDirChange({ target: { value: res.data.path } })  // 模拟 Input.onChange 事件回填 workDir
+      const msg = res.data.isolated
+        ? `已派生隔离工作区${res.data.auto_branch ? '（分支 ' + res.data.branch + '）' : ''}`
+        : (res.data.status === 'already_exists' ? '仓库已存在' : 'Clone 成功')
+      message.success(msg)
     } catch (e) { setCloneStatus('error'); message.error(e._friendlyMsg || 'Clone 失败') }
-  }, [repoUrl, workDir, forkInfo])
+  }, [repoUrl, workDir, forkInfo, opName, onWorkDirChange])
 
   const handleInstall = useCallback(async () => {
     if (!selectedPlugin) { message.warning('请先选择插件'); return }
@@ -205,7 +237,7 @@ export default function NewSessionModal({
     <Modal
       open={visible}
       onCancel={onCancel}
-      title={<Space><ExperimentOutlined /> 新建仿真</Space>}
+      title={<Space><ExperimentOutlined /> 新建评估</Space>}
       width={760}
       footer={null}
       destroyOnClose={false}
@@ -258,17 +290,17 @@ export default function NewSessionModal({
             <Row gutter={8} align="middle">
               <Col><Text strong style={{ fontSize: 12 }}>工作目录:</Text></Col>
               <Col flex="auto">
-                <Input placeholder="Clone 目标目录，如 /tmp/ops-math" value={workDir} onChange={onWorkDirChange} style={{ width: '100%' }} />
+                <Input placeholder="留空则自动创建隔离工作区（推荐，每次评估独立）；或手动指定目录" value={workDir} onChange={onWorkDirChange} style={{ width: '100%' }} />
               </Col>
               <Col>
                 <Button
                   icon={<DownloadOutlined />}
                   onClick={handleClone}
                   loading={cloneStatus === 'cloning'}
-                  disabled={(!forkInfo?.fork_url && !repoUrl?.trim()) || !workDir?.trim() || cloneStatus === 'cloning' || cloneStatus === 'cloned'}
+                  disabled={(!forkInfo?.fork_url && !repoUrl?.trim()) || cloneStatus === 'cloning' || cloneStatus === 'cloned'}
                   type={cloneStatus === 'cloned' ? 'default' : 'primary'}
                 >
-                  {cloneStatus === 'cloned' ? '已克隆' : cloneStatus === 'cloning' ? '克隆中...' : 'Clone 到本地'}
+                  {cloneStatus === 'cloned' ? '已派生' : cloneStatus === 'cloning' ? (baseReady ? '派生中...' : '克隆中...') : (baseReady ? '派生新工作区' : 'Clone 算子库')}
                 </Button>
               </Col>
             </Row>
@@ -277,6 +309,9 @@ export default function NewSessionModal({
                 <Space size={8}>
                   <Text type="secondary" style={{ fontSize: 11 }}>路径: {cloneInfo.path}</Text>
                   {currentBranch && <Tag color="blue" style={{ fontSize: 10 }}>当前分支: {currentBranch}</Tag>}
+                  {cloneInfo.is_clean
+                    ? <Tag color="success" style={{ fontSize: 10 }}>✨ 全新（未改动）</Tag>
+                    : <Tag color="warning" style={{ fontSize: 10 }}>📝 已修改 {cloneInfo.modified_count} 个文件</Tag>}
                 </Space>
               </div>
             )}
@@ -472,7 +507,7 @@ export default function NewSessionModal({
               </Col>
               <Col><Text style={{ fontSize: 12 }}>自动触发 CI/CD 流水线</Text></Col>
               <Col>
-                <Tooltip title="开启后，仿真完成后将自动提交 PR、触发流水线编译测试，失败时自动修复（需填写 GitCode Token）">
+                <Tooltip title="开启后，评估完成后将自动提交 PR、触发流水线编译测试，失败时自动修复（需填写 GitCode Token）">
                   <WarningOutlined style={{ color: autoPipeline ? '#1677ff' : '#d9d9d9', fontSize: 12 }} />
                 </Tooltip>
               </Col>
@@ -490,7 +525,7 @@ export default function NewSessionModal({
               disabled={!selectedPlugin || !opName?.trim()}
               onClick={handleSubmit}
             >
-              开始仿真
+              开始评估
             </Button>
           </Space>
         </div>

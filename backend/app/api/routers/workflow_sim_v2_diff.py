@@ -47,6 +47,7 @@ async def _list_changed_files(baseline: str, work_dir: str) -> list:
     """列出相对 baseline 的全部改动文件，含 untracked（git diff 默认忽略 untracked）。
 
     - 已跟踪改动：git diff --numstat --name-status <baseline>
+    - baseline 失效时：git log --name-status 列出最近提交的改动文件
     - 新文件（untracked）：git ls-files --others --exclude-standard（status=A，无行数）
     """
     files = []
@@ -54,6 +55,16 @@ async def _list_changed_files(baseline: str, work_dir: str) -> list:
     r = await _run_git("diff", "--numstat", "--name-status", baseline, cwd=work_dir)
     if r.get("returncode") == 0:
         files.extend(_parse_numstat_namestatus(r.get("stdout", "")))
+    else:
+        # baseline 丢失（如 --shared clone alternates 断导致 git 重建），fallback 到最近 commit 的文件改动
+        r = await _run_git("log", "--diff-filter=AM", "--name-status", "--pretty=format:", "-20", cwd=work_dir)
+        if r.get("returncode") == 0:
+            seen = set()
+            for parts in [l.split("\t", 1) for l in (r.get("stdout","")).splitlines() if l.strip()]:
+                if len(parts) >= 2 and parts[1] not in seen:
+                    seen.add(parts[1])
+                    files.append({"path": parts[1], "status": parts[0][0] if parts[0] else "M",
+                                  "additions": 0, "deletions": 0, "binary": False})
     # 2. untracked 新文件（git diff 看不到，单独列）
     r2 = await _run_git("ls-files", "--others", "--exclude-standard", cwd=work_dir)
     if r2.get("returncode") == 0:

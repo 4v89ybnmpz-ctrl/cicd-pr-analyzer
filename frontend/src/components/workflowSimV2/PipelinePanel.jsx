@@ -105,7 +105,7 @@ export default function PipelinePanel({ pipeline, fixRounds, onTrigger, onCancel
             </Button>
             {!onTrigger && (
               <div style={{ marginTop: 6, fontSize: 11, color: '#faad14' }}>
-                请先完成仿真后再触发流水线
+                请先完成评估后再触发流水线
               </div>
             )}
           </div>

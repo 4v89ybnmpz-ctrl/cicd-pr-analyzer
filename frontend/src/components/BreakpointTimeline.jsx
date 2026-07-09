@@ -1,6 +1,6 @@
 /**
  * BreakpointTimeline — 断点时间线组件
- * 按严重性排序展示仿真过程中检测到的工程能力断点
+ * 按严重性排序展示评估过程中检测到的工程能力断点
  */
 import { Timeline, Tag, Typography, Empty } from 'antd'
 
