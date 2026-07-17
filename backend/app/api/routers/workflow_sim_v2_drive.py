@@ -268,6 +268,10 @@ async def drive_session_events(
             continue
         if step.get("status") == "completed":
             continue
+        # 提 PR 步骤改为手动触发：等待用户点按钮，不自动执行
+        if step.get("step_category") == "create_pr" and step.get("status") != "manual_trigger":
+            await _push_proglog("INFO", f"步骤 {step['step_id']} 等待手动触发（提 PR）", step=step.get("step_id"))
+            break
 
         step_id = step["step_id"]
         step_name = step["step_name"]
@@ -310,6 +314,14 @@ async def drive_session_events(
 3. 确认所有文件都已正确写入后才能结束
 
 这是硬性要求，不得跳过。"""
+
+        # 子步骤进度标记 + 范围约束：有 sub_steps 的步骤（如 ops-registry-invoke 4 大阶段）
+        _subs = step.get("sub_steps", []) or []
+        if _subs:
+            _sub_list = "\n".join(f"- {s['name']} → {s.get('dispatch_target') or '主 Claude'}" for s in _subs)
+            prompt += f"\n\n## 本阶段子步骤（只执行以下，不要超出范围）\n{_sub_list}"
+            _names = ", ".join(s["name"] for s in _subs)
+            prompt += f"\n\n## 子步骤进度标记\n每完成一个子步骤前，执行: bash -c \"echo [SUBSTEP:子步骤名]\"\n子步骤列表: {_names}"
 
         step["status"] = "running"
         step["started_at"] = datetime.now().isoformat()
@@ -409,6 +421,25 @@ async def drive_session_events(
                 if invoked_skills:
                     out_data["skill_invoked"] = invoked_skills[0]
                 yield _emit("claude_output", out_data)
+
+                # 检测子步骤进度标记 [SUBSTEP:xxx]
+                _cmd = (tool_input or {}).get("command", "")
+                if "SUBSTEP:" in _cmd:
+                    _m = re.search(r"\[SUBSTEP:(.+?)\]", _cmd)
+                    if _m:
+                        yield _emit("sub_step_progress", {"step_id": step_id, "sub_step": _m.group(1), "time": _ts()})
+
+                # 从 Task/Agent 调用推断子步骤进度（ops-registry-invoke 等 skill 驱动插件）
+                if tool_name in ("Task", "Agent") and (_subs := step.get("sub_steps")):
+                    _sub_type = (tool_input or {}).get("subagent_type", "")
+                    if _sub_type:
+                        # 找到第一个 pending 且 dispatch 匹配的子步骤，标记 running
+                        for _ss in _subs:
+                            _dt = _ss.get("dispatch_target") or ""
+                            if _ss.get("status") == "pending" and (_sub_type in _dt or _dt in _sub_type or _sub_type == _dt):
+                                _ss["status"] = "running"
+                                yield _emit("sub_step_progress", {"step_id": step_id, "sub_step": _ss["name"], "sub_step_id": _ss["step_id"], "time": _ts()})
+                                break
 
                 if tool_name == "Agent":
                     agent_type = tool_input.get("subagent_type", "")
@@ -1050,20 +1081,21 @@ async def drive_session_events(
                         if rc:
                             re_gate_text += rc
 
-                re_result = _parse_claude_gate(re_gate_text)
+                re_result = _parse_arbitrator_json(re_gate_text)
                 if (
-                    re_result.get("verdict") == "skipped"
+                    re_result.get("verdict") == "unknown"
                     and re_gate_tool_output.strip()
                 ):
-                    fallback = _parse_claude_gate(re_gate_tool_output)
-                    if fallback.get("verdict") != "skipped":
+                    fallback = _parse_arbitrator_json(re_gate_tool_output)
+                    if fallback.get("verdict") != "unknown":
                         re_result = fallback
-                re_passed = re_result.get("verdict") == "passed"
+                re_passed = re_result.get("verdict") == "pass" and not re_result.get("issues")
                 host_artifacts = [a.replace("/platform-artifacts", _artifacts_dir) for a in artifacts]
                 file_gate = _gate_check(work_dir, host_artifacts)
                 gate["passed"] = re_passed
                 gate["artifacts"] = file_gate["artifacts"]
-                step["gate_passed"] = re_passed
+                # 修复后通过 → 标记 "fixed"（曾失败已修复），否则保持 False
+                step["gate_passed"] = "fixed" if re_passed else False
                 step["gate_artifacts"] = file_gate["artifacts"]
 
                 # 结构化存储补齐后复查记录
@@ -1128,8 +1160,15 @@ async def drive_session_events(
                     "text": f"  Subagent 内部 Skill 捕获: {', '.join(subagent_harvest['skills'])} (扫描 {subagent_harvest['files_scanned']} 个 subagent jsonl)",
                 }
             )
+        # 子步骤派发的 agent/skill（ops-registry-invoke 等 skill 驱动插件，内部子步骤对 drive 不可见，从定义推断）
+        _sub_step_refs = []
+        for _ss in (step.get("sub_steps") or []):
+            _dt = (_ss.get("dispatch_target") or "").strip()
+            if _dt and _dt != "general":
+                _sub_step_refs.append(_dt)
         compliance = _compute_skill_compliance(
-            events, required_skills, extra_referenced=subagent_harvest["skills"]
+            events, required_skills,
+            extra_referenced=list(set(subagent_harvest["skills"] + _sub_step_refs)),
         )
         step["skill_compliance"] = compliance
 

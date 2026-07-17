@@ -51,7 +51,7 @@ const ARCH_Y_GAP = 68
 const ARCH_X_GAP = 240
 
 function ArchNode({ data }) {
-  const { label, nodeType, description, extra, highlighted, dimmed, monitorStatus, monitorDetail, runtimeStatus } = data
+  const { label, nodeType, description, extra, highlighted, dimmed, monitorStatus, monitorDetail, runtimeStatus, compliance } = data
   const s = ARCH_NODE_STYLES[nodeType] || ARCH_NODE_STYLES.step
   const ms = monitorStatus ? MONITOR_STATUS_STYLES[monitorStatus] : null
   const rt = runtimeStatus ? RUNTIME_STATUS_STYLES[runtimeStatus] : null
@@ -61,7 +61,7 @@ function ArchNode({ data }) {
   const opacity = dimmed ? 0.2 : 1
   const glow = highlighted ? `0 0 14px ${borderColor}80` : (rt && runtimeStatus === 'running' ? `0 0 12px ${borderColor}66` : (ms ? ms.glow : 'none'))
   const bw = highlighted ? 3 : 2
-  const statusLabel = rt?.label || (monitorStatus ? { compliant: '合规', partial: '部分', violation: '违规', not_detected: '未检测' }[monitorStatus] : null)
+  const statusLabel = rt?.label || (monitorStatus ? { compliant: '已正确引用', partial: '部分引用', violation: '未引用', not_detected: '待验证' }[monitorStatus] : null)
   const isRunning = runtimeStatus === 'running'
   return (
     <Tooltip title={
@@ -70,8 +70,15 @@ function ArchNode({ data }) {
         {description && <div style={{ marginTop: 4, opacity: 0.85 }}>{description}</div>}
         {extra && <div style={{ marginTop: 4 }}>{extra}</div>}
         {rt?.label && <div style={{ marginTop: 4, color: rt.border }}><b>运行状态:</b> {rt.label}</div>}
+        {compliance && (
+          <div style={{ marginTop: 4, borderTop: '1px solid #eee', paddingTop: 4 }}>
+            <div><b>Agent/Skill 引用:</b> {compliance.refs.length > 0 ? compliance.refs.slice(0,4).join(', ') : '无'}{compliance.refs.length > 4 ? ` +${compliance.refs.length - 4}` : ''}</div>
+            {compliance.miss.length > 0 && <div style={{ color: '#ff4d4f' }}>缺失: {compliance.miss.slice(0,3).join(', ')}</div>}
+            <div style={{ marginTop: 2, fontSize: 10, color: '#999' }}>预期 {compliance.exps.length} 个，引用 {compliance.refs.length} 个</div>
+          </div>
+        )}
         {monitorDetail && <div style={{ marginTop: 4, borderTop: '1px solid #eee', paddingTop: 4 }}>
-          <div><b>监控判定:</b> {monitorStatus ? { compliant: '合规', partial: '部分', violation: '违规', not_detected: '未检测' }[monitorStatus] : '-'}</div>
+          <div><b>监控判定:</b> {monitorStatus ? { compliant: '已正确引用', partial: '部分引用', violation: '未引用', not_detected: '待验证' }[monitorStatus] : '-'}</div>
           <div style={{ marginTop: 2, opacity: 0.85 }}>{monitorDetail}</div>
         </div>}
       </div>
@@ -298,7 +305,7 @@ function layoutArchGraph(def) {
   return { nodes, edges }
 }
 
-export default function PluginArchGraph({ pluginDef, monitorInsights, steps, runtimeSkillStatus }) {
+export default function PluginArchGraph({ pluginDef, monitorInsights, steps, runtimeSkillStatus, subStepProgress = {} }) {
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => layoutArchGraph(pluginDef), [pluginDef])
   const [hoveredId, setHoveredId] = useState(null)
   const leaveTimerRef = useRef(null)
@@ -398,6 +405,11 @@ export default function PluginArchGraph({ pluginDef, monitorInsights, steps, run
     for (const s of steps || []) {
       if (s.status && STEP_MAP[s.status]) m[s.step_id] = STEP_MAP[s.status]
     }
+    // sub_step：从 subStepProgress 映射子步骤节点 runtime（[SUBSTEP:xxx] 标记推送的进度）
+    for (const [subName, status] of Object.entries(subStepProgress || {})) {
+      const sid = "step_" + subName.replace(/[^\w]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "")
+      if (status === 'running') m[sid] = 'running'
+    }
     // agent：若其下属任一 step 在 running 则 running，否则若都完成则 passed
     for (const agent of pluginDef.agent_defs || []) {
       const aid = `agent_${agent.name}`
@@ -418,12 +430,42 @@ export default function PluginArchGraph({ pluginDef, monitorInsights, steps, run
       }
     }
     return m
-  }, [runtimeSkillStatus, steps, pluginDef])
+  }, [runtimeSkillStatus, steps, pluginDef, subStepProgress])
+
+  // 从 steps 运行时数据中提取耗时和 token（展示在 phase 节点上）
+  const stepTimingMap = useMemo(() => {
+    const m = {}
+    for (const s of steps || []) {
+      if (s.duration_ms > 0 || s.token_usage?.input) {
+        const dur = s.duration_ms > 0 ? `${(s.duration_ms / 1000).toFixed(0)}s` : ''
+        const tok = s.token_usage?.input ? `${((s.token_usage.input + (s.token_usage.output || 0)) / 1000).toFixed(0)}k` : ''
+        m[s.step_id] = [dur, tok].filter(Boolean).join(' · ')
+      }
+    }
+    return m
+  }, [steps])
+
+  // 每个 phase 的 skill compliance 状态（用于 tooltip 展示 agent/skill 引用）
+  const stepComplianceMap = useMemo(() => {
+    const m = {}
+    for (const s of steps || []) {
+      const sc = s.skill_compliance
+      if (sc) {
+        const refs = sc.skills_referenced || []
+        const exps = sc.skills_expected || []
+        const miss = sc.skills_missing || []
+        m[s.step_id] = { refs, exps, miss, score: sc.score }
+      }
+    }
+    return m
+  }, [steps])
 
   // 注入 highlighted/dimmed/monitorStatus/runtimeStatus 到节点 data
   const nodes = useMemo(() => rawNodes.map(n => {
     const mon = nodeMonitorMap[n.id]
     const rt = nodeRuntimeMap[n.id] || null
+    const timing = stepTimingMap[n.id] || ''
+    const comp = stepComplianceMap[n.id]
     return {
       ...n,
       data: {
@@ -433,9 +475,11 @@ export default function PluginArchGraph({ pluginDef, monitorInsights, steps, run
         monitorStatus: mon?.status || null,
         monitorDetail: mon?.detail || null,
         runtimeStatus: rt,
+        extra: n.data.extra ? `${n.data.extra} | ${timing}` : timing,
+        compliance: comp || null,
       },
     }
-  }), [rawNodes, hoveredId, highlightedNodes, nodeMonitorMap, nodeRuntimeMap])
+  }), [rawNodes, hoveredId, highlightedNodes, nodeMonitorMap, nodeRuntimeMap, stepTimingMap, stepComplianceMap])
 
   // 高亮边、暗化非关联边；runtime running/passed 的下游边也流动起来
   const edges = useMemo(() => rawEdges.map(e => {
@@ -475,7 +519,7 @@ export default function PluginArchGraph({ pluginDef, monitorInsights, steps, run
         {Object.keys(monitorInsights || {}).length > 0 && (
           <>
             <div style={{ width: 12, borderTop: '1px solid #eee', margin: '0 4px' }} />
-            {[{l:'合规',c:'#52c41a',b:'#f6ffed'},{l:'部分',c:'#faad14',b:'#fffbe6'},{l:'违规',c:'#ff4d4f',b:'#fff2f0'},{l:'未检测',c:'#d9d9d9',b:'#fafafa'}].map(it => (
+            {[{l:'已正确引用',c:'#52c41a',b:'#f6ffed'},{l:'部分引用',c:'#faad14',b:'#fffbe6'},{l:'未引用',c:'#ff4d4f',b:'#fff2f0'},{l:'待验证',c:'#d9d9d9',b:'#fafafa'}].map(it => (
               <div key={it.l} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                 <div style={{ width: 10, height: 10, borderRadius: 2, border: `2px solid ${it.c}`, background: it.b }} />
                 <Text style={{ fontSize: 10, color: '#666' }}>{it.l}</Text>

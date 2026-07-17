@@ -50,10 +50,33 @@ def register_lifecycle_routes(router: APIRouter, db=None):
             "task_already_running": not started,
         }
 
+    @router.post("/cannbot/workflow-v2/sessions/{session_id}/trigger-pr")
+    async def trigger_pr(session_id: str):
+        """手动触发提 PR 步骤"""
+        if not db:
+            return {"error": "数据库未连接"}
+        session = await db.get_workflow_sim_v2_session(session_id)
+        if not session:
+            return {"error": "会话未找到"}
+        for s in session.get("steps", []):
+            if s.get("step_category") == "create_pr":
+                s["status"] = "manual_trigger"
+        await db.update_workflow_sim_v2_session(session_id, {"steps": session.get("steps", [])})
+        # 重新启动后台任务
+        from .workflow_sim_v2_drive import ensure_session_task_running
+        ensure_session_task_running(session_id, session, db)
+        return {"session_id": session_id, "triggered": True}
+
     @router.post("/cannbot/workflow-v2/sessions/{session_id}/stop")
     async def stop_session(session_id: str):
         """停止仿真：杀进程 + 标记状态"""
         claude_driver.stop(session_id)
+        # 顺带杀掉 Docker 容器（容器内 claude 不受宿主机进程管理）
+        _ctn = f"cann-sim-{session_id}"
+        try:
+            await asyncio.create_subprocess_exec("docker", "rm", "-f", _ctn).communicate()
+        except Exception:
+            pass
         if db:
             session = await db.get_workflow_sim_v2_session(session_id)
             if session:

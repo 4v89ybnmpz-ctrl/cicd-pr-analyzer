@@ -164,6 +164,16 @@ def register_sessions_routes(router: APIRouter, db=None):
                     "output_artifacts": artifacts,
                     "dispatch_target": step.dispatch_target,
                     "fallback": step.fallback,
+                    "sub_steps": [
+                        {
+                            "step_id": ss.step_id,
+                            "name": ss.name,
+                            "dispatch_target": ss.dispatch_target,
+                            "output_artifacts": ss.output_artifacts,
+                            "status": "pending",
+                        }
+                        for ss in (step.sub_steps or [])
+                    ],
                     "output": "",
                     "events": [],
                     "duration_ms": 0,
@@ -283,10 +293,10 @@ def register_sessions_routes(router: APIRouter, db=None):
         return {"active": running[0] if running else None, "sessions": running}
 
     @router.get("/cannbot/workflow-v2/sessions/{session_id}")
-    async def get_session(session_id: str):
-        """获取 V2 仿真会话详情"""
+    async def get_session(session_id: str, full_logs: bool = False):
+        """获取 V2 仿真会话详情（full_logs=1 时返回全部日志，否则只返最后 100 条）"""
         if db:
-            session = await db.get_workflow_sim_v2_session(session_id)
+            session = await db.get_workflow_sim_v2_session(session_id, full_logs=full_logs)
             if session:
                 return _fill_legacy_logs(session)
         return {"error": "会话未找到"}

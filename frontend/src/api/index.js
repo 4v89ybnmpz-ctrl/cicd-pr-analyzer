@@ -385,8 +385,8 @@ export const createWorkflowSimV2Session = (data) =>
   api.post('/cannbot/workflow-v2/sessions', data)
 export const getWorkflowSimV2Sessions = (params) =>
   api.get('/cannbot/workflow-v2/sessions', { params })
-export const getWorkflowSimV2Session = (id) =>
-  api.get(`/cannbot/workflow-v2/sessions/${id}`)
+export const getWorkflowSimV2Session = (id, fullLogs = false) =>
+  api.get(`/cannbot/workflow-v2/sessions/${id}`, { params: fullLogs ? { full_logs: 1 } : {} })
 export const startWorkflowSimV2Session = (id, gitcodeToken = '') =>
   api.post(`/cannbot/workflow-v2/sessions/${id}/start`, null, {
     timeout: 300000,
@@ -447,6 +447,8 @@ export const exportWorkflowV2Session = (id) =>
   api.get(`/cannbot/workflow-v2/sessions/${id}/export`, { responseType: 'blob', timeout: 30000 })
 export const getArbitratorReports = (sessionId) =>
   api.get(`/cannbot/workflow-v2/sessions/${sessionId}/arbitrator-reports`, { timeout: 15000 })
+export const triggerPR = (sessionId) =>
+  api.post(`/cannbot/workflow-v2/sessions/${sessionId}/trigger-pr`, {}, { timeout: 30000 })
 
 // 插件断点诊断（按 plugin_id 跨 session 聚合病灶）
 export const getBreakpointDiagnosis = (pluginId, limit = 50) =>

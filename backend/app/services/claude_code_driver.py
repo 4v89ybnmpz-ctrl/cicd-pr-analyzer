@@ -396,12 +396,13 @@ class ClaudeCodeDriver:
 
     @staticmethod
     def extract_skill_references(events: List[dict]) -> List[str]:
-        """从事件流中提取引用的 skill。
+        """从事件流中提取引用的 skill / subagent。
 
-        覆盖两种调用方式：
-        1. Skill 工具（slash command）调用：tool_use.name == "Skill"，input.skill 给出 skill 名。
-        2. Read/Glob/Grep 命中 .claude/skills/ 或 .claude/agents/ 路径：兜底覆盖 agent 自动
-           加载/读取 SKILL.md 的场景。
+        覆盖调用方式：
+        1. Skill 工具（slash command）：tool_use.name == "Skill"，input.skill 给出 skill 名。
+        2. Task 工具（ops-registry-invoke 派发子步骤）：input.subagent_type 给出 agent 名。
+        3. Agent 工具：input.subagent_type 给出 agent 名。
+        4. Read/Glob/Grep 命中 .claude/skills/ 或 .claude/agents/ 路径。
         """
         referenced = set()
         for ev in events:
@@ -411,14 +412,18 @@ class ClaudeCodeDriver:
             inp = ev.get("input") or {}
 
             if name == "Skill":
-                # slash command 调用，如 input.skill = "ascendc-tiling-design"
-                # 或 "ops-direct-invoke-skills:ascendc-tiling-design"
                 sk = (inp.get("skill") or "").strip().lstrip("/")
                 if ":" in sk:
                     sk = sk.rsplit(":", 1)[-1].strip()
                 if sk:
                     referenced.add(sk)
                 continue
+
+            if name in ("Task", "Agent"):
+                # ops-registry-invoke 用 Task 派发子步骤给 subagent
+                sub = (inp.get("subagent_type") or "").strip()
+                if sub and sub != "general":
+                    referenced.add(sub)
 
             if name in ("Read", "Glob", "Grep"):
                 file_path = inp.get("file_path", inp.get("pattern", ""))

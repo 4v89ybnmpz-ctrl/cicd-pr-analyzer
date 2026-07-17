@@ -4560,7 +4560,11 @@ class DatabaseService:
             return []
         try:
             cursor = self.db["workflow_sim_v2_sessions"].find(
-                {}, {"_id": 0}
+                {},
+                {"_id": 0, "steps": 0, "breakpoint_alerts": 0,
+                 "terminal_log": 0, "simulation_log": 0, "program_log": 0,
+                 "fix_log": 0, "gate_checks": 0, "jsonl_log": 0,
+                 "pipeline": 0, "npu_test": 0}
             ).sort("created_at", -1).limit(limit)
             return await cursor.to_list(length=limit)
         except Exception as e:
@@ -4588,16 +4592,23 @@ class DatabaseService:
             logger.error(f"按 plugin_id 查询 V2 仿真会话失败 [{plugin_id}]: {e}")
             return []
 
-    async def get_workflow_sim_v2_session(self, session_id: str) -> Optional[dict]:
-        """按 session_id 获取 V2 仿真会话"""
+    async def get_workflow_sim_v2_session(self, session_id: str, full_logs: bool = False) -> Optional[dict]:
+        """按 session_id 获取 V2 仿真会话（full_logs=False 时日志字段只返最后 100 条）"""
         if self.db is None:
             await self._ensure_connected()
         if self.db is None:
             return None
         try:
-            return await self.db["workflow_sim_v2_sessions"].find_one(
+            doc = await self.db["workflow_sim_v2_sessions"].find_one(
                 {"session_id": session_id}, {"_id": 0},
             )
+            if doc and not full_logs:
+                for field in ("terminal_log", "simulation_log", "program_log", "fix_log"):
+                    arr = doc.get(field)
+                    if isinstance(arr, list) and len(arr) > 100:
+                        doc[field] = arr[-100:]
+                        doc.setdefault("_log_truncated", {})[field] = len(arr)
+            return doc
         except Exception as e:
             logger.error(f"查询 V2 仿真会话失败 [{session_id}]: {e}")
             return None

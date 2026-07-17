@@ -497,27 +497,42 @@ def parse_registry_workflow(task_prompts_path: str) -> List[WorkflowStep]:
         m = re.match(r"^\s*(\d)", name)
         pnum = m.group(1) if m else "?"
         phases.setdefault(pnum, []).append((name, dispatch))
-    # 各阶段的产出物，来自 data-flow.md 文件路径速查表（{operator_name} 占位符由 sessions.py 替换）
+    # 各阶段的必用 Skill/Agent（用于 skill 遵从度检测，含 skill 名和 agent 名）
+    PHASE_REQUIRED_SKILLS = {
+        "1": ["ops-registry-invoke-workflow", "ascendc-registry-invoke-template", "ascendc-docs-search",
+              "ascendc-ops-architect", "ascendc-ops-tester"],
+        "2": ["ops-registry-invoke-workflow", "ascendc-registry-invoke-template",
+              "ascendc-ops-developer", "ascendc-ops-tester", "ascendc-ut-develop"],
+        "3": ["ops-registry-invoke-workflow", "ops-precision-standard", "ops-profiling",
+              "ascendc-ops-tester", "ascendc-ops-developer"],
+        "4": ["ops-registry-invoke-workflow", "ascendc-code-review", "ascendc-docs-gen"],
+    }
+    # 各阶段产出物，来自 data-flow.md 文件路径速查表。{} 占位符由 sessions.py 替换
+    # phase 级别只检查"阶段完成后一定存在"的关键产出物；子步骤级别在 SUB_STEP_ARTIFACTS 中定义
     PHASE_ARTIFACTS = {
-        "1": [
-            "operators/{operator_name}/docs/spec.yaml",
-            "operators/{operator_name}/docs/DESIGN.md",
-            "operators/{operator_name}/docs/DESIGN_REVIEW.md",
-            "operators/{operator_name}/docs/TEST.md",
-            "operators/{operator_name}/docs/LOG.md",
-        ],
-        "2": [
-            "operators/{operator_name}/op_kernel/",
-            "operators/{operator_name}/op_host/",
-            "operators/{operator_name}/tests/reports/iter",
-        ],
-        "3": [
-            "operators/{operator_name}/docs/precision-report.md",
-        ],
-        "4": [
-            "operators/{operator_name}/README.md",
-            "operators/{operator_name}/docs/LOG.md",
-        ],
+        "1": ["operators/{operator_name}/docs/LOG.md"],
+        "2": ["operators/{operator_name}/tests/reports/iter"],
+        "3": ["operators/{operator_name}/docs/precision-report.md"],
+        "4": ["operators/{operator_name}/README.md"],
+    }
+    # 每个子步骤的关键产出物（来自 data-flow.md 的「文件路径速查表」和阶段表格）
+    SUB_STEP_ARTIFACTS = {
+        "1.1 开发准备": ["docs/LOG.md"],
+        "1.2 需求分析": ["docs/REQUIREMENTS.md", "docs/aclnn{OperatorName}.md"],
+        "1.2.5 spec 生成": ["docs/spec.yaml"],
+        "1.3 方案设计": ["docs/DESIGN.md"],
+        "1.3R 方案评审": ["docs/DESIGN_REVIEW.md"],
+        "1.4 测试设计": ["docs/TEST.md"],
+        "1.4R 测试设计评审": ["docs/TEST_REVIEW.md"],
+        "2-迭代一-A1-Main": ["op_kernel/"],
+        "2-迭代二-A1-P": ["probe/RESULT.md"],
+        "2-汇合验证": ["tests/reports/iter"],
+        "2-测试工程师验收": ["tests/reports/iter"],
+        "3.1 精度验收": ["docs/precision-report.md"],
+        "3.2 性能验收": ["docs/performance-report.md"],
+        "4.1 文档与示例": ["README.md", "examples/"],
+        "4.2 代码检视": ["docs/"],
+        "4.3 开发总结": ["docs/LOG.md"],
     }
     steps: List[WorkflowStep] = []
     for pnum in sorted(phases.keys()):
@@ -526,6 +541,10 @@ def parse_registry_workflow(task_prompts_path: str) -> List[WorkflowStep]:
                 step_id="step_" + re.sub(r"[^\w]", "_", sname).strip("_"),
                 name=sname,
                 dispatch_target=dispatch,
+                output_artifacts=[
+                    "operators/{operator_name}/" + a
+                    for a in SUB_STEP_ARTIFACTS.get(sname, [])
+                ],
             )
             for sname, dispatch in phases[pnum]
         ]
@@ -535,6 +554,7 @@ def parse_registry_workflow(task_prompts_path: str) -> List[WorkflowStep]:
                 name=PHASE_NAMES.get(pnum, f"阶段{pnum}"),
                 sub_steps=sub_steps,
                 output_artifacts=PHASE_ARTIFACTS.get(pnum, []),
+                required_skills=PHASE_REQUIRED_SKILLS.get(pnum, []),
             )
         )
     return steps

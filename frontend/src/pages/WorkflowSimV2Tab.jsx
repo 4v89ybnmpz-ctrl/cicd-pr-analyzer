@@ -28,7 +28,7 @@ import {
   listWorkflowV2Branches, createWorkflowV2Branch, switchWorkflowV2Branch,
   installCannbotScenario, checkCannbotInstall, checkCannbotInstallWorkdir,
   exportWorkflowV2Session, triggerPipelineSSE,
-  cancelPipeline,
+  cancelPipeline, triggerPR,
   streamWorkflowJsonl,
   getWorkflowJsonlHistory,
   getWorkflowDefinition,
@@ -100,6 +100,7 @@ export default function WorkflowSimV2Tab() {
 
   const [session, setSession] = useState(null)
   const [steps, setSteps] = useState([])
+  const [subStepProgress, setSubStepProgress] = useState({})
   const [alerts, setAlerts] = useState([])
   const [monitorInsights, setMonitorInsights] = useState({})
   // skill 运行时实时状态：Map<skillName, Map<stepId, status>>
@@ -115,7 +116,7 @@ export default function WorkflowSimV2Tab() {
   const [jsonlActiveFile, setJsonlActiveFile] = useState('')
   const [jsonlWaiting, setJsonlWaiting] = useState(false)
   const [showTerminal, setShowTerminal] = useState(true)
-  const [showJsonl, setShowJsonl] = useState(true)
+  const [showJsonl, setShowJsonl] = useState(false)
   const [fixLog, setFixLog] = useState([])
   const [showFixLog, setShowFixLog] = useState(true)
   const [logs, setLogs] = useState([])
@@ -134,7 +135,7 @@ export default function WorkflowSimV2Tab() {
   const [selectedDiffFile, setSelectedDiffFile] = useState(null)
   const [diffContent, setDiffContent] = useState(null)
   const [diffLoading, setDiffLoading] = useState(false)
-  const [showDiffFiles, setShowDiffFiles] = useState(true)
+  const [showDiffFiles, setShowDiffFiles] = useState(false)
   const npuClaudeEsRef = useRef(null)
   const npuClaudeEndRef = useRef(null)
   const [simulating, setSimulating] = useState(false)
@@ -310,7 +311,7 @@ export default function WorkflowSimV2Tab() {
       .finally(() => setHistoryLoading(false))
   }, [])
 
-  useEffect(() => { loadHistory() }, [loadHistory])
+  useEffect(() => { loadHistory(); const t = setInterval(loadHistory, 10000); return () => clearInterval(t) }, [loadHistory])
 
   // 自动滚动终端（仅当用户已在底部时；只滚容器内部，不带动外层页面）
   useEffect(() => {
@@ -391,6 +392,7 @@ export default function WorkflowSimV2Tab() {
         runtimeSkillStatus: {}, journeyData: [], npuTest: null,
         npuLogs: [], npuClaudeLogs: [], session: null,
         diffFiles: [],
+        sub_step_progress: {},
       }
       sessionCacheRef.current.set(sid, s)
     }
@@ -495,6 +497,7 @@ export default function WorkflowSimV2Tab() {
     const setMonitorInsightsS = writerFor(sid, 'monitorInsights', setMonitorInsights)
     const setRuntimeSkillStatusS = writerFor(sid, 'runtimeSkillStatus', setRuntimeSkillStatus)
     const setFixRoundsS = writerFor(sid, 'fixRounds', setFixRounds)
+    const setSubStepProgressS = writerFor(sid, 'sub_step_progress', setSubStepProgress)
 
     // sid 版本的 addLog / setSkillStatus（写 slice.logs / slice.runtimeSkillStatus）
     const addLogS = (type, text) => {
@@ -559,6 +562,7 @@ export default function WorkflowSimV2Tab() {
       const data = JSON.parse(e.data)
       if (isViewing()) setSelectedStepIndex(data.step_index)
       addLogS('info', `[${data.step_index + 1}/${data.total}] ${data.step_name}`)
+      setStepsS(prev => prev.map(s => s.step_id === data.step_id ? { ...s, status: 'running', started_at: new Date().toISOString() } : s))
       const step = getSlice(sid)?.steps?.find(s => s.step_id === data.step_id)
       for (const sk of step?.required_skills || []) {
         setSkillStatusS(sk, data.step_id, 'expected', true)
@@ -642,6 +646,14 @@ export default function WorkflowSimV2Tab() {
       addLogS('warn', `[${data.severity}] ${data.message}`)
     })
 
+    // 子步骤进度标记 [SUBSTEP:xxx]
+    es.addEventListener('sub_step_progress', (e) => {
+      const data = JSON.parse(e.data)
+      if (data.step_id && data.sub_step) {
+        setSubStepProgressS(prev => ({ ...prev, [data.sub_step]: 'running' }))
+      }
+    })
+
     es.addEventListener('program_log', (e) => {
       const data = JSON.parse(e.data)
       setProgLogsS(prev => [...prev.slice(-999), data])
@@ -695,7 +707,9 @@ export default function WorkflowSimV2Tab() {
       }
       const logType = data.error_detail ? 'warn' : 'success'
       const errInfo = data.error_detail ? ` [${data.error_detail.category}]` : ''
-      addLogS(logType, `${data.step_id} 完成 (${data.duration_ms}ms, 门禁: ${data.gate_passed === true ? '通过' : data.gate_passed === null ? '跳过' : '未通过'})${errInfo}`)
+      const durSec = data.duration_ms / 1000
+      const durStr = data.duration_ms >= 300000 ? `${(durSec / 60).toFixed(1)}min` : `${Math.round(durSec)}s`
+      addLogS(logType, `${data.step_id} 完成 (${durStr}, 门禁: ${data.gate_passed === true ? '通过' : data.gate_passed === 'fixed' ? '失败已修复' : data.gate_passed === null ? '跳过' : '未通过'})${errInfo}`)
     })
 
     // --- Pipeline SSE 事件 ---
@@ -892,8 +906,18 @@ export default function WorkflowSimV2Tab() {
     loadHistory()
   }, [session, addLog, loadHistory, closeSessionStreams, getSlice, projectSession])
 
-  // 加载历史详情
+  // 加载历史详情（已缓存的直接切换，不重复请求）
   const loadHistoryDetail = useCallback(async (sid) => {
+    const cached = getSlice(sid)
+    if (cached?.steps?.length > 0) {
+      setViewing(sid)
+      setViewingHistoryId(sid)
+      projectSession(sid)
+      if (cached.session?.plugin_id && cached.session.plugin_id !== selectedPlugin) {
+        setSelectedPlugin(cached.session.plugin_id)
+      }
+      return
+    }
     try {
       const res = await getWorkflowSimV2Session(sid)
       const data = res.data
@@ -934,6 +958,7 @@ export default function WorkflowSimV2Tab() {
         npuLogs: data.npu_test?.logs || [],
         terminalLines: data.terminal_log || [],
         logs: data.simulation_log || [],
+        _logTruncated: data._log_truncated || null,
         monitorInsights: restoredMonitor,
         runtimeSkillStatus: {},
         journeyData: [],
@@ -1187,7 +1212,7 @@ export default function WorkflowSimV2Tab() {
         perfStepName: perfStep?.step_name || null,
       },
       {
-        key: 'upload', name: '上库', icon: <CloudUploadOutlined />,
+        key: 'upload', name: '提交推送', icon: <CloudUploadOutlined />,
         status: mapToStepsStatus(find(s => s.step_category === 'upload_repo')?.status || 'pending'),
         sub: [find(s => s.step_category === 'upload_repo')].filter(Boolean),
       },
@@ -1246,10 +1271,12 @@ export default function WorkflowSimV2Tab() {
                     onClick={() => restoreSession(h)}
                     style={{
                       padding: '8px 12px', marginBottom: 2, cursor: 'pointer',
-                      background: viewingSessionId === h.session_id && !viewingHistoryId ? '#f0f5ff'
-                        : viewingHistoryId === h.session_id ? '#e6f7ff' : '#f6ffed',
+                      background: viewingSessionId === h.session_id && !viewingHistoryId ? '#bae0ff'
+                        : viewingHistoryId === h.session_id ? '#bae0ff' : '#f6ffed',
                       borderLeft: viewingSessionId === h.session_id && !viewingHistoryId
-                        ? '3px solid #1677ff' : '3px solid #52c41a',
+                        ? '4px solid #1677ff'
+                        : viewingHistoryId === h.session_id ? '4px solid #1677ff' : '4px solid #52c41a',
+                      fontWeight: (viewingSessionId === h.session_id && !viewingHistoryId) || viewingHistoryId === h.session_id ? 500 : 'normal',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1300,10 +1327,11 @@ export default function WorkflowSimV2Tab() {
                       onClick={() => loadHistoryDetail(h.session_id)}
                       style={{
                         padding: '8px 12px', marginBottom: 2, cursor: 'pointer',
-                        background: viewingHistoryId === h.session_id ? '#e6f7ff' : 'transparent',
+                        background: viewingHistoryId === h.session_id ? '#bae0ff' : 'transparent',
                         borderLeft: viewingHistoryId === h.session_id
-                          ? '3px solid #1677ff'
-                          : `3px solid ${STATUS_COLOR[h.status] || '#d9d9d9'}`,
+                          ? '4px solid #1677ff'
+                          : `4px solid ${STATUS_COLOR[h.status] || '#d9d9d9'}`,
+                        fontWeight: viewingHistoryId === h.session_id ? 500 : 'normal',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1383,6 +1411,17 @@ export default function WorkflowSimV2Tab() {
             <Space>
               {simulating && (
                 <Button danger size="small" icon={<StopOutlined />} onClick={handleStop}>停止</Button>
+              )}
+              {session?.steps?.some(s => s.step_category === 'create_pr' && s.status === 'pending') &&
+               !simulating && (session.status === 'completed' || session.status === 'stopped') && (
+                <Button type="primary" size="small" icon={<BranchesOutlined />} onClick={async () => {
+                  try {
+                    await triggerPR(session.session_id)
+                    message.success('已触发提 PR')
+                  } catch (e) { message.error(e._friendlyMsg || '触发失败') }
+                }}>
+                  手动提 PR
+                </Button>
               )}
               <Button size="small" icon={<AuditOutlined />} onClick={() => setArbitratorPanelOpen(true)}>
                 裁判
@@ -1535,6 +1574,21 @@ export default function WorkflowSimV2Tab() {
             </Space>
           }
           extra={<Space size={4}>
+            {!simulating && session?._log_truncated?.terminal_log && (
+              <Button size="small" type="link" style={{ fontSize: 10, padding: 0 }}
+                onClick={async () => {
+                  try {
+                    const res = await getWorkflowSimV2Session(session.session_id, true)
+                    if (res.data?.terminal_log) {
+                      const sid = session.session_id
+                      const slice = getSlice(sid)
+                      if (slice) { slice.terminalLines = res.data.terminal_log; slice._logTruncated = null }
+                      if (viewingSessionIdRef.current === sid) setTerminalLines(res.data.terminal_log)
+                    }
+                  } catch {}
+                }}
+              >加载全部</Button>
+            )}
             <Button size="small" type="text" icon={showTerminal ? <DownOutlined /> : <UpOutlined />} onClick={() => setShowTerminal(v => !v)} />
             {!simulating && terminalLines.length > 0 && (
               <Button size="small" icon={<DownloadOutlined />} onClick={() => {
@@ -1588,7 +1642,38 @@ export default function WorkflowSimV2Tab() {
         <Card size="small" title={<Space><ApartmentOutlined /> Skill 实时流程图</Space>} extra={
           <Button size="small" type="link" onClick={() => setPluginDrawerOpen(true)}>全屏查看</Button>
         } style={{ marginBottom: 12 }}>
-          <PluginArchGraph pluginDef={pluginDef} monitorInsights={monitorInsights} steps={steps} runtimeSkillStatus={runtimeSkillStatus} />
+          <PluginArchGraph pluginDef={pluginDef} monitorInsights={monitorInsights} steps={steps} runtimeSkillStatus={runtimeSkillStatus} subStepProgress={subStepProgress} />
+        </Card>
+      )}
+
+      {/* 阶段耗时与 token 统计 */}
+      {session && steps.filter(s => s.sub_steps?.length > 0).length > 0 && (
+        <Card size="small" title={<Space><ClockCircleOutlined /> 阶段耗时 & Token</Space>} style={{ marginBottom: 12 }}>
+          <Table
+            dataSource={steps.filter(s => s.sub_steps?.length > 0)}
+            rowKey="step_id"
+            size="small"
+            pagination={false}
+            columns={[
+              { title: '阶段', dataIndex: 'step_name', width: 140, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+              { title: '状态', dataIndex: 'status', width: 80,
+                render: v => <Tag color={v === 'completed' ? 'success' : v === 'running' ? 'processing' : v === 'failed' ? 'error' : 'default'} style={{ fontSize: 10 }}>{v === 'completed' ? '已完成' : v === 'running' ? '运行中' : v === 'failed' ? '失败' : v}</Tag>
+              },
+              { title: '子步骤', width: 60, render: (_, r) => <Text style={{ fontSize: 11 }}>{r.sub_steps?.length || 0}</Text> },
+              { title: '耗时', dataIndex: 'duration_ms', width: 90,
+                render: v => <Text style={{ fontSize: 11 }}>{v > 0 ? (v >= 300000 ? `${(v / 60000).toFixed(1)}min` : `${Math.round(v / 1000)}s`) : '-'}</Text>
+              },
+              { title: 'Token (input)', width: 90,
+                render: (_, r) => <Text style={{ fontSize: 11 }}>{(r.token_usage?.input || 0).toLocaleString()}</Text>
+              },
+              { title: 'Token (output)', width: 90,
+                render: (_, r) => <Text style={{ fontSize: 11 }}>{(r.token_usage?.output || 0).toLocaleString()}</Text>
+              },
+              { title: '门禁', dataIndex: 'gate_passed', width: 80,
+                render: v => v === true ? <Tag color="success" style={{ fontSize: 10 }}>通过</Tag> : v === 'fixed' ? <Tag color="gold" style={{ fontSize: 10 }}>失败已修复</Tag> : v === false ? <Tag color="error" style={{ fontSize: 10 }}>未通过</Tag> : <Tag style={{ fontSize: 10 }}>跳过</Tag>
+              },
+            ]}
+          />
         </Card>
       )}
 
@@ -1645,7 +1730,11 @@ export default function WorkflowSimV2Tab() {
                           if (s.status === 'skipped') stepTag = <Tag style={{ fontSize: 9, marginLeft: 4, color: '#999' }}>跳过</Tag>
                           else if (s.gate_passed === false) stepTag = <Tag color="red" style={{ fontSize: 9, marginLeft: 4 }}>门禁</Tag>
                           else if (s.status === 'failed') stepTag = <Tag color="red" style={{ fontSize: 9, marginLeft: 4 }}>失败</Tag>
-                          else if (s.skill_compliance) stepTag = <Tag color={s.skill_compliance.score >= 0.8 ? 'green' : s.skill_compliance.score >= 0.5 ? 'orange' : 'red'} style={{ fontSize: 9, marginLeft: 4 }}>{Math.round(s.skill_compliance.score * 100)}%</Tag>
+                          else if (s.skill_compliance) {
+                            const ref = (s.skill_compliance.skills_referenced || []).length
+                            const exp = (s.skill_compliance.skills_expected || []).length
+                            stepTag = <Tag color={exp === 0 ? 'default' : ref >= exp ? 'green' : ref > 0 ? 'orange' : 'red'} style={{ fontSize: 9, marginLeft: 4 }}>{exp ? `${ref}/${exp}` : '—'}</Tag>
+                          }
                           // 是否在"性能验收"步骤下挂 NPU 性能测试（融入 Ant Steps 的 description 区，自然竖向对齐）
                           const isPerfAnchor = node.npuStep && node.perfStepId && s.step_id === node.perfStepId
                           let npuDesc = null
@@ -1792,8 +1881,8 @@ export default function WorkflowSimV2Tab() {
             <span>{selectedStep.step_name}</span>
             <Tag color={STATUS_COLOR[selectedStep.status]}>{selectedStep.status}</Tag>
             {selectedStep.gate_passed !== null && (
-              <Tag color={selectedStep.gate_passed ? 'green' : 'red'}>
-                门禁{selectedStep.gate_passed === true ? '通过' : selectedStep.gate_passed === null ? '跳过' : '未通过'}
+              <Tag color={selectedStep.gate_passed === true ? 'green' : selectedStep.gate_passed === 'fixed' ? 'gold' : selectedStep.gate_passed === null ? 'default' : 'red'}>
+                门禁{selectedStep.gate_passed === true ? '通过' : selectedStep.gate_passed === 'fixed' ? '失败已修复' : selectedStep.gate_passed === null ? '跳过' : '未通过'}
                 {selectedStep.gate_ai_override && ' (AI)'}
               </Tag>
             )}
@@ -1803,7 +1892,7 @@ export default function WorkflowSimV2Tab() {
               </Tag>
             )}
             {selectedStep.duration_ms > 0 && (
-              <Tag>{selectedStep.duration_ms}ms</Tag>
+              <Tag>{selectedStep.duration_ms >= 300000 ? `${(selectedStep.duration_ms / 60000).toFixed(1)}min` : `${Math.round(selectedStep.duration_ms / 1000)}s`}</Tag>
             )}
             {selectedStep.process && (
               <Tag color={selectedStep.process.alive ? 'green' : 'default'} style={{ fontSize: 10 }}>
@@ -1938,7 +2027,7 @@ export default function WorkflowSimV2Tab() {
             <div style={{ marginBottom: 8 }}>
               <Tooltip title={`门禁 = 步骤完成后检查预期的产出物文件是否已生成（如 DESIGN.md、op_kernel 代码等）。通过表示所有预期文件都已创建。`}>
                 <Text strong style={{ fontSize: 12 }}>
-                  门禁检查: {selectedStep.gate_passed === true ? '✓ 通过' : selectedStep.gate_passed === null ? '— 跳过' : '✗ 未通过'}
+                  门禁检查: {selectedStep.gate_passed === true ? '✓ 通过' : selectedStep.gate_passed === 'fixed' ? '⚠ 失败已修复' : selectedStep.gate_passed === null ? '— 跳过' : '✗ 未通过'}
                   <span style={{ color: '#999', fontWeight: 400, marginLeft: 4, fontSize: 10 }}>(检查步骤产出物文件是否存在)</span>
                 </Text>
               </Tooltip>
@@ -1955,7 +2044,7 @@ export default function WorkflowSimV2Tab() {
             <div style={{ marginBottom: 8 }}>
               <Tooltip title={`门禁 = 步骤完成后检查预期的产出物文件是否已生成。此步骤未定义产出物，默认通过。`}>
                 <Text strong style={{ fontSize: 12 }}>
-                  门禁检查: {selectedStep.gate_passed === true ? '✓ 通过' : selectedStep.gate_passed === null ? '— 跳过' : '✗ 未通过'}
+                  门禁检查: {selectedStep.gate_passed === true ? '✓ 通过' : selectedStep.gate_passed === 'fixed' ? '⚠ 失败已修复' : selectedStep.gate_passed === null ? '— 跳过' : '✗ 未通过'}
                   <span style={{ color: '#999', fontWeight: 400, marginLeft: 4, fontSize: 10 }}>(未定义产出物，默认通过)</span>
                 </Text>
               </Tooltip>
@@ -1966,7 +2055,7 @@ export default function WorkflowSimV2Tab() {
             <div style={{ marginBottom: 8 }}>
               <Tooltip title={`计算方式: Claude 执行期间通过 Read/Glob/Grep 引用的 Skill 文件数 / 步骤要求的 Skill 总数。检测 Claude 是否读取了安装的 Skills 指南。`}>
                 <Text strong style={{ fontSize: 12 }}>
-                  Skill 遵从度: {Math.round((selectedStep.skill_compliance.score || 0) * 100)}%
+                  Skill 引用: {selectedStep.skill_compliance.skills_expected?.length ? `${(selectedStep.skill_compliance.skills_referenced || []).length}/${selectedStep.skill_compliance.skills_expected.length}` : '—'}
                   <span style={{ color: '#999', fontWeight: 400, marginLeft: 4, fontSize: 10 }}>(引用 Skill 数 / 要求总数)</span>
                 </Text>
               </Tooltip>
@@ -2002,6 +2091,31 @@ export default function WorkflowSimV2Tab() {
           {/* 监控 LLM 语义遵从度 */}
           {(() => {
             const mi = monitorInsights[selectedStep.step_id]
+            // ops-registry-invoke 等含 sub_steps 的插件，用 skill_compliance 替代 monitorInsights
+            if (selectedPlugin === 'ops-registry-invoke') {
+              const sc = selectedStep.skill_compliance
+              if (!sc) return null
+              const refCount = (sc.skills_referenced || []).length
+              const expCount = (sc.skills_expected || []).length
+              const score = expCount > 0 ? Math.round(refCount / expCount * 100) : 100
+              const scoreColor = score >= 80 ? '#52c41a' : score >= 50 ? '#faad14' : '#ff4d4f'
+              return (
+                <div style={{ marginBottom: 8, padding: 8, background: '#fafafa', borderRadius: 6, border: '1px solid #f0f0f0' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <SafetyCertificateOutlined style={{ color: scoreColor }} />
+                    <Text strong style={{ fontSize: 12 }}>Skill 引用: {refCount}/{expCount}（{score}%）</Text>
+                  </div>
+                  {expCount > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {sc.skills_expected.map(sk => {
+                        const isRef = (sc.skills_referenced || []).includes(sk)
+                        return <Tag key={sk} color={isRef ? 'green' : 'red'} style={{ fontSize: 9 }}>{isRef ? '✓' : '✗'} {sk}</Tag>
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            }
             if (!mi || !mi.skills_analysis?.length) return null
             const scoreColor = mi.overall_score >= 80 ? '#52c41a' : mi.overall_score >= 50 ? '#faad14' : '#ff4d4f'
             return (
@@ -2225,7 +2339,7 @@ export default function WorkflowSimV2Tab() {
 
 
       {/* 流水线状态面板 */}
-      {pipeline && (
+      {false && pipeline && (
         <PipelinePanel
           pipeline={pipeline}
           fixRounds={fixRounds}
@@ -2347,7 +2461,7 @@ export default function WorkflowSimV2Tab() {
       )}
 
       {/* Claude 工作流水（jsonl 实时镜像）—— claude 原生存档的完整 thinking/tool_use/tool_result 流水 */}
-      {(simulating || jsonlLines.length > 0) && (
+      {false && (simulating || jsonlLines.length > 0) && (
         <Card
           size="small"
           title={
